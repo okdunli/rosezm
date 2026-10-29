@@ -34,7 +34,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, type Node as IrNode } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, type HandlerDialect } from './handler-ir.js';
@@ -45,6 +45,8 @@ export interface EmitPythonOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme and design tokens, merged under each page's own `<style>`. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -157,11 +159,15 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   await fs.promises.mkdir(path.join(out, 'pages'), { recursive: true });
 
   assetMap = await copyPublicAssets(root, path.join(out, 'assets'), warnings);
+  // CF: the site's own stylesheet, sanitized once for this target and merged
+  // UNDER every page's own <style> - the order a browser uses, so the page wins.
+  const globalCss = sanitizeFor('python', opts.globalCss ?? '');
   // Styles: each page compiles its own CSS (plus the component styles it can
   // reach) under its own scope, through the shared engine - two pages may both
   // define .rcard and a merged table would leak one page's border into the other.
   const compCss = components.map((c) => c.style ?? '').join('\n');
   const styles = [
+    ...(globalCss ? compileStyles(globalCss, warnings) : []),
     ...pages.flatMap((pg) => compileStyles([pg.style, compCss].filter((s) => s && s.trim()).join('\n'), warnings, pg.name)),
     ...compileStyles(SHELL_STYLES, warnings),
   ];
@@ -172,7 +178,7 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   await fs.promises.writeFile(path.join(out, 'rosezm.py'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pages', '__init__.py'), '', 'utf8');
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), renderPage(page, components, warnings, content, compCss, hoverStyles), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), renderPage(page, components, warnings, content, compCss, globalCss, hoverStyles), 'utf8');
   }
   await fs.promises.writeFile(path.join(out, 'app.py'), renderApp(pages), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, warnings), 'utf8');
@@ -337,7 +343,7 @@ function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value:
 }
 
 /** Tk widgets do not all accept the same options: a Frame has no font. */
-function filterDecls(decls: Array<{ key: string; value: string }>, kind: 'Frame' | 'Label' | 'Button' | 'Entry' | 'Text'): Array<{ key: string; value: string }> {
+function filterDecls(decls: Array<{ key: string; value: string }>, kind: 'Frame' | 'Label' | 'Button' | 'Entry' | 'Text' | 'Scale'): Array<{ key: string; value: string }> {
   const allowed: Record<string, string[]> = {
     Frame: ['bg', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'width', 'height'],
     Label: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'justify', 'wraplength', 'width', 'height'],
@@ -957,6 +963,7 @@ function renderPage(
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
   compCss: string,
+  globalCss: string,
   hoverStyles: Map<string, StyleModel> = new Map(),
 ): string {
   const facts = scanState(page.script);
@@ -980,10 +987,11 @@ function renderPage(
     return { name, init: rewriteContentReads(init, 'rose_content_list', 'rose_content_get', "''") };
   })];
   const knownBinds = new Set(binds.map((b) => b.name));
-  // R195: the page's own cascade. The page CSS, every component's CSS it can
-  // reach, and the shell's base theme resolve through the same engine the web
-  // build uses - the reference width decides an @media-guarded rule.
-  const pageCss = [page.style, compCss].filter((s) => s.trim()).join('\n');
+  // R195: the page's own cascade. The site's theme, the page CSS, every
+  // component's CSS it can reach, and the shell's base theme resolve through the
+  // same engine the web build uses - the reference width decides an
+  // @media-guarded rule. The theme comes first so the page's own `<style>` wins.
+  const pageCss = [globalCss, page.style, compCss].filter((s) => s.trim()).join('\n');
   const sheet = parseStylesheet([pageCss, SHELL_STYLES].join('\n'));
   // The same CSS is parsed by compileStyles above; reporting its warnings here
   // again would print every selector twice.

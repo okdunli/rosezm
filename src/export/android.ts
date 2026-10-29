@@ -39,6 +39,7 @@ import {
   mergeModels,
   elementStyleBinding,
   flexDirectionOf,
+  sanitizeFor,
   type StyleModel,
   type StyleSheet,
   type StyleSubject,
@@ -49,6 +50,8 @@ export interface EmitAndroidOptions {
   outDir: string;
   apiBase?: string;
   warnings: string[];
+  /** The site's own stylesheet - its theme, tokens and chrome - merged under each page's own <style>. */
+  globalCss?: string;
 }
 
 const PKG = 'dev.rosezm.app';
@@ -61,6 +64,9 @@ let tagStyles = new Map<string, StyleModel>();
 
 export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
+  // CF: the site's own stylesheet, sanitized once for this target - empty when the
+  // project ships no theme, and then every sheet below stays byte-identical.
+  const globalCss = sanitizeFor('android', opts.globalCss ?? '');
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'android');
   tagStyles = new Map<string, StyleModel>();
@@ -130,6 +136,10 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // The scope is the page's class name: two pages may both define `.rcard`
   // (the demo does - pink on home, green on about) and a merged table would
   // leak one page's card into the other's.
+  // CF: the site's sheet compiles FIRST and UNSCOPED, the way SHELL_STYLES does -
+  // a theme addresses global class names and element selectors, so a page scope
+  // would make every rule in it miss.
+  if (globalCss) for (const [k, v] of compileStyles(globalCss, warnings, fontMap)) styles.set(k, v);
   for (const pg of pages) for (const [k, v] of compileStyles(pg.style ?? '', warnings, fontMap, pg.cls)) styles.set(k, v);
   for (const [k, v] of compileStyles(SHELL_STYLES, warnings, fontMap)) styles.set(k, v);
   // The markdown collections, baked at export time so a page that reads them
@@ -145,10 +155,10 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // data and the kit merges them exactly like the cascade does.
   await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseTheme.kt'), renderRoseTheme(styles, fontMap), 'utf8');
   for (const comp of components) {
-    await fs.promises.writeFile(path.join(javaRoot, 'components', comp.cls + '.kt'), renderComponent(comp, styles, media, fontMap, warnings), 'utf8');
+    await fs.promises.writeFile(path.join(javaRoot, 'components', comp.cls + '.kt'), renderComponent(comp, styles, media, fontMap, warnings, globalCss), 'utf8');
   }
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(javaRoot, 'pages', page.cls + 'Page.kt'), renderPage(page, components, styles, media, fontMap, warnings, content), 'utf8');
+    await fs.promises.writeFile(path.join(javaRoot, 'pages', page.cls + 'Page.kt'), renderPage(page, components, styles, media, fontMap, warnings, content, globalCss), 'utf8');
   }
   await fs.promises.writeFile(path.join(javaRoot, 'RoseApp.kt'), renderApp(pages), 'utf8');
   await fs.promises.writeFile(path.join(javaRoot, 'MainActivity.kt'), renderActivity(), 'utf8');
@@ -1646,6 +1656,7 @@ function renderPage(
   fontMap: Map<string, string>,
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
+  globalCss: string,
 ): string {
   const facts = scanState(page.script);
   // `__rosezmContent` is a server-side bridge over the markdown collections. When
@@ -1737,7 +1748,7 @@ function renderPage(
     focusKeys: new Set([...styles.keys()].filter((k) => k.startsWith('__focus_'))),
     // R268: same exposure for the :active half.
     activeKeys: new Set([...styles.keys()].filter((k) => k.startsWith('__active_'))),
-    sheet: parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
+    sheet: parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
     ancestors: [],
     fontMap,
   };
@@ -3203,7 +3214,7 @@ function componentProps(script: string | null): Array<{ name: string; init: stri
     .map((m) => ({ name: m[1], init: m[2].trim() }));
 }
 
-function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, styles: Map<string, StyleModel>, media: Map<string, string>, fontMap: Map<string, string>, warnings: string[]): string {
+function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, styles: Map<string, StyleModel>, media: Map<string, string>, fontMap: Map<string, string>, warnings: string[], globalCss: string): string {
   const declared = componentProps(comp.script);
   const props = declared.map((p) => p.name);
   const ctx: AndroidCtx = {
@@ -3233,7 +3244,7 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
     focusKeys: new Set([...styles.keys()].filter((k) => k.startsWith('__focus_') && k.endsWith('__' + comp.cls))),
     // R268: same exposure for the component's :active halves.
     activeKeys: new Set([...styles.keys()].filter((k) => k.startsWith('__active_') && k.endsWith('__' + comp.cls))),
-    sheet: parseStylesheet([comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
+    sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
     ancestors: [],
     fontMap,
   };

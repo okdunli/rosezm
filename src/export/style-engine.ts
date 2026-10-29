@@ -1539,3 +1539,141 @@ export function classesUsedBy(sheet: StyleSheet, classes: string[]): string[] {
   for (const c of classes) out.add(c);
   return [...out];
 }
+
+/* ------------------------------------------------- global stylesheet (CF) */
+
+/**
+ * CF (BUG.md): the skin of a site - its theme sheet, its design tokens, the
+ * chrome every page sits in - had no way into an export. Each emitter read
+ * only the `<style>` block of the page it was emitting, so a structurally
+ * correct page tree came out in default colours, and the result reads as "a
+ * stack of native widgets" rather than as the app the author wrote.
+ *
+ * `globalCss` is the entry point (`ExportOptions.globalCss`, or
+ * `rosezm export <target> --css <path>`), and this is the gate it passes
+ * through: it strips what the target family provably cannot express, so a
+ * downstream project never has to rediscover the list. `electron` wraps the
+ * real web build and takes the sheet verbatim.
+ */
+const MINI_FAMILY = new Set(['weapp', 'qq', 'alipay', 'baidu', 'toutiao']);
+
+/** At-rules no native toolkit can evaluate. `@media` is kept - the engine
+ *  turns a min/max-width guard into a real variant. */
+const DROP_AT = /^@(font-face|import|charset|page|supports|layer|container)\b/i;
+/** Selectors no native tree can test. */
+const DROP_SELECTOR = /:has\(|:is\(|:where\(|::view-transition|::part\(|::slotted\(/i;
+/** A mini program adds the pseudo-elements its components never expose, and
+ *  `@font-face` is the well-known trap: it silently does nothing on a real
+ *  device while inflating the package. */
+const DROP_SELECTOR_MINI = /:has\(|:is\(|:where\(|::view-transition|::part\(|::slotted\(|::?(before|after|placeholder|selection|first-line|first-letter|marker)\b/i;
+
+function keepSelectors(head: string, mini: boolean): string {
+  const drop = mini ? DROP_SELECTOR_MINI : DROP_SELECTOR;
+  const kept: string[] = [];
+  // Split on top-level commas only: `:is(h1, h2)` and `:not(.a, .b)` carry
+  // commas of their own, and splitting inside them emits half a selector.
+  let depth = 0;
+  let part = '';
+  const flush = (): void => {
+    const sel = part.trim();
+    part = '';
+    if (!sel || drop.test(sel)) return;
+    // `:root` is where a theme keeps its design tokens; a mini program's
+    // document element is `page`.
+    kept.push(mini ? sel.replace(/:root\b/gi, 'page') : sel);
+  };
+  for (const ch of head) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) flush();
+    else part += ch;
+  }
+  flush();
+  return kept.join(', ');
+}
+
+/**
+ * Resolve `var(--x)` against the custom properties the sheet itself declares.
+ * A theme is mostly `:root { --brand: ... }` plus `var(--brand)` uses, and
+ * every native emitter reads colours as literals - an unresolved `var()` is
+ * simply a dropped colour. Four passes settle a token that points at another.
+ */
+function resolveVars(css: string): string {
+  if (!css.includes('var(')) return css;
+  const vars = new Map<string, string>();
+  for (const m of css.matchAll(/(--[\w-]+)\s*:\s*([^;{}]+)/g)) {
+    if (!vars.has(m[1]!)) vars.set(m[1]!, m[2]!.trim());
+  }
+  if (!vars.size) return css;
+  let out = css;
+  // shortcut: a fallback containing a nested var() is not followed - a token
+  // file that chains fallbacks more than four deep needs a real cascade here.
+  for (let pass = 0; pass < 4 && out.includes('var('); pass++) {
+    out = out.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name: string, fallback?: string) => vars.get(name) ?? (fallback ?? '').trim());
+  }
+  return out;
+}
+
+/** A block that only declares custom properties: the tokens a theme is built
+ *  from. A native emitter cannot read a variable, so once `resolveVars` has
+ *  inlined them the block carries nothing - and leaving it in makes every
+ *  emitter report `:root` as an out-of-subset selector, once per page. */
+function isVarsOnly(body: string): boolean {
+  const decls = body.split(';').map((s) => s.trim()).filter((s) => s.length > 0);
+  return decls.length > 0 && decls.every((d) => d.startsWith('--'));
+}
+
+export function sanitizeFor(target: string, css: string): string {
+  if (!css.trim() || target === 'electron') return css;
+  const mini = MINI_FAMILY.has(target);
+  const src = resolveVars(css.replace(/\/\*[\s\S]*?\*\//g, ''));
+  const out: string[] = [];
+  // Per nesting level: the head this level emitted ('' when the level is
+  // dropped) and the body gathered so far. A block's text goes to its parent's
+  // body, not straight to the output, so an `@media` still wraps its rules.
+  const heads: string[] = [];
+  const bodies: string[] = [];
+  let depth = 0;
+  let dropDepth = -1;
+  let text = '';
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') {
+      // The selector is what follows the last declaration or block, not all
+      // the text since the previous `{` - nested blocks write into the same run.
+      const cut = Math.max(text.lastIndexOf(';'), text.lastIndexOf('}'));
+      const head = text.slice(cut + 1);
+      const at = head.trim();
+      const kept = keepSelectors(head, mini);
+      if (depth > 0) bodies[depth - 1] += text.slice(0, cut + 1);
+      const dropping = dropDepth >= 0
+        || DROP_AT.test(at)
+        || (/^@media\b/i.test(at) && /\bprint\b/i.test(at))
+        || (!at.startsWith('@') && !kept);
+      if (dropping && dropDepth < 0) dropDepth = depth;
+      heads[depth] = dropping ? '' : (at.startsWith('@') ? at : kept) + '{';
+      bodies[depth] = '';
+      text = '';
+      depth++;
+      continue;
+    }
+    if (ch === '}') {
+      depth = Math.max(0, depth - 1);
+      const head = heads[depth] ?? '';
+      const body = (bodies[depth] ?? '') + text;
+      text = '';
+      if (dropDepth >= 0) {
+        if (dropDepth === depth) dropDepth = -1;
+      } else if (head && !(isVarsOnly(body) && !mini)) {
+        const piece = head + body + '}';
+        if (depth > 0) bodies[depth - 1] += piece;
+        else out.push(piece);
+      }
+      heads.length = depth;
+      bodies.length = depth;
+      continue;
+    }
+    text += ch;
+  }
+  return out.join('');
+}

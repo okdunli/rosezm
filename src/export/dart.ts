@@ -40,6 +40,7 @@ import {
   elementStyleBinding,
   flexDirectionOf,
   isFlexModel,
+  sanitizeFor,
   type StyleModel,
   type StyleSheet,
   type StyleSubject,
@@ -49,6 +50,8 @@ export interface EmitFlutterOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme and design tokens, joined under every page's own `<style>`. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -180,7 +183,13 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   // its own scope - two pages may both define .rcard (the demo does, pink on
   // the home page and green on about), and a merged table would leak one
   // page's border into the other's card.
+  // CF: the site's own theme sheet compiles UNSCOPED, the way SHELL_STYLES does
+  // - a theme targets global class names and bare elements, so a page scope
+  // would make every one of its rules miss - and FIRST, so the page's own
+  // `cls__scope` row shadows it exactly as a page's <style> wins in a browser.
+  const globalCss = sanitizeFor('flutter', opts.globalCss ?? '');
   const scopedStyles = [
+    ...(globalCss ? [compileStyles(globalCss, warnings)] : []),
     ...pages.flatMap((pg) => compileStyles(pg.style ?? '', warnings, pg.fileName)),
     ...components.flatMap((c) => compileStyles(c.style ?? '', warnings, c.name)),
     compileStyles(SHELL_STYLES, warnings),
@@ -213,12 +222,12 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   for (const comp of components) {
     await fs.promises.writeFile(
       path.join(out, 'lib', 'components', snake(comp.name) + '.dart'),
-      renderComponent(comp, warnings),
+      renderComponent(comp, warnings, globalCss),
       'utf8',
     );
   }
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'lib', 'pages', page.fileName + '.dart'), renderPage(page, components, warnings, content, allHoverKeys, allFocusKeys, allActiveKeys), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'lib', 'pages', page.fileName + '.dart'), renderPage(page, components, warnings, content, allHoverKeys, allFocusKeys, allActiveKeys, globalCss), 'utf8');
   }
   await fs.promises.writeFile(path.join(out, 'lib', 'main.dart'), renderMain(pages, components), 'utf8');
   await writeDeployScaffold('flutter', out, warnings);
@@ -1377,6 +1386,7 @@ function renderPage(
   hoverKeys: Set<string> = new Set(),
   focusKeys: Set<string> = new Set(),
   activeKeys: Set<string> = new Set(),
+  globalCss: string = '',
 ): string {
   const facts = scanState(page.script);
   // `__rosezmContent` is a server-side bridge over the markdown collections.
@@ -1425,7 +1435,9 @@ function renderPage(
     forms: collectForms(page.nodes),
     formSubmit: null,
     pageAction: pageActionOf(page.script),
-    sheet: parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
+    // The theme sheet goes in BEFORE the page's own <style>: same specificity,
+    // later order wins, which is the order a browser uses too.
+    sheet: parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
     scope: page.fileName,
     ancestors: [],
     hoverKeys,
@@ -1609,10 +1621,10 @@ ${methods}
 `;
 }
 
-function renderComponent(comp: { name: string; className: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, warnings: string[]): string {
+function renderComponent(comp: { name: string; className: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, warnings: string[], globalCss: string = ''): string {
   const styleClasses = new Set<string>();
   const propNames = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-  const body = emitChildren(comp.nodes, { warnings, file: comp.name, components: [], styleClasses, inText: false, stateNames: new Set(propNames), mapBinds: new Set(), inline: new Map<string, string>(), awaits: [], scriptConsts: new Map(), componentProps: new Set(propNames), sheet: parseStylesheet([comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')), scope: comp.name, ancestors: [], hoverKeys: new Set<string>() });
+  const body = emitChildren(comp.nodes, { warnings, file: comp.name, components: [], styleClasses, inText: false, stateNames: new Set(propNames), mapBinds: new Set(), inline: new Map<string, string>(), awaits: [], scriptConsts: new Map(), componentProps: new Set(propNames), sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')), scope: comp.name, ancestors: [], hoverKeys: new Set<string>() });
   const defaults = new Map<string, string>();
   for (const m of (comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^;\n]+)/g)) {
     defaults.set(m[1], dartLiteral(m[2].trim()));

@@ -24,7 +24,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
+import { elementStyleBinding, warnDynamicUnsupported, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
@@ -36,6 +36,8 @@ export interface EmitArkTsOptions {
   outDir: string;
   apiBase?: string;
   warnings: string[];
+  /** The site's own stylesheet - its theme, tokens and chrome - merged under each page's own <style>. */
+  globalCss?: string;
 }
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
@@ -44,6 +46,9 @@ const BOX_TAGS = new Set(['div', 'section', 'main', 'article', 'header', 'footer
 
 export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
+  // CF: the site's own stylesheet, sanitized once for this target - empty when the
+  // project ships no theme, and then every sheet below stays byte-identical.
+  const globalCss = sanitizeFor('arkts', opts.globalCss ?? '');
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'arkts');
   const pkgRoot = path.join(out, 'entry', 'src', 'main');
@@ -135,13 +140,17 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const compStyleRows: string[] = [];
   const pageTagRows: string[] = [];
   const compTagRows: string[] = [];
+  // CF: the site's sheet goes first, and into EVERY page's and component's
+  // compile - the way SHELL_STYLES already does. RoseStyles.ets is this target's
+  // only style table and every row in it is scoped, so a theme rule that rode in
+  // one scope only would miss all the others.
   for (const page of pages) {
-    const { rows, tagRows } = compileArkStyles([page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), page.struct, allFonts);
+    const { rows, tagRows } = compileArkStyles([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), page.struct, allFonts);
     if (rows) pageStyleRows.push(rows);
     if (tagRows) pageTagRows.push(tagRows);
   }
   for (const comp of components) {
-    const { rows, tagRows } = compileArkStyles([comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), comp.struct, allFonts);
+    const { rows, tagRows } = compileArkStyles([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), comp.struct, allFonts);
     if (rows) compStyleRows.push(rows);
     if (tagRows) compTagRows.push(tagRows);
   }
@@ -149,11 +158,11 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseModifier.ets'), renderRoseModifier(), 'utf8');
 
   for (const comp of components) {
-    const compSrc = renderComponent(comp, fontMap, warnings, kitExports);
+    const compSrc = renderComponent(comp, fontMap, warnings, kitExports, globalCss);
     await fs.promises.writeFile(path.join(etsRoot, 'components', comp.struct + '.ets'), compSrc, 'utf8');
   }
   for (const page of pages) {
-    const pageSrc = renderPage(page, components, media, vectors, fontMap, warnings, content, kitExports);
+    const pageSrc = renderPage(page, components, media, vectors, fontMap, warnings, content, kitExports, globalCss);
     // R256: the kit import rides a slot because only the finished body knows
     // which helpers the page calls - the placeholder is filled from the final
     // artifact, so nothing can be forgotten. roseData/roseAction/roseKv are
@@ -1052,9 +1061,9 @@ export class RoseModifier {
 `;
 }
 
-function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, fontMap: Map<string, string>, warnings: string[], kitExports: { values: Set<string>; types: Set<string> }): string {
+function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, fontMap: Map<string, string>, warnings: string[], kitExports: { values: Set<string>; types: Set<string> }, globalCss: string): string {
   const propNames = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-  const sheet = parseStylesheet([comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const sheet = parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
   for (const w of sheet.warnings) warnings.push(`arkts: component ${comp.name}: ${w}`);
   const ctx: ArkCtx = {
     warnings,
@@ -1232,6 +1241,7 @@ function renderPage(
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
   kitExports: { values: Set<string>; types: Set<string> },
+  globalCss: string,
 ): string {
   const facts = scanState(page.script);
   const serverGlobals = serverOnlyGlobals(page.script ?? '');
@@ -1259,7 +1269,7 @@ function renderPage(
   // it, and on a desktop build the action runs locally.
   let pageAction: string | null = null;
   try { pageAction = extractExports(page.script).actions[0]?.name ?? null; } catch { /* unparsable script keeps no action */ }
-  const sheet = parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const sheet = parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
   for (const w of sheet.warnings) warnings.push(`arkts: ${w}`);
   // R257: the page root IS the body. SHELL_STYLES feeds this sheet, but no
   // .rose node is ever `body`, so the shell's `body { padding: ... }` matched

@@ -27,7 +27,7 @@ import { join, relative, basename } from 'path';
 import { createContext, runInContext } from 'vm';
 import { exportProject, TARGETS } from '../src/export/index.js';
 import { buildProject } from '../src/compiler/index.js';
-import { parseStylesheet } from '../src/export/style-engine.js';
+import { parseStylesheet, sanitizeFor } from '../src/export/style-engine.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
 import { fileURLToPath } from 'node:url';
 
@@ -4716,6 +4716,65 @@ h2 { font-size: 40px; }
     assert(/function like\(e\) \{ return __action\("like", e\)/.test(body), 'weapp: the exported action becomes an HTTP call');
   }
 
+  // R292: a `style={...}` that CONCATENATES strings cannot ride a WXML
+  // mustache. WXML's data binding has no string concatenation - the engine
+  // rejects the whole expression, and the element then renders with whatever
+  // the attribute parser made of it (`font-size: undefinedpx` on a real
+  // device, which drops every declaration in that style attribute). The
+  // exporter must therefore COMPUTE such a style in the page script and let
+  // the template read the finished string.
+  {
+    const sRoot = join(scratch, 'styleconcat');
+    mkdirSync(join(sRoot, 'src/pages'), { recursive: true });
+    writeFileSync(join(sRoot, 'src/pages/index.rose'), `<script>
+  let items = $state([{ riseDelay: 0.05 }]);
+</script>
+
+{#each items as item}
+  <div class="card anim-rise" style={'animation-delay: ' + item.riseDelay + 's'}>{item.riseDelay}</div>
+{/each}
+`);
+    const dirW = join(scratch, 'styleconcat-out-weapp');
+    await exportProject('weapp', sRoot, { apiBase: 'http://x', outRoot: dirW });
+    const tpl = readFileSync(join(dirW, 'weapp/pages/index/index.wxml'), 'utf8');
+    // The template must NOT carry the concatenation: WXML's attribute binding
+    // cannot evaluate it, and the platform then drops the whole style.
+    assert(!/\{\{[^}]*\+[^}]*\}\}/.test(tpl), 'weapp: a concatenated style expression never rides a WXML mustache');
+    assert(!tpl.includes("'animation-delay: ' +"), 'weapp: the raw concatenation is gone from the template');
+    // It becomes the one form WXML understands: literal text around a
+    // mustache, with the each-scope read left as a plain data reference.
+    assert(tpl.includes('animation-delay: {{item.riseDelay}}s'), 'weapp: the concatenated style becomes literal text around a mustache');
+  }
+
+  // R292: the mini-program's WXSS engine does NOT resolve CSS custom
+  // properties. `page { --primary: #ff8c00 }` is dropped, and every
+  // `var(--primary)` then resolves to nothing - which the platform reports
+  // as `unsupported property: font-size: undefinedpx` on a real device, and
+  // which drops the whole declaration. The variables are resolved at export
+  // time instead.
+  {
+    const vRoot = join(scratch, 'cssvars');
+    mkdirSync(join(vRoot, 'src/pages'), { recursive: true });
+    writeFileSync(join(vRoot, 'src/pages/index.rose'), `<style>
+  page, :root {
+    --primary: #ff8c00;
+    --text-title: #1a1a1a;
+  }
+  .title { color: var(--text-title); font-size: var(--text-size, 28rpx); }
+  .card { background: var(--primary); }
+</style>
+
+<h1 class="title">Hello</h1>
+<div class="card">card</div>
+`);
+    const dirW = join(scratch, 'cssvars-out-weapp');
+    await exportProject('weapp', vRoot, { apiBase: 'http://x', outRoot: dirW });
+    const wxss = readFileSync(join(dirW, 'weapp/pages/index/index.wxss'), 'utf8');
+    assert(!/var\(--/.test(wxss), 'weapp: no var() survives into the WXSS - the platform cannot resolve CSS variables');
+    assert(wxss.includes('#1a1a1a') && wxss.includes('#ff8c00'), 'weapp: the custom property values are inlined into the declarations');
+    assert(/font-size:\s*28rpx/.test(wxss), 'weapp: a var() with a fallback keeps the fallback');
+  }
+
   // R291: the string + search family - join / split / indexOf / every /
   // startsWith / endsWith / toUpperCase / toLowerCase. JS has all eight, so a
   // real app writes them constantly, and every compiled target used to REFUSE
@@ -5139,6 +5198,62 @@ h2 { font-size: 40px; }
       assert(/#00ff00|0xFF00FF00/i.test(body) === !wechat, `${target}: the style else-branch is the complement`);
       assert(!/#ifdef|#endif/.test(body), `${target}: no marker comment survives into the emitted source`);
     }
+  }
+
+  // CF: the site's own stylesheet. A page's `<style>` is the only thing an
+  // emitter used to see, so a correct page tree came out unstyled - the export
+  // looked assembled rather than designed. `globalCss` is the entry point and
+  // `sanitizeFor` is the gate: the theme lands, and what a target cannot
+  // express is dropped by the framework instead of by every downstream.
+  {
+    const theme = ':root { --brand: #e11d48; }\n.cfcard { background: var(--brand); padding: 12px; }\n@font-face { font-family: cf; src: url(cf.woff2); }\n.cfbad:has(.y) { color: red; }\n@media print { .cfcard { display: none; } }\n';
+    const mini = sanitizeFor('weapp', theme);
+    assert(mini.includes('page{ --brand: #e11d48; }'), 'the theme keeps its design tokens (a page element is the mini program root)');
+    assert(mini.includes('background: #e11d48'), 'var(--brand) resolves before the emitter reads colours');
+    assert(!/font-face/.test(mini), '@font-face is dropped - it does nothing on a real device and inflates the package');
+    assert(!/cfbad|has\(/.test(mini), ':has() is dropped - a native tree cannot test it');
+    assert(!/print/.test(mini), '@media print is dropped');
+    const native = sanitizeFor('android', theme);
+    assert(native.includes('background: #e11d48') && !/font-face|cfbad/.test(native), 'the native family resolves the token and drops the same two blocks');
+    assert(!native.includes(':root'), 'a token-only :root block is dropped once the vars are inlined');
+    assert(sanitizeFor('electron', theme) === theme, 'electron wraps the real web build, so it takes the sheet verbatim');
+
+    const withTheme = async (target: 'weapp' | 'android' | 'python', css?: string) => {
+      const r = await exportProject(target, example, { apiBase: 'https://api.example.com', outRoot: join(scratch, `cf-${target}-${css ? 'on' : 'off'}`), globalCss: css });
+      return walk(r.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+    };
+    for (const target of ['weapp', 'android', 'python'] as const) {
+      const themed = await withTheme(target, theme);
+      assert(/cfcard/i.test(themed), `${target}: the theme's class reaches the emitted project`);
+      assert(/e11d48/i.test(themed), `${target}: the theme's colour reaches it resolved, not as var()`);
+      const plain = await withTheme(target);
+      assert(!/cfcard|e11d48/i.test(plain), `${target}: a project with no theme sheet is unchanged - the entry point is opt-in`);
+    }
+  }
+
+  // R292: an inline style built by concatenating strings. WXML's data binding
+  // has no concatenation: `{{'animation-delay: ' + d + 's'}}` is not evaluated
+  // badly, it is rejected, and the platform then drops the whole style
+  // attribute - on a real device the element loses EVERY inline declaration
+  // and the page comes up unstyled. The emitter has to write the value as
+  // literal text around mustaches instead.
+  {
+    const sProj = join(scratch, 'styleconcatproj');
+    mkdirSync(join(sProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(sProj, 'src/pages/index.rose'), `<script>
+  let d = $state(0.2);
+  let tint = $state('#ffffff');
+</script>
+<div>
+  <p style={'animation-delay: ' + d() + 's'}>a</p>
+  <p style={'color: ' + tint()}>b</p>
+</div>
+`);
+    const r = await exportProject('weapp', sProj, { apiBase: 'x', outRoot: join(scratch, 'styleconcat-out') });
+    const wxml = readFileSync(join(r.outDir, 'pages/index/index.wxml'), 'utf8');
+    assert(!/\{\{\s*['"][^}]*['"]\s*\+/.test(wxml), 'no concatenation survives inside a style mustache - the platform would drop the attribute');
+    assert(/animation-delay:\s*\{\{[^}]+\}\}s/.test(wxml), 'a concatenated declaration is rewritten as literal text around a mustache');
+    assert(/color:\s*\{\{[^}]+\}\}/.test(wxml), 'a declaration that ends in an expression is a plain mustache too');
   }
 
   console.log(`\nAll export checks passed - one source tree, ${result.pages.length} pages to WeChat, ${alipay.pages.length} to Alipay, ${flutter.pages.length} to Flutter/Dart, ${python.pages.length} to Python/Tkinter, ${arkts.pages.length} to HarmonyOS ArkTS, ${android.pages.length} to Android/Compose, ${xcode.pages.length} to Xcode/SwiftUI, ${java.pages.length} to Java/Swing, ${dotnet.pages.length} to .NET/WPF, ${cpp.pages.length} to C++/Qt; the Electron shell wraps the built site - ${checks} assertions.\nEvery target in the registry is ready - one .rose tree, every platform.`);

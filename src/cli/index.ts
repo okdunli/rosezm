@@ -2278,6 +2278,35 @@ async function check(): Promise<void> {
 /** `rosezm export <target|all> [dir] [--api <base>] [--out <dir>]`: compile the same
  *  source tree into a non-web runtime (0.2.0). The contract is that a construct
  *  which cannot map is WARNED about, never silently dropped. */
+/**
+ * `--css <path>`: the site's own stylesheet for the export. A file is read as
+ * it is; a directory contributes every `.css` under it (sorted, so the output
+ * is byte-stable). It is the one input the exporter cannot infer from a page:
+ * the theme that makes an export look like the site rather than like a stack
+ * of default widgets (CF).
+ */
+function readGlobalCss(cssPath: string | undefined): string | undefined {
+  if (!cssPath) return undefined;
+  const abs = path.resolve(cssPath);
+  try {
+    if (fs.statSync(abs).isDirectory()) {
+      const files: string[] = [];
+      const walk = (dir: string): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name.endsWith('.css')) files.push(full);
+        }
+      };
+      walk(abs);
+      return files.sort().map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+    }
+    return fs.readFileSync(abs, 'utf8');
+  } catch (err) {
+    throw new RoseError('E-EXPORT-CSS', `cannot read --css "${cssPath}" - ${err instanceof Error ? err.message : String(err)}`, { hint: 'pass a .css file or a directory of them' });
+  }
+}
+
 async function exportCmd(): Promise<void> {
   const { exportProject, isTarget, targetList, TARGETS } = await import('../export/index.js');
   // argv[0] is the command itself (`export`), argv[1] the target, argv[2] the dir.
@@ -2354,6 +2383,7 @@ async function exportCmd(): Promise<void> {
     outRoot: outRoot ? path.resolve(outRoot) : undefined,
     cloud: cloudMode ? true : undefined,
     cloudEnv: cloudEnvRaw,
+    globalCss: readGlobalCss(flag('--css')),
   });
   if (asJson) {
     process.stdout.write(`${JSON.stringify({
@@ -2427,4 +2457,4 @@ else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target> [dir] [--api <base>] [--out <dir>]` compiles the same pages into a mini program today, with the native targets on the way)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target> [dir] [--api <base>] [--out <dir>] [--css <file|dir>]` compiles the same pages into a mini program today, with the native targets on the way)');

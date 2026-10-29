@@ -73,6 +73,14 @@ export interface ExportOptions {
   cloud?: boolean;
   /** Cloud env id for `wx.cloud.init`; absent uses the dynamic current env. */
   cloudEnv?: string;
+  /**
+   * The site's own stylesheet - its theme, its design tokens, its global
+   * chrome. It is merged UNDER each page's own `<style>` (the page wins) and
+   * sanitized per target. Left unset, `exportProject` collects the stylesheet
+   * links of the root `_layout.rose` from `<project>/public/` - the sheet the
+   * browser itself would have loaded.
+   */
+  globalCss?: string;
 }
 
 export interface ExportResult {
@@ -141,6 +149,32 @@ async function auditDroppedEffects(target: TargetName, projectRoot: string, warn
   }
 }
 
+/**
+ * The stylesheet the browser would load for this project: whatever the root
+ * `_layout.rose` links with `<link rel="stylesheet" href="...">`, read from
+ * `public/`. A site's skin almost never lives in a `.rose` `<style>` block -
+ * it is a theme sheet next to the assets - and before this it had no way into
+ * an export at all (CF).
+ */
+async function discoverGlobalCss(root: string): Promise<string> {
+  let src = '';
+  try {
+    src = await fs.promises.readFile(path.join(root, 'src', 'pages', '_layout.rose'), 'utf8');
+  } catch {
+    return '';
+  }
+  const sheets: string[] = [];
+  for (const tag of src.match(/<link\b[^>]*>/gi) ?? []) {
+    if (!/rel\s*=\s*["']?stylesheet/i.test(tag)) continue;
+    const href = /href\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1];
+    if (!href || href.startsWith('data:') || /^(https?:)?\/\//.test(href)) continue;
+    try {
+      sheets.push(await fs.promises.readFile(path.join(root, 'public', href.replace(/^\//, '')), 'utf8'));
+    } catch { /* a link to a file the export does not carry - the web build's problem, not the exporter's */ }
+  }
+  return sheets.join('\n');
+}
+
 /** Export a Rose project to one target. Unsupported constructs are warnings, never silence. */
 export async function exportProject(target: TargetName, projectRoot: string, opts: ExportOptions = {}): Promise<ExportResult> {
   const info = TARGETS[target];
@@ -152,6 +186,7 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
   if (info.status !== 'ready') {
     throw new Error(`export target "${target}" is planned, not implemented yet - shipping targets today:\n${targetList()}`);
   }
+  const globalCss = opts.globalCss ?? (await discoverGlobalCss(projectRoot));
   await auditDroppedEffects(target, projectRoot, warnings);
   if (info.family === 'mini-program') {
 
@@ -162,6 +197,7 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
       apiBase: opts.apiBase,
       cloud: opts.cloud,
       cloudEnv: opts.cloudEnv,
+      globalCss,
       warnings,
     });
     const dir = path.join(outRoot, DIALECTS[target as MiniProgramTarget].dir);
@@ -225,7 +261,7 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'flutter') {
-    const result = await emitFlutter({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitFlutter({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'flutter');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({
       framework: 'rosezm',
@@ -238,49 +274,52 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'cpp') {
-    const result = await emitCpp({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitCpp({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'cpp');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'dotnet') {
-    const result = await emitDotnet({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitDotnet({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'dotnet');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'java') {
-    const result = await emitJava({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitJava({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'java');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'electron') {
+    // No globalCss here on purpose: the Electron shell wraps the real web
+    // build, which already carries `public/` and the layout's own <link> tags -
+    // passing the sheet again would style the same page twice.
     const result = await emitElectron({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'electron');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'xcode') {
-    const result = await emitSwift({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitSwift({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'xcode');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'android') {
-    const result = await emitAndroid({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitAndroid({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'android');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'arkts') {
-    const result = await emitArkTs({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitArkTs({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'arkts');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'python') {
-    const result = await emitPython({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const result = await emitPython({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'python');
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };

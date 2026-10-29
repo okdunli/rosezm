@@ -25,7 +25,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, wpfFill, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, type StringMethodSpell, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
@@ -37,6 +37,8 @@ export interface EmitDotnetOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme and design tokens, merged under each page's own `<style>`. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -125,20 +127,34 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
   await fs.promises.mkdir(path.join(out, 'Components'), { recursive: true });
 
   assetMap = await copyPublicAssets(root, path.join(out, 'Assets'), warnings);
+  // CF: the site's own stylesheet, sanitized once for this target and merged UNDER
+  // each page's and component's own <style> - the order a browser uses, so the
+  // page wins. It carries no scope: a theme speaks in global class names and
+  // element selectors, and the runtime falls back to the unscoped table.
+  const globalCss = sanitizeFor('dotnet', opts.globalCss ?? '');
   // Styles: each page compiles its own <style> against the shared shell - two
   // pages may both define .rcard (the demo does), and a merged table would
   // leak one page's border into the other's card.
   const shell = compileStyles(SHELL_STYLES, null, '', warnings);
+  // The theme is the sheet the browser loads first, so it layers UNDER every
+  // page's and component's own <style>. `order` restarts at 0 inside each parsed
+  // sheet, so the theme's rules are renumbered below zero: at equal specificity
+  // the page's own rule wins, instead of the tie falling to whichever of the two
+  // sheets happens to have fewer rules.
+  const theme = globalCss ? compileStyles(globalCss, null, '', warnings) : null;
+  const shared = theme
+    ? { rules: [...theme.sheet.rules.map((r, i, all) => ({ ...r, order: i - all.length })), ...shell.sheet.rules], warnings: [] }
+    : shell.sheet;
   const pageStyles = new Map<string, NetStyles>();
-  for (const pg of pages) pageStyles.set(pg.cls, compileStyles(pg.style ?? '', shell.sheet, pg.cls, warnings));
+  for (const pg of pages) pageStyles.set(pg.cls, compileStyles(pg.style ?? '', shared, pg.cls, warnings));
   const componentStyles = new Map<string, NetStyles>();
-  for (const comp of components) componentStyles.set(comp.cls, compileStyles(comp.style, shell.sheet, comp.cls, warnings));
+  for (const comp of components) componentStyles.set(comp.cls, compileStyles(comp.style, shared, comp.cls, warnings));
   const content = bakeContent(root);
   // The capabilities this project's pages ask for through useNative(...): the
   // kit's dispatch appears only when some page asked - a project that never
   // calls it ships the same kit it always did.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
-  await fs.promises.writeFile(path.join(out, 'RoseTheme.cs'), renderTheme([...pageStyles].map(([scope, styles]) => ({ scope, styles })), shell), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'RoseTheme.cs'), renderTheme([...pageStyles].map(([scope, styles]) => ({ scope, styles })), shell, theme), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseApp.cs'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'rosezmApp.csproj'), renderCsproj(), 'utf8');
@@ -352,7 +368,7 @@ function noteWpf(model: StyleModel, who: string, ctx: NetCtx): void {
   if (model.position) note('position', `position: ${model.position} on ${who} is dropped - the page is a stack of panels, so nothing leaves the flow`);
 }
 
-function renderTheme(pageStyles: Array<{ scope: string; styles: NetStyles }>, shell: NetStyles): string {
+function renderTheme(pageStyles: Array<{ scope: string; styles: NetStyles }>, shell: NetStyles, theme: NetStyles | null): string {
   const rows: string[] = [];
   // The :hover half lives in its own table: a state-bound class list resolves
   // through both, so `class={tone}` keeps its hover instead of losing it the
@@ -365,6 +381,9 @@ function renderTheme(pageStyles: Array<{ scope: string; styles: NetStyles }>, sh
   for (const page of pageStyles) {
     for (const [name, entry] of [...page.styles.classes.entries()].sort((a, b) => a[0].localeCompare(b[0]))) push(`${name}__${page.scope}`, entry);
   }
+  // The site's own stylesheet, then the shell: both are unscoped, so a later
+  // table entry for the same class name overrides the earlier one.
+  if (theme) for (const [name, entry] of [...theme.classes.entries()].sort((a, b) => a[0].localeCompare(b[0]))) push(name, entry);
   for (const [name, entry] of [...shell.classes.entries()].sort((a, b) => a[0].localeCompare(b[0]))) push(name, entry);
   return `namespace ${NS};
 

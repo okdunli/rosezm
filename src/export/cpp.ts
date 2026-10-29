@@ -22,7 +22,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, type Color, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
+import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type Color, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, qtFill, type SvgOp, type SvgShape } from './svg-path.js';
 import { literalOptions, nativeUsage, rewriteNativeCalls, type NativeCapability } from './native-api.js';
@@ -34,6 +34,9 @@ export interface EmitCppOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme, tokens and global chrome. Merged
+   *  under each page's own `<style>`, which wins the cascade. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -130,6 +133,13 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   // half) instead of a single-class table, so the cascade is the same one the
   // web build resolves.
   const styles = new Map<string, CppStyle>();
+  const globalCss = sanitizeFor('cpp', opts.globalCss ?? '');
+  // CF: the site's own sheet compiles FIRST and UNSCOPED, the way SHELL_STYLES
+  // does - a theme addresses global class names and element selectors, so a page
+  // scope would make every rule in it miss. Every element resolves through
+  // `cascadeFor`, so it also reaches the widgets through each file's own sheet,
+  // layered above the theme the way a browser loads the two.
+  if (globalCss) for (const [k, v] of compileStyles(globalCss, warnings)) styles.set(k, v);
   for (const pg of pages) warnCppDrops(pg.style ?? '', warnings);
   for (const pg of pages) for (const [k, v] of compileStyles(pg.style ?? '', warnings, pg.cls)) styles.set(k, v);
   for (const comp of components) {
@@ -148,10 +158,10 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   await fs.promises.writeFile(path.join(out, 'src', 'main.cpp'), renderMain([...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'CMakeLists.txt'), renderCMake(pages, components), 'utf8');
   for (const comp of components) {
-    await fs.promises.writeFile(path.join(out, 'src', 'components', comp.cls + 'View.cpp'), renderComponent(comp, styles, warnings, sheetFor(comp.style ?? '')), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'src', 'components', comp.cls + 'View.cpp'), renderComponent(comp, styles, warnings, sheetFor(comp.style ?? '', globalCss)), 'utf8');
   }
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'src', 'pages', page.cls + 'Page.cpp'), renderPage(page, components, styles, warnings, content, sheetFor(page.style ?? '')), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'src', 'pages', page.cls + 'Page.cpp'), renderPage(page, components, styles, warnings, content, sheetFor(page.style ?? '', globalCss)), 'utf8');
   }
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
   return {
@@ -346,10 +356,11 @@ function warnCppDrops(css: string, warnings: string[]): void {
   if (/box-shadow\s*:/.test(body)) warnings.push('cpp: box-shadow has no Qt equivalent - the widget paints flat');
 }
 
-/** The sheet of the file being emitted: its own `<style>` plus the shell's, so
- *  a shell rule can paint a page element the way it does in the browser. */
-function sheetFor(css: string): StyleSheet {
-  return parseStylesheet([css, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+/** The sheet of the file being emitted: the site's theme, then its own `<style>`,
+ *  then the shell's - so all three can paint a page element the way they do in
+ *  the browser, and the file's own rule wins a conflict with the theme. */
+function sheetFor(css: string, globalCss = ''): StyleSheet {
+  return parseStylesheet([globalCss, css, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
 }
 
 /** R257: CSS px sizes the widget in device-independent pixels - Qt's pixelSize,

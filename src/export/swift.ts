@@ -41,6 +41,7 @@ import {
   mergeModels,
   elementStyleBinding,
   flexDirectionOf,
+  sanitizeFor,
   type StyleModel,
   type StyleSheet,
   type StyleSubject,
@@ -50,6 +51,8 @@ export interface EmitSwiftOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme and design tokens, joined under every page's own `<style>`. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -127,7 +130,13 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // Styles: each page compiles its own <style> under its own scope - two
   // pages may both define .rcard (the demo does), and a merged table would
   // leak one page's border into the other's card.
+  // CF: the site's own theme sheet compiles UNSCOPED, the way SHELL_STYLES does
+  // - a theme targets global class names and bare elements, so a page scope
+  // would make every one of its rules miss - and first in the map, so a later
+  // equal key (a page's `cls__view`, or the shell) wins the overwrite.
+  const globalCss = sanitizeFor('xcode', opts.globalCss ?? '');
   const styles = new Map<string, StyleModel>();
+  if (globalCss) for (const [k, v] of compileStyles(globalCss, warnings, fontMap)) styles.set(k, v);
   for (const pg of pages) for (const [k, v] of compileStyles(pg.style ?? '', warnings, fontMap, pg.view)) styles.set(k, v);
   for (const comp of components) for (const [k, v] of compileStyles(comp.style, warnings, fontMap, comp.view)) styles.set(k, v);
   for (const [k, v] of compileStyles(SHELL_STYLES, warnings, fontMap)) styles.set(k, v);
@@ -139,10 +148,10 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseTheme.swift'), renderTheme(styles, fontMap), 'utf8');
   for (const comp of components) {
-    await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap), 'utf8');
+    await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap, globalCss), 'utf8');
   }
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(appDir, 'Pages', page.view + '.swift'), renderPage(page, components, assets, vectors, warnings, content, fontMap), 'utf8');
+    await fs.promises.writeFile(path.join(appDir, 'Pages', page.view + '.swift'), renderPage(page, components, assets, vectors, warnings, content, fontMap, globalCss), 'utf8');
   }
   await fs.promises.writeFile(path.join(appDir, 'RoseRootView.swift'), renderRoot(pages), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'rosezmApp.swift'), renderApp(), 'utf8');
@@ -1438,6 +1447,7 @@ function renderPage(
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
   fontMap: Map<string, string>,
+  globalCss: string = '',
 ): string {
   const facts = scanState(page.script);
   // `__rosezmContent` is a server-side bridge over the markdown collections.
@@ -1482,7 +1492,9 @@ function renderPage(
     components,
     lines: [],
     depth: 4,
-    sheet: parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
+    // CF: the theme sheet joins the page's cascade FIRST - same specificity,
+    // later order wins, which is the order a browser uses too.
+    sheet: parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
     ancestors: [],
     fontMap,
     assets,
@@ -1504,7 +1516,7 @@ function renderPage(
     // scoping compileStyles uses - the class list is resolved against ctx.file.
     hoverKeys: (() => {
       const keys = new Set<string>();
-      for (const rule of parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
+      for (const rule of parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
         if (!rule.hover) continue;
         const last = rule.parts[rule.parts.length - 1];
         for (const cls of last.classes) keys.add(`__hover_${cls}__${page.view}`);
@@ -1514,7 +1526,7 @@ function renderPage(
     // R259: same derivation for the :focus halves.
     focusKeys: (() => {
       const keys = new Set<string>();
-      for (const rule of parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
+      for (const rule of parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
         if (!rule.focus) continue;
         const last = rule.parts[rule.parts.length - 1];
         for (const cls of last.classes) keys.add(`__focus_${cls}__${page.view}`);
@@ -1524,7 +1536,7 @@ function renderPage(
     // R269: same derivation for the :active halves.
     activeKeys: (() => {
       const keys = new Set<string>();
-      for (const rule of parseStylesheet([page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
+      for (const rule of parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
         if (!rule.active) continue;
         const last = rule.parts[rule.parts.length - 1];
         for (const cls of last.classes) keys.add(`__active_${cls}__${page.view}`);
@@ -3142,7 +3154,7 @@ function componentProps(script: string | null): Array<{ name: string; init: stri
     .map((m) => ({ name: m[1], init: m[2].trim() }));
 }
 
-function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, assets: Map<string, string>, warnings: string[], fontMap: Map<string, string>): string {
+function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, assets: Map<string, string>, warnings: string[], fontMap: Map<string, string>, globalCss: string = ''): string {
   const props = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
   const ctx: SwiftCtx = {
     warnings,
@@ -3152,7 +3164,7 @@ function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; sc
     components: [],
     lines: [],
     depth: 3,
-    sheet: parseStylesheet([comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
+    sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
     ancestors: [],
     fontMap,
     assets,

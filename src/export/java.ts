@@ -24,7 +24,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
+import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods, type StringMethodSpell } from './state-ops.js';
@@ -36,6 +36,9 @@ export interface EmitJavaOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
+  /** The site's own stylesheet - its theme, tokens and global chrome. Merged
+   *  under each page's own `<style>`, which wins the cascade. */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -132,11 +135,17 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   // Styles: each page compiles its own <style> under its own scope - two
   // pages may both define .rcard (the demo does), and a merged table would
   // leak one page's border into the other's card.
+  const globalCss = sanitizeFor('java', opts.globalCss ?? '');
   const styles = new Map<string, JavaStyle>();
   const sheets = new Map<string, StyleSheet>();
+  // CF: the site's own sheet compiles FIRST and UNSCOPED, the way SHELL_STYLES
+  // does - a theme addresses global class names and element selectors, so a page
+  // scope would make every rule in it miss. Each page's own `<style>` is layered
+  // over it again below, which is the order a browser loads the two in.
+  if (globalCss) for (const [k, v] of compileStyles(parseStylesheet(globalCss), globalCss, warnings)) styles.set(k, v);
   for (const pg of pages) warnJavaDrops(pg.style ?? '', warnings);
   for (const pg of pages) {
-    const sheet = sheetFor(pg.style ?? '');
+    const sheet = sheetFor(pg.style ?? '', globalCss);
     sheets.set(pg.cls, sheet);
     for (const [k, v] of compileStyles(sheet, pg.style ?? '', warnings, pg.cls)) styles.set(k, v);
   }
@@ -145,7 +154,7 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   // while the key resolved to nothing and the widget rendered unstyled.
   for (const comp of components) {
     warnJavaDrops(comp.style, warnings);
-    const sheet = sheetFor(comp.style);
+    const sheet = sheetFor(comp.style, globalCss);
     sheets.set(comp.cls, sheet);
     for (const [k, v] of compileStyles(sheet, comp.style, warnings, comp.cls)) styles.set(k, v);
   }
@@ -396,10 +405,11 @@ function warnJavaDrops(css: string, warnings: string[]): void {
   if (/letter-spacing\s*:/.test(body)) warnings.push('java: letter-spacing has no Swing glyph equivalent - dropped');
 }
 
-/** The sheet of the file being emitted: its own `<style>` plus the shell's, so
- *  a shell rule can paint a page element the way it does in the browser. */
-function sheetFor(css: string): StyleSheet {
-  return parseStylesheet([css, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+/** The sheet of the file being emitted: the site's theme first, then its own
+ *  `<style>`, then the shell's, so both reach a page element the way they do in
+ *  the browser and the file's own rule wins a conflict with the theme. */
+function sheetFor(css: string, globalCss = ''): StyleSheet {
+  return parseStylesheet([globalCss, css, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
 }
 
 /** Every class the sheet names, in source order - the keys of the theme table. */

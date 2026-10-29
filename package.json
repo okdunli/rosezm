@@ -29,15 +29,27 @@
   },
   "exports": {
     "./edge": "./dist-cli/edge.mjs",
-    "./runtime": "./dist-cli/runtime.mjs",
-    "./compiler": "./dist-cli/compiler.mjs",
-    "./export": "./dist-cli/export.mjs",
+    "./runtime": {
+      "types": "./src/types/runtime.d.ts",
+      "default": "./dist-cli/runtime.mjs"
+    },
+    "./compiler": {
+      "types": "./src/types/compiler.d.ts",
+      "default": "./dist-cli/compiler.mjs"
+    },
+    "./export": {
+      "types": "./src/types/export.d.ts",
+      "default": "./dist-cli/export.mjs"
+    },
     "./test": "./dist-cli/test.mjs"
   },
   "files": [
     "dist-cli",
     "src/FRAMEWORK_VERSION",
     "src/types/rosezm.d.ts",
+    "src/types/runtime.d.ts",
+    "src/types/compiler.d.ts",
+    "src/types/export.d.ts",
     "src/cli/content.ts",
     "src/cli/edge.ts",
     "src/cli/hot-vary.ts",

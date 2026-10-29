@@ -24,7 +24,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
 import { inlineFontFaces, kvDeclarations, kvCallable, serverOnlyGlobals, bakeContent, rewriteThrowNew, renderWarningSection, callifyBareReads, rewriteNullish } from './state-ops.js';
-import { objectEntriesOf, literalTruth, cssLiteralValue, cssPropOf } from './style-engine.js';
+import { objectEntriesOf, literalTruth, cssLiteralValue, cssPropOf, sanitizeFor } from './style-engine.js';
 import { rewriteStateWrites, setStateSpell } from '../compiler/state-writes.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, nativeManifestEntries } from './native-api.js';
 
@@ -161,6 +161,12 @@ export interface EmitMiniProgramOptions {
    * the same first-paint-with-data story the web build's prerender tells.
    */
   seed?: Record<string, unknown>;
+  /**
+   * The site's own stylesheet - its theme, its design tokens, its global
+   * chrome. It is merged UNDER each page's and component's own `<style>` (the
+   * page wins), and sanitized once per dialect.
+   */
+  globalCss?: string;
   warnings: string[];
 }
 
@@ -202,6 +208,10 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, dialect.dir);
   const pagesDir = path.join(root, 'src', 'pages');
+  // The site's skin, sanitized once for this dialect: every sheet below (app,
+  // page, component) shares this string and puts its own rules AFTER it, so a
+  // page's `<style>` still wins the cascade the way it does in a browser.
+  const globalCss = sanitizeFor(opts.target, opts.globalCss ?? '');
   // The markdown collections, baked at export time: a page that reads
   // __rosezmContent gets the real data instead of an unresolved global.
   const content = bakeContent(root);
@@ -312,7 +322,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     const tag = camelToKebab(comp.name);
     usingComponents.set(tag, `/components/${comp.name}/${comp.name}`);
     compMap.set(comp.name, comp);
-    await writeComponent(out, root, dialect, opts.target, comp, compMap, warnings);
+    await writeComponent(out, root, dialect, opts.target, comp, compMap, warnings, globalCss);
   }
 
   // Web-shaped route table: '/postDetail/:id' -> the exported page dir. A page
@@ -349,7 +359,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   for (const page of pages) {
     const nodes = applyLayouts(page.nodes, page.layoutChain);
     const style = [page.style, ...page.layoutChain.map((l) => l.style)].filter((s): s is string => !!s).join('\n');
-    await writePage(out, root, dialect, opts.target, page, nodes, style, usingComponents, compMap, warnings, contentBaked);
+    await writePage(out, root, dialect, opts.target, page, nodes, style, globalCss, usingComponents, compMap, warnings, contentBaked);
     pageList.push(`pages/${page.name}/${page.name}`);
   }
 
@@ -381,7 +391,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   // body/button/a/.rh/.rb/.rn/.rf, so the missing rules ship once here, in
   // app-level CSS (unscoped, targeting the mapped tags); page stylesheets
   // stay scoped and never re-declare them.
-  await fs.promises.writeFile(path.join(out, 'app.' + dialect.style), ELEMENT_TYPOGRAPHY_CSS + '\n' + filterShellStyles(SHELL_STYLES) + 'page { background: #ffffff; }\n', 'utf8');
+  await fs.promises.writeFile(path.join(out, 'app.' + dialect.style), ELEMENT_TYPOGRAPHY_CSS + (globalCss ? '\n' + globalCss + '\n' : '\n') + filterShellStyles(SHELL_STYLES) + 'page { background: #ffffff; }\n', 'utf8');
   if (opts.target === 'weapp') {
     // The appid decides whether a phone can even run the build: a
     // 'touristappid' project cannot use cloud development or preview on a real
@@ -788,6 +798,8 @@ async function writePage(
   page: PageFile,
   nodes: IrNode[],
   style: string | null,
+  /** The site's own sanitized stylesheet; it goes in unscoped, ahead of `style`. */
+  globalCss: string,
   usingComponents: Map<string, string>,
   compFiles: Map<string, ComponentFile>,
   warnings: string[],
@@ -843,7 +855,11 @@ async function writePage(
   }
   await fs.promises.writeFile(path.join(dir, page.name + '.json'), JSON.stringify(pageJson, null, 2) + '\n', 'utf8');
   const animCss = [...ctx.animations.entries()].map(([cls, params]) => animationCss(cls.replace(/^rf-in-/, ''), params.duration, params.delay)).filter(Boolean).join('\n\n');
-  await fs.promises.writeFile(path.join(dir, page.name + '.' + dialect.style), inlineFonts(scopeCss(style ?? '', page.scope), root, ctx.warnings, page.file) + (animCss ? '\n\n' + animCss + '\n' : ''), 'utf8');
+  // A theme sheet rides in unscoped: its selectors are global class names and
+  // element selectors (a scoped `.rose-page .card` would match nothing), and it
+  // is written first so the page's own rules override it.
+  const pageCss = (globalCss ? globalCss + '\n' : '') + resolveCssVars(inlineFonts(scopeCss(style ?? '', page.scope), root, ctx.warnings, page.file), ctx.warnings, page.file);
+  await fs.promises.writeFile(path.join(dir, page.name + '.' + dialect.style), pageCss + (animCss ? '\n\n' + animCss + '\n' : ''), 'utf8');
   const js = await buildPageJs(page, facts, ctx, mergedScript, contentBaked);
   await fs.promises.writeFile(path.join(dir, page.name + '.' + dialect.js), js, 'utf8');
 }
@@ -948,7 +964,7 @@ export function activeClassOf(selector: string): string {
   return `__a${selector.replace(/[^\w]/g, '_')}`;
 }
 
-async function writeComponent(out: string, root: string, dialect: Dialect, target: MiniProgramTarget, comp: ComponentFile, compFiles: Map<string, ComponentFile>, warnings: string[]): Promise<void> {
+async function writeComponent(out: string, root: string, dialect: Dialect, target: MiniProgramTarget, comp: ComponentFile, compFiles: Map<string, ComponentFile>, warnings: string[], globalCss: string): Promise<void> {
   const dir = path.join(out, 'components', comp.name);
   await fs.promises.mkdir(dir, { recursive: true });
   const ctx = new EmitContext(warnings, comp.file);
@@ -969,7 +985,11 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
   const scopedTemplate = `<view class="${scopeClass(comp.scope)}">\n${template}\n</view>`;
   await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.tpl), scopedTemplate + '\n', 'utf8');
   await fs.promises.writeFile(path.join(dir, comp.name + '.json'), JSON.stringify({ component: true }, null, 2) + '\n', 'utf8');
-  await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.style), inlineFonts(scopeCss(comp.style ?? '', comp.scope), root, warnings, comp.file), 'utf8');
+  // A custom component is style-isolated: app.<style> never reaches inside it,
+  // so the theme has to be written here too - unscoped, ahead of the component's
+  // own rules, the same way the app sheet carries it.
+  const compCss = (globalCss ? globalCss + '\n' : '') + resolveCssVars(inlineFonts(scopeCss(comp.style ?? '', comp.scope), root, warnings, comp.file), warnings, comp.file);
+  await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.style), compCss, 'utf8');
   const propsObj = props.map((p) => `${p.name}: ${propertyDeclaration(p.init)}`).join(',\n    ');
   // R259: the component file is the component's own <script>, not a shell -
   // properties carry the props, data the $state fields the template renders,
@@ -1525,6 +1545,27 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
   const pushStyleExpr = (code: string): void => {
     const entries = objectEntriesOf(code);
     if (!entries) {
+      // R292: a style that CONCATENATES strings cannot ride a mustache -
+      // WXML's data binding has no string concatenation. The expression is
+      // split into its literal text and its dynamic parts instead, and the
+      // result is the one form WXML understands: `prop: {{value}}suffix`.
+      // (The old shape - `{{'animation-delay: ' + item.delay + 's'}}` - was
+      // rejected by the platform's parser, which then dropped the whole
+      // style attribute: on a real device the element lost every inline
+      // declaration and the page came up unstyled.)
+      const mixed = splitConcatStyle(code);
+      if (mixed) {
+        styles.push(mixed);
+        return;
+      }
+      // A concatenation that could not be split (a `+` inside one of its
+      // operands) cannot ride a mustache: the platform rejects the whole
+      // attribute and drops the element's inline style. It is hoisted into
+      // the page script instead, where the concatenation is ordinary JS.
+      if (hasStringConcat(code)) {
+        styles.push(`{{${hoist(code, ctx)}}}`);
+        return;
+      }
       styles.push(`{{${exprOf(code, ctx)}}}`);
       return;
     }
@@ -1819,6 +1860,120 @@ function mixedExpr(parts: Array<{ kind: 'text'; value: string } | { kind: 'expr'
   return parts.map((p) => (p.kind === 'text' ? `'${p.value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'` : `(${exprOf(p.value, ctx)})`)).join(' + ');
 }
 
+/**
+ * R292: split a style expression that CONCATENATES strings into the shape
+ * WXML can evaluate: literal text around mustaches.
+ *
+ * WXML's data binding has no string concatenation. `{{'animation-delay: ' +
+ * item.delay + 's'}}` is not "an expression the engine evaluates badly" - the
+ * platform rejects it and then drops the whole style attribute, which on a
+ * real device leaves the element with none of its inline declarations (the
+ * page comes up unstyled). The same value written as `animation-delay:
+ * {{item.delay}}s` is a plain mustache - the one form WXML understands.
+ *
+ * Returns null when the expression is not a concatenation of literals and
+ * simple expressions, so the caller can fall back to the ordinary path.
+ */
+function splitConcatStyle(code: string): string | null {
+  const src = code.trim();
+  // The expression must be a chain of `+`-separated operands.
+  if (!src.includes('+')) return null;
+  const parts: Array<{ kind: 'text'; value: string } | { kind: 'expr'; value: string }> = [];
+  let i = 0;
+  let buf = '';
+  const flushText = (): void => {
+    if (buf.trim()) { parts.push({ kind: 'text', value: buf }); buf = ''; }
+    else buf = '';
+  };
+  while (i < src.length) {
+    const ch = src[i]!;
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      let text = '';
+      while (j < src.length) {
+        if (src[j] === '\\') { text += src[j + 1] ?? ''; j += 2; continue; }
+        if (src[j] === ch) break;
+        text += src[j];
+        j++;
+      }
+      if (j >= src.length) return null;
+      flushText();
+      parts.push({ kind: 'text', value: text });
+      i = j + 1;
+      continue;
+    }
+    if (ch === '(') {
+      // A parenthesised expression: keep it whole.
+      let depth = 1;
+      let j = i + 1;
+      while (j < src.length && depth > 0) {
+        if (src[j] === '(') depth++;
+        else if (src[j] === ')') depth--;
+        if (depth > 0) j++;
+      }
+      if (depth !== 0) return null;
+      flushText();
+      parts.push({ kind: 'expr', value: src.slice(i + 1, j) });
+      i = j + 1;
+      continue;
+    }
+    if (ch === '+') {
+      i++;
+      // Skip the spaces around the operator.
+      while (i < src.length && /\s/.test(src[i]!)) i++;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      // A bare read (`item.riseDelay`, `state.x`, `count`) is an operand.
+      let j = i;
+      while (j < src.length && /[\w$.]/.test(src[j]!)) j++;
+      // A call - `fn(a, b)` - is an operand too, but its arguments may hold a
+      // `+` of their own, so the whole call is one piece.
+      if (src[j] === '(') {
+        let depth = 1;
+        let k = j + 1;
+        while (k < src.length && depth > 0) {
+          if (src[k] === '(') depth++;
+          else if (src[k] === ')') depth--;
+          if (depth > 0) k++;
+        }
+        if (depth !== 0) return null;
+        flushText();
+        parts.push({ kind: 'expr', value: src.slice(i, k + 1) });
+        i = k + 1;
+        continue;
+      }
+      flushText();
+      parts.push({ kind: 'expr', value: src.slice(i, j) });
+      i = j;
+      continue;
+    }
+    buf += ch;
+    i++;
+  }
+  flushText();
+  if (!parts.length) return null;
+  // At least one literal and one expression - otherwise this was a single
+  // expression and the ordinary path is right.
+  if (!parts.some((p) => p.kind === 'text') || !parts.some((p) => p.kind === 'expr')) return null;
+  // Every expression must be a plain read or call - a `+` inside one would
+  // still be a concatenation the platform cannot evaluate.
+  for (const p of parts) {
+    if (p.kind !== 'expr') continue;
+    const e = p.value.trim();
+    if (!e) return null;
+    if (e.includes('+')) return null;
+  }
+  // The result must be a style declaration, not an arbitrary string: a CSS
+  // property name, a colon, and a value.
+  const text = parts.map((p) => (p.kind === 'text' ? p.value : `\u0000${p.value}\u0000`)).join('');
+  if (!/^[\s-]*[a-zA-Z-]+\s*:/.test(text)) return null;
+  return parts
+    .map((p) => (p.kind === 'text' ? p.value : `{{${p.value.trim()}}}`))
+    .join('')
+    .trim();
+}
+
 /** State reads in a WXML binding are bare names: `count()` -> `count`, but only
  *  for names the script declared as state - `weather()` is a function call and
  *  is hoisted instead of silently resolving to `undefined`. */
@@ -1933,6 +2088,42 @@ function isWxmlSafe(code: string, scriptConsts?: Map<string, string>): boolean {
   return true;
 }
 
+/**
+ * Whether the expression concatenates strings - a `+` whose left or right
+ * operand is a string literal. The scanner skips string contents, so a `+`
+ * inside a quoted string is not an operator.
+ */
+function hasStringConcat(code: string): boolean {
+  const src = code;
+  let i = 0;
+  let prevWasStr = false;
+  let prevEnd = -1;
+  while (i < src.length) {
+    const ch = src[i]!;
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === quote) break;
+        j++;
+      }
+      // A `+` between this literal and whatever follows concatenates.
+      let k = j + 1;
+      while (k < src.length && /\s/.test(src[k]!)) k++;
+      if (src[k] === '+') return true;
+      // ...and so does a `+` between whatever precedes it and this literal.
+      if (prevEnd >= 0 && src.slice(prevEnd, i).trim() === '+' && prevWasStr) return true;
+      prevWasStr = true;
+      prevEnd = j + 1;
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 function escapeText(s: string): string {
   const t = s.replace(/[ \t]*\n\s*/g, '\n');
   if (!t.trim()) return '';
@@ -1964,6 +2155,48 @@ function inlineFonts(css: string, root: string, warnings: string[], file: string
     warnings.push(`${file}: font-family '${s.family}' could not be inlined (${s.reason}) - the mini-program will render the system default`);
   }
   return inlined;
+}
+
+/**
+ * R292: the mini-program's WXSS engine does NOT resolve CSS custom
+ * properties. `page { --primary: #ff8c00 }` and `:root { --x: 1 }` are
+ * dropped on the floor, and every `var(--x)` then resolves to nothing - which
+ * the platform reports as `unsupported property: font-size: undefinedpx`
+ * (a real device drops the whole declaration; DevTools' WebView is lenient
+ * and shows the page styled, so the bug only appears on a real device).
+ *
+ * The variables are therefore resolved HERE, at export time: every
+ * `--name: value` declaration is collected, and every `var(--name)` is
+ * replaced by the value. A variable the sheet never declares is left alone
+ * (and reported), because a silent empty string would be worse than the
+ * platform's own diagnostic.
+ */
+function resolveCssVars(css: string, warnings: string[], file: string): string {
+  if (!css.includes('var(')) return css;
+  // Collect the declarations: `--name: value;` - the value runs to the next
+  // `;` or the end of the block, and a custom property may hold anything.
+  const vars = new Map<string, string>();
+  for (const m of css.matchAll(/(--[\w-]+)\s*:\s*([^;{}]+)/g)) {
+    const name = m[1]!;
+    if (vars.has(name)) continue;
+    vars.set(name, m[2]!.trim());
+  }
+  if (!vars.size) {
+    warnings.push(`${file}: the stylesheet uses var(--x) but declares no custom property - the mini-program cannot resolve CSS variables`);
+    return css;
+  }
+  const missing = new Set<string>();
+  const out = css.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (whole, name: string, fallback?: string) => {
+    const v = vars.get(name);
+    if (v !== undefined) return v;
+    if (fallback !== undefined) return fallback.trim();
+    missing.add(name);
+    return whole;
+  });
+  for (const name of missing) {
+    warnings.push(`${file}: ${name} is never declared - the mini-program cannot resolve CSS variables, so the declaration using it is dropped`);
+  }
+  return out;
 }
 export function scopeCss(css: string, scope: string): string {
   if (!css.trim()) return '';
