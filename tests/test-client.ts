@@ -1734,4 +1734,57 @@ function pick2(): void { $setState('sel', 2); }
   rmSync(reuseOut, { recursive: true, force: true });
 }
 
+// BUG.md CB: an {#if} inside an <svg> - the branch re-renders on a state flip,
+// and the re-mounted <text> must land in the SVG namespace (template.innerHTML parses in the HTML one; an HTML <text> inside an <svg> never renders).
+{
+  const svgRoot = join(tmpdir(), 'rosezm-svg-src');
+  rmSync(svgRoot, { recursive: true, force: true });
+  mkdirSync(join(svgRoot, 'src', 'pages'), { recursive: true });
+  writeFileSync(join(svgRoot, 'src', 'pages', 'index.rose'), `<script>
+let known = $state(false);
+function flip(): void { $setState('known', !known()); }
+</script>
+
+<svg viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="40"></circle>
+  {#if known}
+    <text x="50" y="50">known</text>
+  {:else}
+    <text x="50" y="50">--</text>
+  {/if}
+</svg>
+<button type="button" on:click={flip}>flip</button>
+`);
+  const { buildProject } = await import('../src/compiler/index.js');
+  const svgOut = join(tmpdir(), 'rosezm-svg-dist');
+  rmSync(svgOut, { recursive: true, force: true });
+  await buildProject(svgRoot, svgOut);
+  const svgServer = await import(pathToFileURL(join(svgOut, 'server.js')).href);
+  const svgHome = await svgServer.renderPage('/');
+  document.getElementById('__rosezm_state')?.remove();
+  const svgState = document.createElement('script');
+  svgState.id = '__rosezm_state';
+  svgState.textContent = svgHome.state;
+  document.body.appendChild(svgState);
+  appEl.innerHTML = svgHome.html;
+  const svgClient = await import(pathToFileURL(join(svgOut, 'client.js')).href);
+  await svgClient.start(appEl, '/', true);
+  const svgEl = appEl.querySelector('svg[viewBox="0 0 100 100"]')!;
+  assert(svgEl != null, 'the svg rendered');
+  const before = [...svgEl.querySelectorAll('text')];
+  assert(before.length === 1 && before[0].textContent === '--', 'the else branch is the SSR content');
+  assert(before[0].namespaceURI === 'http://www.w3.org/2000/svg', 'the SSR branch is in the SVG namespace');
+  (appEl.querySelector('[data-on-click]')! as any).click();
+  await tick();
+  const after = [...svgEl.querySelectorAll('text')];
+  assert(after.length === 1 && after[0].textContent === 'known', 'the if branch took over after the state flip');
+  assert(
+    after[0].namespaceURI === 'http://www.w3.org/2000/svg',
+    `the flipped branch keeps the SVG namespace (got ${after[0].namespaceURI})`,
+  );
+  rmSync(svgRoot, { recursive: true, force: true });
+  rmSync(svgOut, { recursive: true, force: true });
+}
+
 console.log(`\nAll client pipeline checks passed - ${checks} assertions.`);
+

@@ -503,6 +503,22 @@ export function tpl(html: string): DocumentFragment {
   return t.content.cloneNode(true) as DocumentFragment;
 }
 
+// CB (BUG.md): a block whose markers live inside an <svg> re-renders into the
+// SVG namespace, but template.innerHTML parses in the HTML one - a re-rendered
+// <text>/<circle> arrived as HTMLUnknownElement and silently never rendered.
+// This parses the fragment through the parent's own namespace when the parent
+// is foreign content, and falls back to the HTML path otherwise.
+export function tplFor(parent: Node, html: string): DocumentFragment {
+  if (parent.nodeType === 1 && (parent as Element).namespaceURI === 'http://www.w3.org/2000/svg') {
+    const holder = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    holder.innerHTML = html;
+    const frag = document.createDocumentFragment();
+    while (holder.firstChild) frag.appendChild(holder.firstChild);
+    return frag;
+  }
+  return tpl(html);
+}
+
 const HEAD_ATTR = 'data-rosezm-head';
 
 export const handlers: Record<string, (e: Event) => void> =
@@ -805,7 +821,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         }
         let frag: DocumentFragment;
         if (st.__ever) {
-          frag = tpl(r.html);
+          frag = tplFor(anchor.parentNode!, r.html);
         } else {
           st.__ever = true;
           frag = document.createDocumentFragment();
@@ -869,7 +885,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
               nextMap.set(d.row.key!, d.keepRow);
               for (const nd of d.keepRow.nodes ?? []) parent.insertBefore(nd, end);
             } else {
-              const frag = tpl(d.row.html);
+              const frag = tplFor(parent, d.row.html);
               const disp = wire(frag, d.row.closes, d.row.scope);
               disps.push(disp);
               const nodes = Array.from(frag.childNodes);
@@ -890,7 +906,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         }
         const disps: Cleanup[] = [];
         for (const r of items) {
-          const frag = tpl(r.html);
+          const frag = tplFor(parent, r.html);
           disps.push(wire(frag, r.closes, r.scope));
           for (const nd of Array.from(frag.childNodes)) parent.insertBefore(nd, end);
         }

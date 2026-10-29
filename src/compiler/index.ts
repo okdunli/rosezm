@@ -4276,6 +4276,21 @@ function compileTemplate(
 
   if (depth === 0) result += 'const __snip = {};\n';
 
+  // CD (BUG.md): <svelte:window|body|head> used to pass through as an unknown
+  // element - the build stayed green and the handler silently never bound. The
+  // framework's own form is a modifier on any host element: on:keydown|window.
+  if (depth === 0) {
+    const sv = /<svelte:(window|body|head|document)\b[^>]*>/i.exec(template);
+    if (sv) {
+      const tag = sv[1].toLowerCase();
+      throw new RoseError(
+        'E-TEMPLATE',
+        `rosezm has no <svelte:${tag}> element - window-level events are a modifier on any host element (on:keydown|${tag === 'document' ? 'document' : 'window'}={fn})`,
+        { hint: `use on:keydown|${tag === 'document' ? 'document' : 'window'}={fn}. Any element can carry it - the listener is attached to ${tag === 'document' ? 'document' : 'window'} at wire time, so no wrapper element is needed. See GOTCHAS.md: window/document level events.` },
+      );
+    }
+  }
+
   // One pass renames every {@const} use of this scope to its internal thunk.
   // The loop below then only emits the declaration - no per-const re-walk of
   // the remaining template (which was quadratic in the const count). Ids are
