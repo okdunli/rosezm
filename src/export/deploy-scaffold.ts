@@ -22,10 +22,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter';
+export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig';
 
 /** One workflow + manual per target, keyed by the export target name. */
 const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; deployMd: string; label: string }> = {
+  wails: { workflow: 'wails.yml', deployMd: 'wails.DEPLOY.md', label: 'wails' },
+  tauri: { workflow: 'tauri.yml', deployMd: 'tauri.DEPLOY.md', label: 'tauri' },
+  zig: { workflow: 'zig.yml', deployMd: 'zig.DEPLOY.md', label: 'zig' },
   android: { workflow: 'android.yml', deployMd: 'android.DEPLOY.md', label: 'android' },
   xcode: { workflow: 'ios.yml', deployMd: 'ios.DEPLOY.md', label: 'xcode' },
   flutter: { workflow: 'flutter.yml', deployMd: 'flutter.DEPLOY.md', label: 'flutter' },

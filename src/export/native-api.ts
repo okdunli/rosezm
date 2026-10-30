@@ -153,6 +153,13 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'clipboard-write': 'ClipboardManager',
       share: 'Intent.ACTION_SEND',
     },
+    // A permission is not optional decoration: without CAMERA the contract
+    // fails on a real device, and without a location permission the fused
+    // provider throws SecurityException into the caller's lap.
+    manifest: {
+      camera: ['android.permission.CAMERA'],
+      geolocation: ['android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION'],
+    },
   },
   xcode: {
     helper: 'roseNative',
@@ -163,6 +170,13 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'clipboard-read': 'UIPasteboard',
       'clipboard-write': 'UIPasteboard',
       share: 'UIActivityViewController',
+    },
+    // Info.plist usage descriptions, named by KEY: iOS does not deny the
+    // request without one, it terminates the process - the app crashes the
+    // first time the capability is used.
+    manifest: {
+      camera: ['NSCameraUsageDescription'],
+      geolocation: ['NSLocationWhenInUseUsageDescription'],
     },
   },
   // Wired through the preload bridge: the electron export ships the framework's

@@ -34,7 +34,7 @@ import { parseSvg, opsToPathData, swiftFill, type SvgOp, type SvgShape } from '.
 import { rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, deferBlocks, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
-import { nativeUsage, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
+import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import {
   parseStylesheet,
   cascadeFor,
@@ -46,6 +46,7 @@ import {
   type StyleSheet,
   type StyleSubject,
 } from './style-engine.js';
+import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
 
 export interface EmitSwiftOptions {
   projectRoot: string;
@@ -67,6 +68,8 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'xcode');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   tagStyles = new Map<string, StyleModel>();
   const appDir = path.join(out, APP);
   const pagesDir = path.join(root, 'src', 'pages');
@@ -125,16 +128,19 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   await fs.promises.mkdir(path.join(out, `${APP}.xcodeproj`), { recursive: true });
 
   const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings);
-  const allCss = [...pages.map((p) => p.style)].join('\n') + '\n' + SHELL_STYLES;
-  const fontMap = await copyFonts(root, path.join(appDir, 'Resources'), allCss, warnings);
-  // Styles: each page compiles its own <style> under its own scope - two
-  // pages may both define .rcard (the demo does), and a merged table would
-  // leak one page's border into the other's card.
   // CF: the site's own theme sheet compiles UNSCOPED, the way SHELL_STYLES does
   // - a theme targets global class names and bare elements, so a page scope
   // would make every one of its rules miss - and first in the map, so a later
   // equal key (a page's `cls__view`, or the shell) wins the overwrite.
   const globalCss = sanitizeFor('xcode', opts.globalCss ?? '');
+  // The theme counts for the font scan: a font-family no page names can still
+  // come from the site's stylesheet, and a family with no bundled file is a
+  // silent fall back to the system default.
+  const allCss = [globalCss, ...pages.map((p) => p.style)].join('\n') + '\n' + SHELL_STYLES;
+  const fontMap = await copyFonts(root, path.join(appDir, 'Resources'), allCss, warnings);
+  // Styles: each page compiles its own <style> under its own scope - two
+  // pages may both define .rcard (the demo does), and a merged table would
+  // leak one page's border into the other's card.
   const styles = new Map<string, StyleModel>();
   if (globalCss) for (const [k, v] of compileStyles(globalCss, warnings, fontMap)) styles.set(k, v);
   for (const pg of pages) for (const [k, v] of compileStyles(pg.style ?? '', warnings, fontMap, pg.view)) styles.set(k, v);
@@ -145,7 +151,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
-  await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route)), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseTheme.swift'), renderTheme(styles, fontMap), 'utf8');
   for (const comp of components) {
     await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap, globalCss), 'utf8');
@@ -155,10 +161,10 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   }
   await fs.promises.writeFile(path.join(appDir, 'RoseRootView.swift'), renderRoot(pages), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'rosezmApp.swift'), renderApp(), 'utf8');
-  await fs.promises.writeFile(path.join(appDir, 'Info.plist'), renderInfoPlist([...fontMap].map(([family, file]) => ({ family, file }))), 'utf8');
+  await fs.promises.writeFile(path.join(appDir, 'Info.plist'), renderInfoPlist(app, native, [...fontMap].map(([family, file]) => ({ family, file }))), 'utf8');
 
   const swiftFiles = walk(appDir).filter((f) => f.endsWith('.swift'));
-  await fs.promises.writeFile(path.join(out, `${APP}.xcodeproj`, 'project.pbxproj'), renderProject(swiftFiles, appDir), 'utf8');
+  await fs.promises.writeFile(path.join(out, `${APP}.xcodeproj`, 'project.pbxproj'), renderProject(app, swiftFiles, appDir), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
   await writeDeployScaffold('xcode', out, warnings);
 
@@ -952,7 +958,11 @@ ${branches}
 `;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = []): string {
+  // A wall's redirect is only worth following to a route this export carries a
+  // page for; the kit writes that table down so the console line can be the
+  // whole answer when the target has no page.
+  const routeTable = routes.map((r) => JSON.stringify(r)).join(', ');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, the same shape the server-side
@@ -975,27 +985,132 @@ func roseContentGet(_ coll: String, _ slug: String) -> [String: Any]? {
 
 /// Base URL of the deployed rosezm server (rosezm export --api).
 let roseApiBase = ${JSON.stringify(apiBase)}
+
+/// The raw Set-Cookie of the most recent response, relayed back as Cookie on
+/// the next request - the middleware's session survives across requests
+/// without a cookie jar.
+private var rosezmCookie = ""
 ${contentBlock}
 ${nativeKit(native)}
 /// The await reject branch: it always throws, so the catch arm renders.
 /// (Swift has no throwing expression, so the value type is a white lie.)
 func roseThrow(_ message: Any) -> Any {
-    throw NSError(domain: "rosezm", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(message)"])
+    throw NSError(domain: "rosezm", code: 1, userInfo: [NSLocalizedDescriptionKey: "\\(message)"])
 }
 
-/// The JSON half of a render: the state the page's $data produced.
-func roseData(_ route: String) async -> [String: Any] {
+/// The routes this export carries a page for, written at export time. A wall's
+/// redirect is only followed to one of these: any other route is a blank
+/// screen, so the console line is the whole answer there.
+let rosezmPages: Set<String> = [${routeTable}]
+
+/// A path with the scheme, host and query dropped, doubled slashes collapsed
+/// and one trailing slash removed: /sign, /sign/ and //sign name one route, so
+/// a redirect that only normalises the path is not a wall.
+func rosezmCanon(_ target: String) -> String {
+    var path = target
+    if let scheme = path.range(of: "://") {
+        let rest = path[scheme.upperBound...]
+        path = rest.firstIndex(of: "/").map { String(rest[$0...]) } ?? "/"
+    }
+    if let cut = path.firstIndex(where: { $0 == "?" || $0 == "#" }) { path = String(path[..<cut]) }
+    while path.contains("//") { path = path.replacingOccurrences(of: "//", with: "/") }
+    if path.count > 1 && path.hasSuffix("/") { path.removeLast() }
+    return path
+}
+
+/// A middleware wall: the data channel and the action channel are answered
+/// exactly as a document is - a 3xx to the sign-in page, or a bare 401/403.
+/// A 3xx back to the very path that was asked for is a normalisation (a
+/// trailing slash, another host), not a wall, and is followed as before.
+enum RosezmWall {
+    case redirect(Int, String)
+    case refused(Int)
+}
+
+func rosezmWall(_ status: Int, _ asked: String, _ location: String) -> RosezmWall? {
+    if (300..<400).contains(status) {
+        let target = rosezmCanon(location)
+        if !target.isEmpty && target == rosezmCanon(asked) { return nil }
+        return .redirect(status, target)
+    }
+    if status == 401 || status == 403 { return .refused(status) }
+    return nil
+}
+
+/// The exported page a wall's redirect lands on: an exact route, or a dynamic
+/// one (/blog/:id against /blog/7). nil when this export has no page for it.
+func rosezmPage(_ target: String) -> String? {
+    let path = rosezmCanon(target)
+    if path.isEmpty { return nil }
+    if rosezmPages.contains(path) { return path }
+    let got = path.split(separator: "/")
+    for pattern in rosezmPages {
+        let want = pattern.split(separator: "/")
+        guard want.count == got.count else { continue }
+        var fits = true
+        for (wantPart, gotPart) in zip(want, got) where !wantPart.hasPrefix(":") && !wantPart.hasPrefix("*") {
+            if wantPart != gotPart { fits = false; break }
+        }
+        if fits { return path }
+    }
+    return nil
+}
+
+/// The one line that names a wall, on stderr - the same voice as the export's
+/// own warnings.
+func rosezmWallLine(_ route: String, _ wall: RosezmWall) -> String {
+    switch wall {
+    case .redirect(let status, let target):
+        return target.isEmpty
+            ? "rosezm: \\(route) is behind a middleware wall (\\(status)); this export has no page for it"
+            : "rosezm: \\(route) is behind a middleware wall (\\(status) -> \\(target)); this export has no page for it"
+    case .refused(let status):
+        return "rosezm: \\(route) is behind a middleware wall (\\(status))"
+    }
+}
+
+/// The redirect gate: a wall's 302 points at the sign-in page, and following
+/// it would turn the wall into a 200 that hides it. A redirect back to the
+/// same path is a normalisation, so it is followed exactly as before.
+private final class RosezmRedirectGate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        let asked = response.url?.path ?? ""
+        let target = request.url?.absoluteString ?? ""
+        completionHandler(rosezmWall(response.statusCode, asked, target) == nil ? request : nil)
+    }
+}
+
+private let rosezmGate = RosezmRedirectGate()
+// The kit relays the session cookie itself (rosezmCookie); URLSession's own
+// cookie jar would overwrite a manual Cookie header, so it stays off here.
+private let rosezmSession: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.httpShouldSetCookies = false
+    return URLSession(configuration: config, delegate: rosezmGate, delegateQueue: nil)
+}()
+
+/// The JSON half of a render: the state the page's $data produced, plus the
+/// wall that answered instead when the route is behind one (the patch is empty
+/// then - a wall's body is the sign-in page's HTML, never data).
+func roseData(_ route: String) async -> (patch: [String: Any], wall: RosezmWall?) {
     guard !roseApiBase.isEmpty,
           let encoded = route.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-          let url = URL(string: roseApiBase + "/__rosezm/data?path=" + encoded) else { return [:] }
+          let url = URL(string: roseApiBase + "/__rosezm/data?path=" + encoded) else { return ([:], nil) }
+    var request = URLRequest(url: url)
+    if !rosezmCookie.isEmpty { request.setValue(rosezmCookie, forHTTPHeaderField: "Cookie") }
     do {
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [:] }
+        let (data, response) = try await rosezmSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return ([:], nil) }
+        if let cookie = http.value(forHTTPHeaderField: "Set-Cookie"), !cookie.isEmpty { rosezmCookie = cookie }
+        if let wall = rosezmWall(http.statusCode, url.path, http.value(forHTTPHeaderField: "Location") ?? "") {
+            return ([:], wall)
+        }
+        guard http.statusCode == 200 else { return ([:], nil) }
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        return json["state"] as? [String: Any] ?? [:]
+        return (json["state"] as? [String: Any] ?? [:], nil)
     } catch {
         // A missing server is a data-less screen, not a crash.
-        return [:]
+        return ([:], nil)
     }
 }
 
@@ -1004,11 +1119,12 @@ func roseData(_ route: String) async -> [String: Any] {
 /// The optional fields map is the submitting form's inputs by name: the action
 /// reads them with form.get() on the server, so a form that posted only the
 /// action name would hand the action empty strings for every field.
-func roseAction(_ route: String, _ name: String, _ fields: [String: Any]? = nil) async -> [String: Any] {
-    guard !roseApiBase.isEmpty, let url = URL(string: roseApiBase + route) else { return [:] }
+func roseAction(_ route: String, _ name: String, _ fields: [String: Any]? = nil) async -> (patch: [String: Any], wall: RosezmWall?) {
+    guard !roseApiBase.isEmpty, let url = URL(string: roseApiBase + route) else { return ([:], nil) }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    if !rosezmCookie.isEmpty { request.setValue(rosezmCookie, forHTTPHeaderField: "Cookie") }
     let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name
     var body = "__action=" + encodedName
     if let fields = fields {
@@ -1020,11 +1136,17 @@ func roseAction(_ route: String, _ name: String, _ fields: [String: Any]? = nil)
     }
     request.httpBody = Data(body.utf8)
     do {
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await rosezmSession.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if let cookie = http.value(forHTTPHeaderField: "Set-Cookie"), !cookie.isEmpty { rosezmCookie = cookie }
+            if let wall = rosezmWall(http.statusCode, url.path, http.value(forHTTPHeaderField: "Location") ?? "") {
+                return ([:], wall)
+            }
+        }
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        return json["state"] as? [String: Any] ?? json
+        return (json["state"] as? [String: Any] ?? json, nil)
     } catch {
-        return [:]
+        return ([:], nil)
     }
 }
 
@@ -1334,7 +1456,18 @@ struct RoseRootView: View {
 `;
 }
 
-function renderInfoPlist(fonts: Array<{ family: string; file: string }> = []): string {
+function renderInfoPlist(app: AppIdentity, native: NativeCapability[], fonts: Array<{ family: string; file: string }> = []): string {
+  // iOS does not deny a capability whose usage description is missing - it
+  // terminates the process. The sentence is written here so the app asks, and
+  // a project can still override it by writing its own Info.plist.
+  const usage: Record<string, string> = {
+    NSCameraUsageDescription: 'This app uses the camera to take the photo you asked for.',
+    NSLocationWhenInUseUsageDescription: 'This app uses your location while it is open, when a page asks for it.',
+  };
+  const usageKeys = nativeManifestEntries('xcode', native);
+  const uiUsage = usageKeys.length
+    ? usageKeys.map((key) => '    <key>' + key + '</key>' + String.fromCharCode(10) + '    <string>' + (usage[key] ?? 'This app needs this access for a page that asks for it.') + '</string>' + String.fromCharCode(10)).join('')
+    : '';
   const uiAppFonts = fonts.length
     ? `    <key>UIAppFonts</key>\n    <array>\n${fonts.map((f) => `        <string>${f.file}</string>`).join('\n')}\n    </array>\n`
     : '';
@@ -1345,7 +1478,7 @@ function renderInfoPlist(fonts: Array<{ family: string; file: string }> = []): s
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>rosezm</string>
+    <string>${xmlEscape(app.name)}</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -1357,7 +1490,7 @@ function renderInfoPlist(fonts: Array<{ family: string; file: string }> = []): s
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>${app.version}</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
@@ -1368,7 +1501,7 @@ function renderInfoPlist(fonts: Array<{ family: string; file: string }> = []): s
     <array>
         <string>UIInterfaceOrientationPortrait</string>
     </array>
-${uiAppFonts}</dict>
+${uiUsage}${uiAppFonts}</dict>
 </plist>
 `;
 }
@@ -1681,11 +1814,27 @@ ${ctx.awaits.map((a, i) => `
     }`).join('')}
 
     private func loadData() async {
-        let patch = await roseData(route)
+        let (patch, wall) = await roseData(route)
+        if let wall = wall {
+            __wall(wall)
+            return
+        }
         guard !patch.isEmpty else { return }
         await MainActor.run {
 ${patchApply}
         }
+    }
+
+    /// A middleware wall - the sign-in redirect, or a bare 401/403 - answered
+    /// the data or action channel. Go to the exported page the redirect names;
+    /// when this export has no page for it, the console line is the whole
+    /// answer - the wall's body is never applied as data.
+    private func __wall(_ wall: RosezmWall) {
+        if case .redirect(_, let target) = wall, let page = rosezmPage(target) {
+            onNavigate(page)
+            return
+        }
+        FileHandle.standardError.write(Data((rosezmWallLine(route, wall) + "\\n").utf8))
     }
 
 ${handlers}${formFieldsHelper}
@@ -2815,7 +2964,11 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
       return `        if let value = patch["${s.name}"] { ${s.name} = value }`;
     }).join('\n');
     methods.push(`    private func ${action}() async {
-        let patch = await roseAction(route, "${action}"${formFields.length ? ', __formFields()' : ''})
+        let (patch, wall) = await roseAction(route, "${action}"${formFields.length ? ', __formFields()' : ''})
+        if let wall = wall {
+            __wall(wall)
+            return
+        }
         guard !patch.isEmpty else { return }
         await MainActor.run {
 ${apply}
@@ -3210,7 +3363,7 @@ ${inlineDefs}
 }
 
 /** Minimal, deterministic Xcode project: every Swift file referenced, one app target. */
-function renderProject(swiftFiles: string[], appDir: string): string {
+function renderProject(app: AppIdentity, swiftFiles: string[], appDir: string): string {
   const rel = (f: string) => path.relative(path.dirname(path.dirname(appDir)), f).replace(/\\/g, '/');
   const files = swiftFiles.map((f) => ({ path: rel(f), name: path.basename(f) }));
   const groupId = (p: string) => pbxId('group:' + p);
@@ -3392,7 +3545,7 @@ ${sourcesEntries}
 \t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 \t\t\t\tGENERATE_INFOPLIST_FILE = NO;
 \t\t\t\tINFOPLIST_FILE = rosezmApp/Info.plist;
-\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = dev.rosezm.app;
+\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ${app.id};
 \t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";
 \t\t\t\tSWIFT_EMIT_LOC_STRINGS = YES;
 \t\t\t\tTARGETED_DEVICE_FAMILY = "1,2";
@@ -3405,7 +3558,7 @@ ${sourcesEntries}
 \t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 \t\t\t\tGENERATE_INFOPLIST_FILE = NO;
 \t\t\t\tINFOPLIST_FILE = rosezmApp/Info.plist;
-\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = dev.rosezm.app;
+\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ${app.id};
 \t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";
 \t\t\t\tSWIFT_EMIT_LOC_STRINGS = YES;
 \t\t\t\tTARGETED_DEVICE_FAMILY = "1,2";

@@ -139,6 +139,7 @@ const scaffolded = await run(['new', scaffoldDir], REPO);
 assert(scaffolded.code === 0, 'rosezm new <name> exits 0');
 assert(fs.existsSync(path.join(scaffoldDir, 'src', 'pages', 'index.rose')), 'the scaffold writes src/pages/index.rose');
 assert(JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'package.json'), 'utf8')).dependencies.rosezm.startsWith('^'), 'the scaffold depends on the rosezm package');
+assert(JSON.parse(fs.readFileSync(path.join(scaffoldDir, 'rosezm.app.json'), 'utf8')).id.startsWith('dev.rosezm.'), 'the scaffold writes rosezm.app.json - a new app does not inherit the framework default store id');
 const again = await run(['new', scaffoldDir], REPO);
 assert(again.code !== 0 && again.err.includes('already exists'), 'rosezm new refuses to overwrite an existing directory');
 const scaffoldBuilt = await run(['build'], scaffoldDir);
@@ -732,20 +733,25 @@ try {
   hop.stdout.on('data', (c) => { hopOut += c; });
   hop.stderr.on('data', (c) => { hopOut += c; });
   try {
+    // Read the port out of the banner instead of guessing +1/+2: another
+    // listener on this machine can own the next port too, and then the guess
+    // answers for somebody else's server - a test that fails at random teaches
+    // the reader to ignore it. The banner is the server's own statement of what
+    // it bound, so it is the thing to assert against.
     let answered = null;
     for (let i = 0; i < 120; i++) {
-      for (const p of [occupied + 1, occupied + 2]) {
+      const m = hopOut.match(/preview at http:\/\/localhost:(\d+)/) ?? hopOut.match(/http:\/\/localhost:(\d+)/);
+      if (m) {
+        const bound = Number(m[1]);
         try {
-          const r = await fetch(`http://localhost:${p}/`);
-          if (r.status === 200) { answered = p; break; }
+          if ((await fetch(`http://localhost:${bound}/`)).status === 200) { answered = bound; break; }
         } catch {  }
       }
-      if (answered) break;
       await new Promise((r) => setTimeout(r, 150));
     }
-    assert(answered !== null, `a preview whose port is taken hops to the next free one and serves (squatter still owns ${occupied})`);
+    assert(answered !== null, `a preview whose port is taken hops to a free one, says which, and serves (squatter still owns ${occupied})`);
+    assert(answered !== occupied, `the hopped port is not the one the squatter holds (${occupied})`);
     assert(hopOut.includes(String(answered)), `the banner names the port it actually bound (${answered})`);
-    assert((await fetch(`http://localhost:${answered}/`)).status === 200);
   } finally {
     hop.kill('SIGKILL');
   }
@@ -3033,13 +3039,19 @@ const matrix = await run(['export'], REPO);
 assert(matrix.code === 0 && matrix.out.includes('export targets') && matrix.out.includes('weapp') && matrix.out.includes('cpp'), 'rosezm export with no target lists the matrix instead of failing');
 const matrixJson = await run(['export', '--json'], REPO);
 const parsedMatrix = JSON.parse(matrixJson.out.trim().split('\n').pop());
-assert(parsedMatrix.ok === true && parsedMatrix.targets.length === 14 && parsedMatrix.targets.every((t) => t.status === 'ready'), 'the matrix is machine-readable (14 ready targets)');
+assert(parsedMatrix.ok === true && parsedMatrix.targets.length === 17 && parsedMatrix.targets.every((t) => t.status === 'ready'), 'the matrix is machine-readable (17 ready targets)');
 const oneJson = await run(['export', 'weapp', path.join(REPO, 'example'), '--json'], REPO);
 const parsedOne = JSON.parse(oneJson.out.trim().split('\n').pop());
 assert(parsedOne.ok === true && parsedOne.target === 'weapp' && parsedOne.pages.length >= 30 && Array.isArray(parsedOne.warnings), 'a single export reports its pages, components and warnings as JSON');
+const groupedHuman = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
+assert(groupedHuman.out.includes('server calls with no --api endpoint'), 'the grouped output collapses the missing-endpoint warning to its fact, not its file list');
+assert(!groupedHuman.out.includes('+8 more'), 'the grouped output does not print the file list the --json output already carries');
 const allJson = await run(['export', 'all', path.join(REPO, 'example'), '--json'], REPO);
 const parsedAll = JSON.parse(allJson.out.trim().split('\n').pop());
-assert(parsedAll.ok === true && parsedAll.targets.length === 14 && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
+assert(parsedAll.ok === true && parsedAll.targets.length === 17 && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
+// `export all` writes the index a CI reads: one file saying where each tree is.
+const allManifest = JSON.parse(fs.readFileSync(path.join(REPO, 'example', '.rosezm-export', 'rosezm-export-all.json'), 'utf8'));
+assert(allManifest.targets.length === 17 && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
 const human = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(human.out.includes('warning(s) -') && human.out.includes('kind(s)'), 'the human exporter groups its warnings by kind instead of dumping 40 lines');
 
@@ -3090,5 +3102,15 @@ await rmTreeStable(tmp);
   }
   console.log(`ok - src hygiene: ${srcFiles.length} files, no probe residue, all transform`);
 }
+// A batch must collect every target's failure instead of stopping at the first.
+const badProj = path.join(tmp, 'exportall-badid');
+fs.mkdirSync(path.join(badProj, 'src', 'pages'), { recursive: true });
+fs.writeFileSync(path.join(badProj, 'src', 'pages', 'index.rose'), '<p>home</p>');
+fs.writeFileSync(path.join(badProj, 'rosezm.app.json'), JSON.stringify({ id: 'not a valid id!' }));
+const badAll = await run(['export', 'all', badProj, '--json'], REPO);
+const badParsed = JSON.parse(badAll.out.trim().split(String.fromCharCode(10)).pop());
+assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === 17, 'a batch reports every failed target and exits 1');
+assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names the cause, not just the target');
 console.log(`\nAll CLI checks passed - the framework builds any project, not just its own demo - ${checks} assertions.`);
 process.exit(0);
+

@@ -20,6 +20,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type Color, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
@@ -74,6 +75,8 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'cpp');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
 
@@ -153,7 +156,7 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   // rose.cpp exactly as they were.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'pages.h'), renderPagesHeader(pages, components), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'main.cpp'), renderMain([...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'CMakeLists.txt'), renderCMake(pages, components), 'utf8');
@@ -558,6 +561,7 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <functional>
 #include <initializer_list>
 #include <map>
@@ -806,6 +810,11 @@ public:
     const std::string& route() const { return route_; }
     void navigate(const std::string& target);
     void back();
+    /** Whether this export's route table carries a page for a wall's target. */
+    bool hasRoute(const std::string& target) const;
+    /** Report a middleware wall: 0 = not a wall, 1 = wall and nothing to open,
+     *  2 = wall and the view already moved to the page its redirect names. */
+    int wall(const std::string& route, int status, const std::string& location);
     void callAction(const std::string& name);
     void render();
     /** The keys a page declared with $persist; they are mirrored into QSettings. */
@@ -876,11 +885,44 @@ ${styleRows || '        // no style rules'}
     return kStyles;
 }
 
-inline const std::string ROSE_API_BASE = ${JSON.stringify(apiBase)};
+/// The backend base URL: the ROSEZM_API environment variable overrides the
+/// base baked at export time, so one binary serves dev, staging and prod
+/// without a re-export. No variable set means the baked base, which may be
+/// empty - callers treat an empty base as "no backend".
+inline std::string rose_api_base() {
+    const char* env = std::getenv("ROSEZM_API");
+    return env ? env : ${JSON.stringify(apiBase)};
+}
+
+/// A middleware wall's Location header reduced to the route it names: any
+/// scheme and host dropped, query and fragment dropped, double slashes
+/// collapsed and one trailing slash removed - a trailing slash is not a
+/// different route.
+inline std::string rose_route_path(std::string target) {
+    // Only a location that STARTS with http(s) is absolute: a sign-in
+    // redirect's own ?next=https://... must not lose its route to that URL.
+    if (target.compare(0, 7, "http://") == 0 || target.compare(0, 8, "https://") == 0) {
+        const std::size_t slash = target.find('/', target.find("://") + 3);
+        target = slash == std::string::npos ? "/" : target.substr(slash);
+    }
+    const std::size_t query = target.find('?');
+    if (query != std::string::npos) target = target.substr(0, query);
+    const std::size_t hash = target.find('#');
+    if (hash != std::string::npos) target = target.substr(0, hash);
+    std::string path;
+    for (const char ch : target) {
+        if (ch == '/' && !path.empty() && path.back() == '/') continue;
+        path += ch;
+    }
+    if (path.size() > 1 && path.back() == '/') path.pop_back();
+    if (!path.empty() && path.front() != '/') path = "/" + path;
+    return path;
+}
 `;
 }
 
-function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = []): string {
+function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = [], app: AppIdentity): string {
+  const appName = app.name;
   const branches: string[] = [];
   for (const page of pages) {
     if (page.params.length === 0) {
@@ -959,6 +1001,7 @@ ${native.includes('camera') ? `    if (capability == "camera") {
 #include <QPainter>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QDebug>
 ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `#include <QClipboard>
 #include <QGuiApplication>
 ` : ''}${native.includes('share') ? `#include <QDesktopServices>
@@ -1277,7 +1320,7 @@ std::vector<std::string> rose_keys(const RoseValue& container) {
 // --- the app --------------------------------------------------------------------
 // --- the app --------------------------------------------------------------------
 RoseApp::RoseApp(QWidget* parent) : QMainWindow(parent) {
-    setWindowTitle("rosezm");
+    setWindowTitle("${appName}");
     resize(1100, 800);
     scroll_ = new QScrollArea(this);
     scroll_->setWidgetResizable(true);
@@ -1326,16 +1369,62 @@ void RoseApp::back() {
     render();
 }
 
+bool RoseApp::hasRoute(const std::string& target) const {
+    // The same route table render() dispatches on, as an expression: a wall is
+    // only followed to a page this export actually carries.
+    return ${pages.length ? pages.map((p) => (p.params.length === 0
+      ? `target == ${JSON.stringify(p.route)}`
+      : `std::regex_match(target, std::regex(${JSON.stringify('^' + p.route.replace(/:[^/]+/g, '([^/]+)') + '$')}))`)).join('\n        || ') : 'false'};
+}
+
+// --- session cookie ---------------------------------------------------------------
+// The server's session: the raw Set-Cookie header value of the most recent
+// response, relayed verbatim as the next request's Cookie header. Not a cookie
+// jar - one string, latest response wins - just enough that a session one
+// channel establishes is carried on both.
+namespace {
+std::string rose_session_cookie;
+
+void rose_note_cookie(const QNetworkReply& reply) {
+    const QByteArray setCookie = reply.rawHeader("Set-Cookie");
+    if (!setCookie.isEmpty()) rose_session_cookie = setCookie.toStdString();
+}
+}  // namespace
+
+int RoseApp::wall(const std::string& route, int status, const std::string& location) {
+    if (status >= 300 && status < 400) {
+        const std::string target = rose_route_path(location);
+        if (!target.empty() && hasRoute(target)) {
+            qWarning().noquote() << QString::fromStdString("rosezm: " + route + " is behind a middleware wall ("
+                + std::to_string(status) + " -> " + target + "); opening " + target);
+            navigate(target);
+            return 2;
+        }
+        qWarning().noquote() << QString::fromStdString("rosezm: " + route + " is behind a middleware wall ("
+            + std::to_string(status) + (target.empty() ? std::string() : " -> " + target)
+            + "); this export has no page for it");
+        return 1;
+    }
+    if (status == 401 || status == 403) {
+        qWarning().noquote() << QString::fromStdString("rosezm: " + route + " is behind a middleware wall ("
+            + std::to_string(status) + ")");
+        return 1;
+    }
+    return 0;
+}
+
 void RoseApp::callAction(const std::string& name) {
-    if (ROSE_API_BASE.empty()) return;
+    if (rose_api_base().empty()) return;
     QNetworkAccessManager manager;
-    QNetworkRequest request(QUrl(QString::fromStdString(ROSE_API_BASE + route_)));
+    QNetworkRequest request(QUrl(QString::fromStdString(rose_api_base() + route_)));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    if (!rose_session_cookie.empty()) request.setRawHeader("Cookie", QByteArray::fromStdString(rose_session_cookie));
     const QByteArray body = QByteArray("__action=") + QUrl::toPercentEncoding(QString::fromStdString(name));
     QNetworkReply* reply = manager.post(request, body);
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+    rose_note_cookie(*reply);
     const RoseValue parsed = RoseValue::fromRaw(reply->readAll().toStdString());
     const RoseValue stateValue = rose_get(parsed, "state");
     for (const auto& key : rose_keys(stateValue)) state_[key] = rose_get(stateValue, key);
@@ -1343,31 +1432,46 @@ void RoseApp::callAction(const std::string& name) {
 }
 
 void RoseApp::render() {
+    // Server data: the route's $data, once per route visit. It runs before any
+    // widget exists, so a wall that moves the view leaves nothing half-built.
+    if (std::find(loadedRoutes_.begin(), loadedRoutes_.end(), route_) == loadedRoutes_.end()) {
+        loadedRoutes_.push_back(route_);
+        if (rose_api_base().size() > 0) {
+            QNetworkAccessManager manager;
+            QNetworkRequest request(QUrl(QString::fromStdString(rose_api_base() + "/__rosezm/data?path=" + route_)));
+            // A wall must be seen, not followed: the default policy would hand
+            // back the sign-in page's 200 as if it were this route's data.
+            request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+            if (!rose_session_cookie.empty()) request.setRawHeader("Cookie", QByteArray::fromStdString(rose_session_cookie));
+            QNetworkReply* reply = manager.get(request);
+            QEventLoop loop;
+            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+            loop.exec();
+            rose_note_cookie(*reply);
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const std::string location = reply->header(QNetworkRequest::LocationHeader).toString().toStdString();
+            const QByteArray payload = reply->readAll();
+            reply->deleteLater();
+            const int walled = wall(route_, status, location);
+            // The wall opened another page and that render already owns the window.
+            if (walled == 2) return;
+            // A wall is never data; anything else patches exactly as before.
+            if (walled == 0) {
+                const RoseValue parsed = RoseValue::fromRaw(payload.toStdString());
+                const RoseValue stateValue = rose_get(parsed, "state");
+                for (const auto& key : rose_keys(stateValue)) {
+                    if (!state_.count(key)) state_[key] = rose_get(stateValue, key);
+                }
+            }
+        }
+${paramSeeds.length ? paramSeeds : '                // (no dynamic routes)'}
+    }
+
     host_ = new QWidget;
     host_->setStyleSheet("background: #ffffff;");
     auto* layout = new QVBoxLayout(host_);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(8);
-
-    // Server data: the route's $data, once per route visit.
-    if (std::find(loadedRoutes_.begin(), loadedRoutes_.end(), route_) == loadedRoutes_.end()) {
-        loadedRoutes_.push_back(route_);
-        if (ROSE_API_BASE.size() > 0) {
-            QNetworkAccessManager manager;
-            QNetworkRequest request(QUrl(QString::fromStdString(ROSE_API_BASE + "/__rosezm/data?path=" + route_)));
-            QNetworkReply* reply = manager.get(request);
-            QEventLoop loop;
-            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-            loop.exec();
-            const RoseValue parsed = RoseValue::fromRaw(reply->readAll().toStdString());
-            const RoseValue stateValue = rose_get(parsed, "state");
-            for (const auto& key : rose_keys(stateValue)) {
-                if (!state_.count(key)) state_[key] = rose_get(stateValue, key);
-            }
-            reply->deleteLater();
-        }
-${paramSeeds.length ? paramSeeds : '                // (no dynamic routes)'}
-    }
 
 ${branches.join('\n')}
     if (!history_.empty()) {

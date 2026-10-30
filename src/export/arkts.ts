@@ -22,8 +22,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , pageTitle} from './ir.js';
 import { elementStyleBinding, warnDynamicUnsupported, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
@@ -50,6 +51,10 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // project ships no theme, and then every sheet below stays byte-identical.
   const globalCss = sanitizeFor('arkts', opts.globalCss ?? '');
   const root = opts.projectRoot;
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
+  // HarmonyOS's versionCode is the same monotonic integer Android wants.
+  const versionCode = app.version.split(/[.-]/).slice(0, 3).map((p) => Number(p) || 0).reduce((acc, n) => acc * 1000 + n, 0);
   const out = path.join(opts.outDir, 'arkts');
   const pkgRoot = path.join(out, 'entry', 'src', 'main');
   const etsRoot = path.join(pkgRoot, 'ets');
@@ -90,7 +95,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
       script: [...chain.map((l) => l.script).filter((s): s is string => !!s), parsed.script ?? ''].filter((s) => s.trim()).join('\n'),
       style: [parsed.style, ...chain.map((l) => l.style)].filter((s): s is string => !!s).join('\n'),
       params: [...stem.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]),
-      title: titleOf(parsed.head),
+      title: pageTitle(parsed.head, stem),
     });
   }
 
@@ -115,7 +120,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // Images the pages reference: copied into HarmonyOS media resources.
   const { media, vectors } = await copyMedia(root, pkgRoot, pages.map((p) => p.nodes), warnings);
 
-  const allCss = [...pages.map((p) => p.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
+  const allCss = [globalCss, ...pages.map((p) => p.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
   const fontMap = await copyFonts(root, pkgRoot, allCss, warnings);
   const declared = new Set(fontFaces(allCss).map((f) => f.family));
   for (const fam of customFontFamilies(allCss)) {
@@ -129,7 +134,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // named only roseData/roseAction/roseKv - TS2304 on 7 pages. The import list
   // is now completed from the kit's own export table, so a helper the kit grows
   // is picked up without a hardcoded list rotting beside it.
-  const kitSource = renderKit(opts.apiBase ?? '', content, native);
+  const kitSource = renderKit(opts.apiBase ?? '', content, native, pages.map((p) => ({ route: p.route, url: 'pages/' + p.struct })));
   const kitExports = kitExportNames(kitSource);
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseKit.ets'), kitSource, 'utf8');
 
@@ -174,7 +179,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     src: pages.map((p) => `pages/${p.struct}`),
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(pkgRoot, 'resources', 'base', 'element', 'string.json'), JSON.stringify({
-    string: [{ name: 'module_desc', value: 'rosezm app' }, { name: 'EntryAbility_desc', value: 'rosezm' }, { name: 'EntryAbility_label', value: 'rosezm' }, { name: 'app_name', value: 'rosezm' }],
+    string: [{ name: 'module_desc', value: `${app.name} app` }, { name: 'EntryAbility_desc', value: app.name }, { name: 'EntryAbility_label', value: app.name }, { name: 'app_name', value: app.name }],
   }, null, 2) + '\n', 'utf8');
   // A useNative() capability needs its permission declared, or the runtime
   // prompt never appears and the API fails without naming a cause.
@@ -206,15 +211,15 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     },
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'AppScope', 'app.json5'), JSON.stringify({
-    app: { bundleName: 'dev.rosezm.app', vendor: 'rosezm', versionCode: 1000000, versionName: '1.0.0', icon: '$media:app_icon', label: '$string:app_name' },
+    app: { bundleName: app.id, vendor: app.name, versionCode: versionCode, versionName: app.version, icon: '$media:app_icon', label: '$string:app_name' },
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'AppScope', 'resources', 'base', 'element', 'string.json'), JSON.stringify({
-    string: [{ name: 'app_name', value: 'rosezm' }],
+    string: [{ name: 'app_name', value: app.name }],
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'build-profile.json5'), renderBuildProfile(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'hvigorfile.ts'), "export { appTasks } from '@ohos/hvigor-ohos-plugin';\n", 'utf8');
   await fs.promises.writeFile(path.join(out, 'oh-package.json5'), JSON.stringify({
-    name: 'rosezm_app', version: '1.0.0', description: 'A rosezm app, exported with rosezm export arkts', main: '', author: '', license: 'MIT', dependencies: {},
+    name: app.slug, version: app.version, description: `${app.name} - exported with rosezm export arkts`, main: '', author: '', license: 'MIT', dependencies: {},
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'entry', 'hvigorfile.ts'), "export { hapTasks } from '@ohos/hvigor-ohos-plugin';\n", 'utf8');
   await fs.promises.writeFile(path.join(out, 'entry', 'oh-package.json5'), JSON.stringify({ name: 'entry', version: '1.0.0', description: 'rosezm entry module', main: '', author: '', license: 'MIT', dependencies: {} }, null, 2) + '\n', 'utf8');
@@ -228,12 +233,6 @@ function routeOf(stem: string): string {
   if (parts.length === 1 && parts[0] === 'index') return '/';
   if (parts[parts.length - 1] === 'index') parts.pop();
   return '/' + parts.join('/');
-}
-
-function titleOf(head: string | null): string {
-  if (!head) return '';
-  const m = /<title>([\s\S]*?)<\/title>/.exec(head);
-  return m ? m[1].replace(/\{[^}]*\}/g, '').trim() : '';
 }
 
 function structName(stem: string): string {
@@ -544,7 +543,7 @@ function arkContainer(m: StyleModel, tag: string): { open: string; layout: strin
   return { open: `Column(${gap ? `{ ${gap.slice(2)} }` : ''})`, layout };
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], pages: Array<{ route: string; url: string }> = []): string {
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, the same shape the server-side
@@ -632,20 +631,116 @@ ${nativeBranches}
 ` : '';
 
   return `import http from '@ohos.net.http';
+import router from '@ohos.router';
+import hilog from '@ohos.hilog';
 
 /// Base URL of the deployed rosezm server (rosezm export --api).
 export const ROSE_API_BASE: string = ${JSON.stringify(apiBase)};
+
+/// The pages this export carries: web route -> the registered page the router
+/// opens, the same table main_pages.json declares. A wall's redirect is looked
+/// up here before anything tries to visit it.
+const ROSE_PAGES: Record<string, string> = {
+${pages.map((p) => `  ${JSON.stringify(p.route)}: ${JSON.stringify(p.url)},`).join('\n')}
+};
 ${contentBlock}
+
+/** A wall's Location header reduced to the route it names: no query, no
+ *  fragment, no doubled slash and no trailing slash - '/admin/' and '/admin'
+ *  are the same route, and an absolute URL counts only by its path. */
+function roseWallPath(location: string): string {
+  let path = location;
+  const scheme = path.indexOf('://');
+  if (scheme >= 0) {
+    const slash = path.indexOf('/', scheme + 3);
+    path = slash >= 0 ? path.substring(slash) : '/';
+  }
+  const q = path.indexOf('?');
+  if (q >= 0) path = path.substring(0, q);
+  const h = path.indexOf('#');
+  if (h >= 0) path = path.substring(0, h);
+  while (path.indexOf('//') >= 0) path = path.replace('//', '/');
+  if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.substring(0, path.length - 1);
+  return path.length > 0 ? path : '/';
+}
+
+/** The registered page this export carries for a path, or '' - exactly, or
+ *  through the :param / * pattern a dynamic route is registered under. */
+function roseWallPage(path: string): string {
+  const direct = ROSE_PAGES[path];
+  if (direct !== undefined && direct !== null) return direct;
+  const got = path.split('/');
+  for (const pattern of Object.keys(ROSE_PAGES)) {
+    if (pattern.indexOf(':') < 0 && pattern.indexOf('*') < 0) continue;
+    const want = pattern.split('/');
+    if (want.length !== got.length) continue;
+    let same = true;
+    for (let i = 0; i < want.length; i++) {
+      const seg = want[i];
+      if (seg.charAt(0) === ':' || seg.charAt(0) === '*') continue;
+      if (seg !== got[i]) { same = false; break; }
+    }
+    if (same) return ROSE_PAGES[pattern];
+  }
+  return '';
+}
+
+/** One response header, case-insensitively - the header map's keys are not
+ *  promised to be lower case. */
+function roseHeader(headers: Object, name: string): string {
+  const h = headers as Record<string, Object>;
+  if (!h) return '';
+  for (const key of Object.keys(h)) {
+    if (key.toLowerCase() === name) return String(h[key]);
+  }
+  return '';
+}
+
+/**
+ * A middleware wall answers the data channel and the action channel exactly as
+ * it answers a document: 302 to the sign-in page, or a bare 401/403. The kit
+ * used to read the response as state regardless, so a walled page painted its
+ * empty shell with no reason given - it looked broken rather than logged out.
+ * A wall is never data: it opens the page its redirect names when this export
+ * carries one, and otherwise says in the log which route is walled.
+ */
+function roseWall(route: string, status: number, location: string): boolean {
+  if (status === 401 || status === 403) {
+    hilog.warn(0x0000, 'rosezm', 'rosezm: %{public}s is behind a middleware wall (%{public}d)', route, status);
+    return true;
+  }
+  if (!(status >= 300 && status < 400) || location.length === 0) return false;
+  const target = roseWallPath(location);
+  const page = roseWallPage(target);
+  if (page.length > 0) {
+    router.pushUrl({ url: page });
+  } else {
+    hilog.warn(0x0000, 'rosezm', 'rosezm: %{public}s is behind a middleware wall (%{public}d -> %{public}s); this export has no page for it', route, status, target);
+  }
+  return true;
+}
+
+/// The session cookie: the last Set-Cookie the server sent, relayed verbatim as
+/// the Cookie header on the next request. One variable, most recent wins - the
+/// minimum that keeps a signed-in visitor signed in, not a cookie jar.
+let roseCookie: string = '';
 
 /// The JSON half of a render: the state the page's $data produced.
 export async function roseData(route: string): Promise<Record<string, Object>> {
   if (ROSE_API_BASE.length === 0) return {};
+  const header: Record<string, string> = {};
+  if (roseCookie.length > 0) header['cookie'] = roseCookie;
   const client = http.createHttp();
   try {
     const response = await client.request(
       ROSE_API_BASE + '/__rosezm/data?path=' + encodeURIComponent(route),
-      { method: http.RequestMethod.GET, expectDataType: http.HttpDataType.OBJECT, connectTimeout: 5000, readTimeout: 5000 },
+      { method: http.RequestMethod.GET, header: header, expectDataType: http.HttpDataType.OBJECT, connectTimeout: 5000, readTimeout: 5000 },
     );
+    // Read before the wall check: the sign-in action answers with the very
+    // 302 the wall reports, and its Set-Cookie is the session.
+    const setCookie = roseHeader(response.header, 'set-cookie');
+    if (setCookie.length > 0) roseCookie = setCookie;
+    if (roseWall(route, Number(response.responseCode), roseHeader(response.header, 'location'))) return {};
     const body = response.result as Record<string, Object>;
     const state = body ? (body as Record<string, Object>)['state'] : undefined;
     return (state as Record<string, Object>) ?? {};
@@ -831,15 +926,22 @@ export async function roseAction(route: string, name: string, fields?: Record<st
       if (v !== undefined && v !== null) body += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(String(v));
     }
   }
+  const header: Record<string, string> = { 'content-type': 'application/x-www-form-urlencoded' };
+  if (roseCookie.length > 0) header['cookie'] = roseCookie;
   try {
     const response = await client.request(ROSE_API_BASE + route, {
       method: http.RequestMethod.POST,
-      header: { 'content-type': 'application/x-www-form-urlencoded' },
+      header: header,
       extraData: body,
       expectDataType: http.HttpDataType.OBJECT,
       connectTimeout: 5000,
       readTimeout: 8000,
     });
+    // Read before the wall check: the sign-in action answers with the very
+    // 302 the wall reports, and its Set-Cookie is the session.
+    const setCookie = roseHeader(response.header, 'set-cookie');
+    if (setCookie.length > 0) roseCookie = setCookie;
+    if (roseWall(route, Number(response.responseCode), roseHeader(response.header, 'location'))) return {};
     const body = response.result as Record<string, Object>;
     const state = body ? (body as Record<string, Object>)['state'] : undefined;
     return (state as Record<string, Object>) ?? (body ?? {});

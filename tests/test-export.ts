@@ -24,10 +24,11 @@ import { readFileSync, existsSync, rmSync, mkdtempSync, readdirSync, statSync, m
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'os';
 import { join, relative, basename } from 'path';
-import { createContext, runInContext } from 'vm';
+import { createContext, runInContext, Script } from 'vm';
 import { exportProject, TARGETS } from '../src/export/index.js';
 import { buildProject } from '../src/compiler/index.js';
 import { parseStylesheet, sanitizeFor } from '../src/export/style-engine.js';
+import { forgetAppIdentity } from '../src/export/app-identity.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
 import { fileURLToPath } from 'node:url';
 
@@ -121,6 +122,13 @@ try {
   // submit, but a mini program has no bootstrap, so the button did nothing. It
   // is now bound to the page's server action, and the action's POST carries the
   // form's fields (the server reads them with form.get()).
+  // A navigation title cannot come from state - the bar is set before any state
+  // exists. Stripping the interpolation left the dangling "- rosezm" that three
+  // targets shipped; a dynamic title now falls back to the route's own name.
+  assert(JSON.parse(read('pages/about/about.json')).navigationBarTitleText === 'About', 'a title built from state falls back to the route name, not a dangling dash');
+  assert(JSON.parse(read('pages/admin/admin.json')).navigationBarTitleText === 'Admin - rosezm', 'a static <title> is used exactly as written');
+  assert(JSON.parse(read('pages/blog-param-id/blog-param-id.json')).navigationBarTitleText === 'Blog', 'a dynamic route takes its last literal segment as the title');
+
   const signFormWxml = read('pages/sign/sign.wxml');
   assert(/<form bindsubmit="action">/.test(signFormWxml), 'a method="POST" form is bound to the page server action');
   const signFormJs = read('utils/rosezm.js');
@@ -161,6 +169,156 @@ try {
     assert(patches.some((p) => p.stamp === 1700000000000), 'the mini program seeds a $kv field at load');
     assert(!!store['rosezm:kv:stamp'], 'the seeded $kv value is memoized in storage for its TTL');
   }
+  // The official templates are separate trees with their own shapes. A dynamic
+  // route that declares no `params` export has no table at all, and the shells'
+  // bake pass read `table[name]` - so `rosezm export wails|tauri|zig` crashed on
+  // any project whose dynamic route is rendered per request. Only a template has
+  // that shape; the demo declares its params, which is why nobody saw it.
+  {
+    for (const tpl of ['blog', 'api', 'admin', 'site']) {
+      const root = join(example, '..', 'templates', tpl);
+      const r = await exportProject('zig', root, { apiBase: 'https://x.example', outRoot: join(scratch, `tpl-${tpl}`) });
+      assert(r.pages.length > 0, `template ${tpl}: a shell export survives a dynamic route with no params table`);
+      assert(!r.pages.some((p) => p.startsWith('_') || p === '404' || p === '500'), `template ${tpl}: the manifest counts pages, not layouts and error pages`);
+    }
+  }
+
+  // The app icon: every store wants one, and every native export used to ship
+  // the platform default. The rule is one file - <project>/public/icon.png -
+  // and a project without it still builds, with a warning that names the file.
+  {
+    const iconProj = join(scratch, 'icon-proj');
+    mkdirSync(join(iconProj, 'src/pages'), { recursive: true });
+    mkdirSync(join(iconProj, 'public'), { recursive: true });
+    writeFileSync(join(iconProj, 'src/pages/index.rose'), '<div>hi</div>\n');
+    // A real PNG from the demo, so the comparison below is bytes, not presence.
+    writeFileSync(join(iconProj, 'public/icon.png'), readFileSync(join(example, 'public', 'icon.png')));
+    const a = await exportProject('android', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-android') });
+    const icon = join(a.outDir, 'app/src/main/res/drawable/ic_launcher.png');
+    assert(existsSync(icon), 'android: the launcher icon ships');
+    assert(readFileSync(icon).equals(readFileSync(join(iconProj, 'public/icon.png'))), "android: it is the project's own icon, byte for byte");
+    assert(/android:icon="@drawable\/ic_launcher"/.test(readFileSync(join(a.outDir, 'app/src/main/AndroidManifest.xml'), 'utf8')), 'android: the manifest points at it');
+    const t = await exportProject('tauri', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-tauri') });
+    assert(existsSync(join(t.outDir, 'src-tauri/icons/icon.png')), 'tauri: the bundle icon file exists');
+    assert(/"icon": \[\s*"icons\/icon.png"/.test(readFileSync(join(t.outDir, 'src-tauri/tauri.conf.json'), 'utf8')), 'tauri: the config lists a file that is really there');
+    const w = await exportProject('wails', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-wails') });
+    assert(existsSync(join(w.outDir, 'build/appicon.png')), 'wails: build/appicon.png is where the CLI looks for it');
+    // No icon in the project: the placeholder keeps the build green, and the
+    // warning says which file to draw.
+    const bare = join(scratch, 'icon-bare');
+    mkdirSync(join(bare, 'src/pages'), { recursive: true });
+    writeFileSync(join(bare, 'src/pages/index.rose'), '<div>hi</div>\n');
+    const b = await exportProject('android', bare, { apiBase: 'x', outRoot: join(scratch, 'icon-bare-out') });
+    assert(existsSync(join(b.outDir, 'app/src/main/res/drawable/ic_launcher.png')), 'android: a project with no icon still gets one to build with');
+    assert(b.warnings.some((x) => x.includes('public/icon.png')), 'the placeholder is named, not silent');
+  }
+
+  // A capability the project asked for needs its permission, or the call fails
+  // on a real device - and on iOS a missing usage description does not deny the
+  // request, it TERMINATES the process. Both targets used to ship a kit that
+  // calls the camera with no manifest entry at all.
+  {
+    const camProj = join(scratch, 'native-caps');
+    mkdirSync(join(camProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(camProj, 'src/pages/index.rose'), `<script>
+  let shot = $state('');
+  async function grab(): Promise<void> { shot = String(await useNative('camera', { quality: 0.7 })); }
+  async function where(): Promise<void> { await useNative('geolocation', {}); }
+</script>
+<button on:click={grab}>shoot</button>
+<button on:click={where}>where</button>
+`);
+    const a = await exportProject('android', camProj, { apiBase: 'x', outRoot: join(scratch, 'caps-android') });
+    const man = readFileSync(join(a.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
+    assert(/android\.permission\.CAMERA/.test(man), 'android: useNative(camera) puts the CAMERA permission in the manifest');
+    assert(/ACCESS_FINE_LOCATION/.test(man), 'android: useNative(geolocation) puts a location permission in the manifest');
+    const x = await exportProject('xcode', camProj, { apiBase: 'x', outRoot: join(scratch, 'caps-xcode') });
+    const plist = readFileSync(join(x.outDir, 'rosezmApp', 'Info.plist'), 'utf8');
+    assert(plist.includes('NSCameraUsageDescription'), 'xcode: useNative(camera) writes the usage description iOS terminates the app without');
+    assert(plist.includes('NSLocationWhenInUseUsageDescription'), 'xcode: useNative(geolocation) writes its usage description too');
+    // A project that asks for nothing keeps exactly the manifest it had.
+    const plain = await exportProject('android', example, { apiBase: 'x', outRoot: join(scratch, 'caps-plain') });
+    const plainMan = readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
+    assert(!/CAMERA|LOCATION/.test(plainMan), 'android: a project that never calls useNative gets no extra permission');
+  }
+
+  // The other eight kits answer a wall the same way: detect it at the status,
+  // never parse the body, and either navigate to the exported page the redirect
+  // names or say in the console which route was walled. A wall is the one
+  // response where "render nothing, say nothing" is indistinguishable from a
+  // broken app, so every kit names it.
+  {
+    const kits: Array<[string, string]> = [
+      ['flutter', join('lib', 'rosezm.dart')],
+      ['xcode', join('rosezmApp', 'Kit', 'RoseKit.swift')],
+      ['android', join('app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt')],
+      ['arkts', join('entry', 'src', 'main', 'ets', 'kit', 'RoseKit.ets')],
+      ['python', 'rosezm.py'],
+      ['dotnet', 'RoseKit.cs'],
+      ['java', join('src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseKit.java')],
+      ['cpp', join('src', 'rose.cpp')],
+    ];
+    for (const [target, rel] of kits) {
+      const r = await exportProject(target as 'python', example, { apiBase: 'https://api.example.com', outRoot: join(scratch, `wall-${target}`) });
+      const kit = readFileSync(join(r.outDir, rel), 'utf8');
+      assert(kit.includes('middleware wall'), `${target}: the kit names a middleware wall instead of rendering an empty shell`);
+      assert(/40[13]|\.Status|statusCode|responseCode|StatusCode/.test(kit), `${target}: the wall is detected from the response status`);
+    }
+  }
+
+  // BL: the exported kit rides the same middleware the web does, through the
+  // same data channel - so a wall answers 302 there too. The kit used to apply
+  // whatever came back, which painted an empty shell with no hint that the
+  // visitor was simply logged out. It now follows the wall's Location to the
+  // exported page that carries it.
+  {
+    const vm = await import('node:vm');
+    // The route map is a CommonJS module: evaluate it the same way the kit does.
+    const routeMod: Record<string, unknown> = { module: { exports: {} } };
+    vm.createContext(routeMod);
+    vm.runInContext(read('utils/rosezm-routes.js'), routeMod);
+    const routeTable = (routeMod.module as { exports: Record<string, string> }).exports;
+    const opened: string[] = [];
+    const wx = {
+      getStorageSync: () => '',
+      setStorageSync: () => {},
+      request: (opts: { success: (res: unknown) => void }) => {
+        opts.success({ statusCode: 302, header: { location: '/sign' }, data: '' });
+      },
+      redirectTo: (opts: { url: string }) => { opened.push(opts.url); },
+    };
+    const sandbox: Record<string, unknown> = { wx, console, module: { exports: {} }, Date, require: () => routeTable };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(read('utils/rosezm.js'), sandbox);
+    (sandbox.module as { exports: { setApiBase: (b: string) => void } }).exports.setApiBase('https://api.example.com');
+    const defs = { data: { posts: null }, route: '/feed' };
+    const page = vm.runInContext('rosePage', sandbox)(() => ({}), defs);
+    const patches: Array<Record<string, unknown>> = [];
+    page.setData = (patch: Record<string, unknown>) => { patches.push(patch); };
+    page.__loadData();
+    assert(opened.length === 1 && opened[0] === '/pages/sign/sign', `a walled data channel navigates to the exported sign page (got ${opened.join(',') || 'nothing'})`);
+    assert(!patches.some((p) => 'posts' in p), 'a walled data channel does not patch the page with the wall body');
+    // ...and the same channel still works when there is no wall, so the check
+    // above proves the wall was honoured rather than the request never made.
+    (sandbox.wx as { request: unknown }).request = (opts: { success: (res: unknown) => void }) =>
+      opts.success({ statusCode: 200, header: {}, data: { posts: ['one'] } });
+    const page2 = vm.runInContext('rosePage', sandbox)(() => ({}), { data: { posts: null }, route: '/feed' });
+    const patched: Array<Record<string, unknown>> = [];
+    page2.setData = (patch: Record<string, unknown>) => { patched.push(patch); };
+    page2.__loadData();
+    assert(patched.some((p) => Array.isArray(p.posts) && (p.posts as unknown[]).length === 1), 'an unwalled data channel still patches the page');
+    // A 500 is not data either: its body is an error envelope, and patching it
+    // put an "error" key into the page state where it read as a page field.
+    (sandbox.wx as { request: unknown }).request = (opts: { success: (res: unknown) => void }) =>
+      opts.success({ statusCode: 500, header: {}, data: { error: 'boom' } });
+    const page3 = vm.runInContext('rosePage', sandbox)(() => ({}), { data: { posts: null }, route: '/feed' });
+    const refused: Array<Record<string, unknown>> = [];
+    page3.setData = (patch: Record<string, unknown>) => { refused.push(patch); };
+    page3.__loadData();
+    assert(refused.length === 0, 'a 500 answers no patch - an error envelope is not page data');
+  }
+
   // R146: $persist is a real primitive on the mini program - the field is written
   // through to wx storage on every set and restored from it at load, so it
   // survives a reload the way localStorage does on the web.
@@ -5213,8 +5371,31 @@ h2 { font-size: 40px; }
     assert(!/font-face/.test(mini), '@font-face is dropped - it does nothing on a real device and inflates the package');
     assert(!/cfbad|has\(/.test(mini), ':has() is dropped - a native tree cannot test it');
     assert(!/print/.test(mini), '@media print is dropped');
-    const native = sanitizeFor('android', theme);
-    assert(native.includes('background: #e11d48') && !/font-face|cfbad/.test(native), 'the native family resolves the token and drops the same two blocks');
+    const native = sanitizeFor('java', theme);
+    assert(native.includes('background: #e11d48') && !/font-face|cfbad/.test(native), 'a toolkit that names system fonts resolves the token and drops the two blocks it cannot use');
+    // @font-face is the one at-rule that depends on the emitter: android, arkts,
+    // swift and flutter bundle the file; the desktop toolkits name a system font
+    // and a mini program ignores it on a real device while still paying the bytes.
+    assert(/font-face/.test(sanitizeFor('android', theme)), 'a font-bundling target keeps @font-face - the emitter copies the file');
+    assert(/font-face/.test(sanitizeFor('flutter', theme)), 'flutter keeps @font-face too (its pubspec lists the asset)');
+    assert(!/font-face/.test(sanitizeFor('java', theme)), 'a toolkit that names a system font drops it - keeping it would reference a file the export never ships');
+
+    // ...and the scan that bundles it now reads the theme, not just the pages.
+    const fProj = join(scratch, 'themefontproj');
+    mkdirSync(join(fProj, 'src/pages'), { recursive: true });
+    mkdirSync(join(fProj, 'public'), { recursive: true });
+    writeFileSync(join(fProj, 'src/pages/index.rose'), '<div class="brandface">x</div>\n');
+    // Copied byte for byte, so a five-byte header is a font as far as the
+    // emitter is concerned.
+    writeFileSync(join(fProj, 'public/brand.ttf'), Buffer.from([0, 1, 0, 0, 0]));
+    const themed = await exportProject('android', fProj, {
+      apiBase: 'x',
+      outRoot: join(scratch, 'themefont-out'),
+      globalCss: '@font-face { font-family: BrandFace; src: url(/brand.ttf) format("truetype"); }\n.brandface { font-family: BrandFace; padding: 4px; }',
+    });
+    const bundled = walk(join(themed.outDir, 'app/src/main/res/font')).map((f) => basename(f));
+    assert(bundled.length === 1 && bundled[0] === 'brandface.ttf', `android: the theme's @font-face is bundled, not dropped (fonts: ${bundled.join(', ') || 'none'})`);
+    assert(/brandface/i.test(readFileSync(join(themed.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseTheme.kt'), 'utf8')), 'android: the theme rule that names the family reaches the style table');
     assert(!native.includes(':root'), 'a token-only :root block is dropped once the vars are inlined');
     assert(sanitizeFor('electron', theme) === theme, 'electron wraps the real web build, so it takes the sheet verbatim');
 
@@ -5229,6 +5410,346 @@ h2 { font-size: 40px; }
       const plain = await withTheme(target);
       assert(!/cfcard|e11d48/i.test(plain), `${target}: a project with no theme sheet is unchanged - the entry point is opt-in`);
     }
+  }
+
+  // The embedded-asset desktop shells. Electron serves the built site over an
+  // in-process HTTP server, so it can render a missing document at runtime;
+  // Wails and Tauri embed it as ASSETS, so an unbaked route is a 404 on screen -
+  // which is why the export bakes every route it can itself, and why the bridge
+  // that knows the deployed server has to ride inside the frontend.
+  {
+    for (const shell of ['wails', 'tauri'] as const) {
+      const r = await exportProject(shell, example, { apiBase: 'https://api.example.com', outRoot: join(scratch, `shell-${shell}`) });
+      const files = walk(r.outDir);
+      const rel = (p: string) => p.slice(r.outDir.length).replace(/\\/g, '/');
+      const frontend = shell === 'wails' ? 'frontend/dist' : 'frontend';
+      assert(existsSync(join(r.outDir, frontend, 'index.html')), `${shell}: the landing route is baked into a real document`);
+      assert(files.filter((f) => f.endsWith('.html')).length > 1, `${shell}: more than one route is baked - a shell that ships one document is not an app`);
+      assert(existsSync(join(r.outDir, frontend, 'rosezm-shell.js')), `${shell}: the bridge ships inside the frontend`);
+      assert(readFileSync(join(r.outDir, frontend, 'index.html'), 'utf8').includes('rosezm-shell.js'), `${shell}: the landing document links the bridge`);
+      // The manifest records the api base too; the point is that it is named
+      // ONCE in the shipped app, not scattered through the frontend.
+      const apiIn = files.filter((f) => !f.endsWith('rosezm-export.json') && (() => { try { return readFileSync(f, 'utf8').includes('https://api.example.com'); } catch { return false; } })());
+      assert(apiIn.length === 1 && rel(apiIn[0]!) === `/${frontend}/rosezm-shell.js`, `${shell}: the deployed server is named in exactly one file - the bridge (got ${apiIn.map(rel).join(', ') || 'none'})`);
+      assert(r.pages.length > 0, `${shell}: the manifest reports the project's pages, not an empty list`);
+      // The SSR bundle is every API route, server action and middleware: the
+      // code that talks to the database. A shell's documents are baked and its
+      // dynamic half rides --api, so shipping it means shipping DB credentials
+      // inside a binary handed to end users.
+      for (const name of ['server.js', 'prod.mjs', 'mount.js']) {
+        assert(!files.some((f) => rel(f) === `/${frontend}/${name}`), `${shell}: ${name} is not shipped - a desktop binary is readable by everyone who installs it`);
+      }
+      assert(existsSync(join(r.outDir, frontend, 'client.js')), `${shell}: the client bundle survives the pruning`);
+    }
+    const wailsDir = join(scratch, 'shell-wails', 'wails');
+    for (const f of ['wails.json', 'go.mod', 'main.go', 'app.go']) assert(existsSync(join(wailsDir, f)), `wails: ${f} is generated`);
+    assert(/go:embed all:frontend\/dist/.test(readFileSync(join(wailsDir, 'main.go'), 'utf8')), 'wails: main.go embeds the built site');
+    assert(!/require\s+github\.com\/wailsapp/.test(readFileSync(join(wailsDir, 'go.mod'), 'utf8')), 'wails: no wails version is pinned - go mod tidy resolves it, and a yanked tag would break a working export');
+
+    const tauriDir = join(scratch, 'shell-tauri', 'tauri', 'src-tauri');
+    for (const f of ['Cargo.toml', 'build.rs', 'tauri.conf.json', 'src/main.rs', 'src/lib.rs', 'capabilities/default.json']) {
+      assert(existsSync(join(tauriDir, f)), `tauri: ${f} is generated`);
+    }
+    for (const [label, dir] of [['wails', join(scratch, 'shell-wails', 'wails')], ['tauri', join(scratch, 'shell-tauri', 'tauri')]] as const) {
+      assert(existsSync(join(dir, '.github', 'workflows', `${label}.yml`)), `${label}: the CI workflow ships with the export`);
+      assert(existsSync(join(dir, 'DEPLOY.md')), `${label}: DEPLOY.md ships with the export`);
+    }
+    const conf = JSON.parse(readFileSync(join(tauriDir, 'tauri.conf.json'), 'utf8'));
+    assert(conf.build.frontendDist === '../frontend', 'tauri: frontendDist points at the built site (relative to src-tauri/)');
+    assert(conf.app.security.csp === null, 'tauri: no CSP - the page inlines its bundle, and a script-src policy would break first paint');
+    assert(
+      /rosezm_desktop_lib::run\(\)/.test(readFileSync(join(tauriDir, 'src/main.rs'), 'utf8'))
+      && readFileSync(join(tauriDir, 'Cargo.toml'), 'utf8').includes('name = "rosezm_desktop_lib"'),
+      'tauri: the lib crate main.rs calls is the crate Cargo.toml declares',
+    );
+
+    // The bridge is code, so it is EXECUTED here, not grepped: a page that asks
+    // for the clipboard must get the clipboard. A shell ships no preload, but its
+    // WebView has the same browser APIs Electron's preload sits on - which is why
+    // these two shells can answer the capability contract without native code.
+    const capProj = join(scratch, 'shellcaps');
+    mkdirSync(join(capProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(capProj, 'src/pages/index.rose'), `<script>
+  let note = $state('');
+  async function copy(): Promise<void> {
+    await useNative('clipboard-write', { text: 'hi' });
+    note = String(await useNative('clipboard-read'));
+  }
+  async function ask(): Promise<void> {
+    await useNative('camera', { quality: 0.5 });
+    await useNative('share', { text: 'look' });
+    await useNative('geolocation', {});
+  }
+</script>
+<button on:click={copy}>{note}</button>
+<button on:click={ask}>ask</button>
+`);
+    const cap = await exportProject('wails', capProj, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'shellcaps-out') });
+    const bridge = readFileSync(join(cap.outDir, 'frontend', 'dist', 'rosezm-shell.js'), 'utf8');
+    const calls: string[] = [];
+    const sandbox: Record<string, unknown> = {
+      navigator: {
+        clipboard: {
+          readText: async () => 'from-clipboard',
+          writeText: async (t: string) => { calls.push('write:' + t); },
+        },
+        share: async (data: { text: string }) => { calls.push('share:' + data.text); },
+      },
+      fetch: async (url: unknown) => { calls.push('fetch:' + String(url)); return { ok: true }; },
+      document: {
+        createElement: () => ({
+          getContext: () => ({ drawImage: () => {} }),
+          toDataURL: () => 'data:image/jpeg;base64,x',
+          play: async () => {},
+          set srcObject(_v: unknown) {},
+          get videoWidth() { return 2; },
+        }),
+      },
+    };
+    sandbox.window = sandbox;
+    createContext(sandbox);
+    runInContext(bridge, sandbox);
+    const win = sandbox as any;
+    assert(typeof win.useNative === 'function', 'wails: the bundle\'s bare useNative(...) global exists before the page runs');
+    assert(await win.useNative('clipboard-write', { text: 'hi' }) === true && calls.includes('write:hi'), 'the shell answers useNative(clipboard-write) through the WebView clipboard API');
+    assert(await win.useNative('clipboard-read') === 'from-clipboard', 'the shell answers useNative(clipboard-read) the same way');
+    assert(await win.useNative('share', { text: 'look' }) === true && calls.includes('share:look'), 'the shell reaches navigator.share for share');
+    assert(await win.useNative('camera', { quality: 0.5 }) === null, 'camera with no mediaDevices is null - the contract\'s empty answer, not a throw inside a tap handler');
+    assert(await win.useNative('geolocation') === null, 'geolocation with no navigator.geolocation is null too');
+    win.fetch('/__rosezm/data?x=1', {});
+    win.fetch('/about', {});
+    win.fetch('/api/posts', { method: 'POST' });
+    assert(calls.includes('fetch:https://api.example.com/__rosezm/data?x=1'), 'a $data GET is rewritten to the deployed server');
+    assert(calls.includes('fetch:https://api.example.com/api/posts'), 'an /api/ request is rewritten too');
+    assert(calls.includes('fetch:/about'), 'a navigation GET stays on the asset server - it is a file');
+    // The bridge is shared, so the two shells must not drift: the same project
+    // exported for Tauri produces the same bytes.
+    const capTauri = await exportProject('tauri', capProj, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'shellcaps-tauri') });
+    assert(readFileSync(join(capTauri.outDir, 'frontend', 'rosezm-shell.js'), 'utf8') === bridge, 'the bridge is one implementation - both shells emit the same bytes for the same project');
+  }
+
+  // Flutter cannot build a platform whose runner folder is missing, and the
+  // runners are SDK templates (Gradle wrapper, Xcode project, CMake) - so the
+  // exporter asks the local SDK for them. The generation must happen OUTSIDE the
+  // export: `flutter create .` writes its own lib/main.dart, and running it in
+  // the tree would replace the app that was just emitted.
+  {
+    const r = await exportProject('flutter', example, { apiBase: 'x', outRoot: join(scratch, 'flutter-runners') });
+    const runners = ['android', 'ios', 'web', 'windows', 'macos', 'linux'].filter((p) => existsSync(join(r.outDir, p)));
+    const named = r.warnings.filter((w) => w.startsWith('flutter:') && w.includes('flutter create --platforms='));
+    assert(runners.length > 0 || named.length === 1, `flutter: the export either ships the platform runners or names the one command that creates them (runners: ${runners.join(', ') || 'none'})`);
+    assert(named.length <= 1, 'flutter: the runner story is stated once, not once per platform');
+    assert(readFileSync(join(r.outDir, 'lib/main.dart'), 'utf8').includes("import 'rosezm.dart'"), 'flutter: lib/main.dart is the exported app - the SDK template must be generated in a scratch directory, never here');
+  }
+
+  // R294: a generated artifact nobody in this suite reads is a trap. The
+  // manifests are machine-read by each platform's own tooling - WeChat
+  // DevTools, Tauri, Gradle, Maven - where one stray comma is a project that
+  // refuses to open. And the emitted Go is the one artifact with a real syntax
+  // checker on this machine, so when that checker is installed it runs.
+  {
+    const trees: Array<[string, string]> = [
+      ['weapp', result.outDir], ['alipay', alipay.outDir], ['flutter', flutter.outDir],
+      ['python', python.outDir], ['arkts', arkts.outDir], ['android', android.outDir],
+      ['xcode', xcode.outDir], ['java', java.outDir], ['dotnet', dotnet.outDir], ['cpp', cpp.outDir],
+      ['wails', join(scratch, 'shell-wails', 'wails')], ['tauri', join(scratch, 'shell-tauri', 'tauri')],
+    ];
+    let manifests = 0;
+    for (const [label, dir] of trees) {
+      const bad = walk(dir)
+        .filter((f) => f.endsWith('.json'))
+        .filter((f) => { try { JSON.parse(readFileSync(f, 'utf8')); return false; } catch { return true; } });
+      manifests += walk(dir).filter((f) => f.endsWith('.json')).length;
+      assert(bad.length === 0, `${label}: every generated .json parses (bad: ${bad.map((f) => f.slice(dir.length)).join(', ') || 'none'})`);
+    }
+    assert(manifests > 20, `the manifests are really checked (${manifests} of them), not skipped by an empty walk`);
+
+    // `-l` lists the files whose formatting differs, so an empty list means the
+    // emitted Go is already gofmt-clean; `-e` reports every parse error instead
+    // of stopping at the first.
+    const gofmt = spawnSync('gofmt', ['-l', '-e', 'main.go', 'app.go'], { cwd: join(scratch, 'shell-wails', 'wails'), encoding: 'utf8' });
+    if (gofmt.error) {
+      // No Go toolchain here. Say so rather than pretending the check ran.
+      console.log('ok - wails: gofmt is not installed, so the emitted Go is not syntax-checked here');
+    } else {
+      assert((gofmt.stderr || '').trim() === '', `wails: the emitted Go parses (${(gofmt.stderr || '').trim().slice(0, 160)})`);
+      assert(!(gofmt.stdout || '').trim(), `wails: the emitted Go is already gofmt-formatted, so a reader does not diff noise (needs formatting: ${(gofmt.stdout || '').trim()})`);
+    }
+  }
+
+  // The Zig target is the only one that is not a UI: the baked site, embedded in
+  // one binary that cross-compiles for the server it will run on. The tree is
+  // checked here; the compile needs a toolchain, so it is named when absent
+  // rather than pretended.
+  {
+    const r = await exportProject('zig', example, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'zig') });
+    for (const f of ['build.zig', 'build.zig.zon', 'main.zig', 'assets.zig', 'README.md']) {
+      assert(existsSync(join(r.outDir, f)), `zig: ${f} is generated`);
+    }
+    const frontendFiles = walk(join(r.outDir, 'frontend')).length;
+    const embedded = (readFileSync(join(r.outDir, 'assets.zig'), 'utf8').match(/@embedFile\(/g) ?? []).length;
+    assert(embedded === frontendFiles, `zig: every frontend file is embedded exactly once (${embedded} entries, ${frontendFiles} files)`);
+    assert(!readFileSync(join(r.outDir, 'assets.zig'), 'utf8').includes('server.js'), 'zig: the SSR bundle is not embedded - a static binary cannot run it, and it carries every API route');
+    assert(/\.minimum_zig_version = "0\.14\.0"/.test(readFileSync(join(r.outDir, 'build.zig.zon'), 'utf8')), 'zig: the version boundary is stated where the toolchain reads it (0.16 replaced std.net)');
+    assert(/std\.net\.Address\.parseIp/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the server listens through std.net, the 0.14 API the tree pins');
+    assert(existsSync(join(r.outDir, 'frontend', 'index.html')), 'zig: the landing route is baked - the binary serves documents, not a bundle');
+    // A CI scaffold turns "an exported project opened in an IDE and stopped
+    // there" into "push and it builds for every platform" - the same wiring the
+    // native targets already had.
+    for (const f of [join('.github', 'workflows', 'zig.yml'), 'DEPLOY.md']) {
+      assert(existsSync(join(r.outDir, f)), `zig: ${f} ships with the export`);
+    }
+    assert(readFileSync(join(r.outDir, '.github/workflows/zig.yml'), 'utf8').includes('version: 0.14.1'), 'zig: the CI pins the version the tree was written against');
+    assert(/std\.Thread\.spawn\(\.\{\}, serveConnection/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: every connection gets its own thread - a single stalled client must not hold the server');
+    assert(/fn readRequest\(/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the request is read until the header block is complete, not until the first packet returns');
+    const main = readFileSync(join(r.outDir, 'main.zig'), 'utf8');
+    assert(/405 Method Not Allowed/.test(main), 'zig: a POST answers 405 with an explanation, not 200 with a document that silently drops the action');
+    assert(/fn isDynamicPath\(/.test(main), 'zig: /api and /__rosezm are refused by name - the dynamic half has no backend here');
+
+    const zig = spawnSync('zig', ['version'], { encoding: 'utf8' });
+    if (zig.error) {
+      console.log('ok - zig: no zig toolchain on PATH, so the emitted tree is not compiled here (zig build -Doptimize=ReleaseSmall)');
+    } else {
+      const built = spawnSync('zig', ['build', '-Doptimize=ReleaseSmall'], { cwd: r.outDir, encoding: 'utf8', timeout: 600_000 });
+      assert(built.status === 0, `zig: the emitted project compiles (${(built.stderr || '').slice(0, 200)})`);
+    }
+  }
+
+  // The mini-program family is the most-used export, and its page JS is the
+  // artifact a bad rewrite turns into "the app does nothing on a real device".
+  // V8 parsing it is exactly `node --check`, done in one pass: the emitted
+  // scripts are CommonJS (Page/App/require), so a plain script parse is right.
+  {
+    const broken: string[] = [];
+    let parsedCount = 0;
+    for (const [label, dir] of [['weapp', result.outDir], ['alipay', alipay.outDir]] as const) {
+      for (const file of walk(dir).filter((f) => f.endsWith('.js'))) {
+        parsedCount++;
+        try {
+          new Script(readFileSync(file, 'utf8'), { filename: file });
+        } catch (err) {
+          broken.push(`${label}${file.slice(dir.length)}: ${(err as Error).message.slice(0, 70)}`);
+        }
+      }
+    }
+    assert(broken.length === 0, `mini-program: every emitted .js parses (${broken.slice(0, 3).join(' | ') || 'none'})`);
+    assert(parsedCount > 50, `the page scripts are really parsed (${parsedCount} files), not skipped by an empty walk`);
+  }
+
+  // CPython is the one toolchain on this machine that can check the Python
+  // target for real. A syntax error in a generated page is a crash on the
+  // user's machine, and the brace counter further down cannot see it.
+  {
+    const cpython = spawnSync('python', ['-m', 'compileall', '-q', python.outDir], { encoding: 'utf8' });
+    if (cpython.error) {
+      console.log('ok - python: no CPython on PATH, so the emitted pages are not syntax-checked here');
+    } else {
+      assert(cpython.status === 0, `python: every emitted page is valid Python (${(cpython.stderr || cpython.stdout || '').trim().slice(0, 200)})`);
+    }
+  }
+
+  // One manifest names the app on every store. Without it every export is
+  // `dev.rosezm.app` / `rosezm-desktop`: two apps built from this framework
+  // collide on every store, and the launcher always says "rosezm".
+  {
+    const idProj = join(scratch, 'identity');
+    mkdirSync(join(idProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(idProj, 'src/pages/index.rose'), '<div>hi</div>\n');
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme Widgets', version: '2.3.4', slug: 'acme-widgets' }));
+    const expected: Array<[string, string, RegExp]> = [
+      ['android', 'app/build.gradle.kts', /applicationId = "com\.acme\.widgets"/],
+      ['xcode', 'rosezmApp.xcodeproj/project.pbxproj', /PRODUCT_BUNDLE_IDENTIFIER = com\.acme\.widgets;/],
+      ['arkts', 'AppScope/app.json5', /"bundleName": "com\.acme\.widgets"/],
+      ['tauri', 'src-tauri/tauri.conf.json', /"identifier": "com\.acme\.widgets"/],
+      ['wails', 'wails.json', /"outputfilename": "acme-widgets"/],
+      // The Go module name carries the identity too: it shows up in the binary's
+      // metadata, and two projects on one machine must not share a module path.
+      ['wails', 'go.mod', /^module acme-widgets$/m],
+      ['java', 'pom.xml', /<artifactId>acme-widgets<\/artifactId>/],
+      ['dotnet', 'rosezmApp.csproj', /<AssemblyName>acme-widgets<\/AssemblyName>/],
+      ['zig', 'build.zig', /\.name = "acme-widgets"/],
+      // Flutter's package name is its own constraint (a valid Dart identifier)
+      // and it decides the generated Android applicationId, so it is the id's
+      // last label - org + name must reproduce the store id exactly.
+      ['flutter', 'pubspec.yaml', /^name: widgets$/m],
+      // The version travels with the identity: one number to maintain, not one
+      // per platform store.
+      ['flutter', 'pubspec.yaml', /^version: 2\.3\.4$/m],
+      ['arkts', 'oh-package.json5', /"version": "2\.3\.4"/],
+      ['electron', 'package.json', /"version": "2\.3\.4"/],
+      ['wails', 'wails.json', /"productVersion": "2\.3\.4"/],
+      ['zig', 'build.zig.zon', /\.version = "2\.3\.4"/],
+      // DevTools lists projects by name; a project that named itself should not
+      // show up as "rosezm-export" among every other export.
+      ['weapp', 'project.config.json', /"projectname": "acme-widgets"/],
+      // The app-level window title is what a page without its own <title> shows.
+      ['weapp', 'app.json', /"navigationBarTitleText": "Acme Widgets"/],
+      // The desktop window title is what the user sees in the taskbar; it is the
+      // app's name, not the framework's.
+      ['python', 'app.py', /self\.title\('Acme Widgets'\)/],
+      ['cpp', join('src', 'rose.cpp'), /setWindowTitle\("Acme Widgets"\)/],
+      ['java', join('src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseApp.java'), /new JFrame\("Acme Widgets"\)/],
+      ['dotnet', 'MainWindow.xaml', /Title="Acme Widgets"/],
+    ];
+    for (const [target, rel, re] of expected) {
+      const r = await exportProject(target as 'android', idProj, { apiBase: 'x', outRoot: join(scratch, `id-${target}`) });
+      assert(re.test(readFileSync(join(r.outDir, rel), 'utf8')), `${target}: the store identity comes from rosezm.app.json, not a hardcoded default`);
+    }
+    // The name is user text that lands in XML: escaped, not trusted.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: "Ben & Jerry's <App>", version: '1.0.0', slug: 'acme' }));
+    forgetAppIdentity();
+    const amp = await exportProject('android', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-escape') });
+    const strings = readFileSync(join(amp.outDir, 'app/src/main/res/values/strings.xml'), 'utf8');
+    assert(strings.includes('Ben &amp; Jerry\'s &lt;App&gt;'), 'android: an app name with & and < is escaped, so the manifest still parses');
+    // A bad id is a trust boundary: it decides whether Gradle or Xcode can open
+    // the project at all, so it is refused with the file named.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'not a valid id!' }));
+    forgetAppIdentity();
+    let refused = '';
+    try { await exportProject('android', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-bad') }); } catch (err) { refused = String(err); }
+    assert(/rosezm\.app\.json: "id" must look like a reverse-DNS name/.test(refused), 'a malformed store id is refused at the boundary, naming the file');
+
+    // The identity cache must follow the file, not the process: a dev server or
+    // an `export all` is long-lived, and an identity edited between two exports
+    // shipped the FIRST one before this. Reproduced, hence the regression lock.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.first', name: 'First', version: '1.0.0', slug: 'first' }));
+    forgetAppIdentity();
+    const before = await exportProject('electron', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-stale-1') });
+    const nameOf = (dir: string) => JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name;
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.first', name: 'Second', version: '2.0.0', slug: 'first' }));
+    const after = await exportProject('electron', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-stale-2') });
+    // The electron package name is the slug (shared by design here), so the
+    // observable difference is the version.
+    const verOf = (dir: string) => JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version;
+    assert(verOf(before.outDir) === '1.0.0' && verOf(after.outDir) === '2.0.0', 'an identity edited between two exports is re-read - the cache follows the file mtime');
+  }
+
+  // Two P0 desktop reports, both about a window that exists but is not on
+  // screen. The generated shell carries the fix, so an app author never has to
+  // rediscover it (BUG.md CF and CG).
+  {
+    const r = await exportProject('electron', example, { apiBase: 'x', outRoot: join(scratch, 'electron-window') });
+    const main = readFileSync(join(r.outDir, 'main.cjs'), 'utf8');
+    assert(main.includes('function showVerified'), 'electron: the shell shows through a verified wrapper - a frameless window can lose its first show()');
+    assert(/tries < 4/.test(main) && /setTimeout\(retry, 150\)/.test(main), 'electron: the wrapper re-checks and retries, bounded, instead of showing once and hoping');
+    assert(/show: false/.test(main) && main.includes("window.once('ready-to-show'"), 'electron: the window is built hidden and shown on the first paint, so it never opens on a white flash');
+    assert(!/setOpacity\s*\(/.test(main), 'electron: the shell never calls setOpacity - on Windows it leaves a transparent window uncomposited for good');
+    const readme = readFileSync(join(r.outDir, 'README.md'), 'utf8');
+    assert(readme.includes('setOpacity') && readme.includes('first show() can be swallowed') && readme.includes('desktopCapturer.getSources'), 'electron: the generated README names both traps and how to prove a window is really on screen');
+  }
+
+  // A project that talks to its server, exported without --api, paints correctly
+  // and then does nothing when tapped. Named per file with the flag, the way
+  // every other thing a target cannot do is named.
+  {
+    const quiet = await exportProject('weapp', example, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'api-on') });
+    assert(!quiet.warnings.some((w) => /server call\(s\)/.test(w)), 'weapp: a project exported with --api gets no missing-endpoint warning');
+    const loud = await exportProject('weapp', example, { outRoot: join(scratch, 'api-off') });
+    const warn = loud.warnings.find((w) => /server call\(s\)/.test(w)) ?? '';
+    assert(/^weapp: \d+ server call\(s\) in .*\.rose/.test(warn), 'weapp: a project with server calls and no --api names them, with the file');
+    assert(warn.includes('--api'), 'the missing-endpoint warning names the flag that fixes it');
+    assert(warn.includes('+'), 'the warning says how many more files there are instead of listing them all');
   }
 
   // R292: an inline style built by concatenating strings. WXML's data binding

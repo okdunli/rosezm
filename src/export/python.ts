@@ -32,6 +32,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity, type AppIdentity } from './app-identity.js';
 import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, type Node as IrNode } from './ir.js';
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
@@ -92,6 +93,8 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'python');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
 
@@ -180,7 +183,7 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   for (const page of pages) {
     await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), renderPage(page, components, warnings, content, compCss, globalCss, hoverStyles), 'utf8');
   }
-  await fs.promises.writeFile(path.join(out, 'app.py'), renderApp(pages), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'app.py'), renderApp(pages, app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, warnings), 'utf8');
 
   return { pages: pages.map((p) => `pages/${p.name}.py`), components: components.map((c) => c.name) };
@@ -725,22 +728,112 @@ def rose_text(fn):
         return str(fn())
     except Exception:
         return 'This section failed to render.'
+import os
+import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
-API_BASE = ${JSON.stringify(apiBase)}
+# The base URL the data channel and the server actions talk to. ROSEZM_API
+# overrides the value baked at export time - dev/staging/prod switch without
+# a re-export; unset or empty keeps the export value.
+API_BASE = os.environ.get('ROSEZM_API') or ${JSON.stringify(apiBase)}
+
+# A middleware wall answers the data channel as it answers a document: a 302 to
+# the sign-in page, or a bare 401/403. urllib follows a redirect on its own,
+# which turned a wall into the sign-in page's HTML parsed as JSON - the page
+# then painted an empty shell with no reason given. A non-redirecting opener
+# keeps the 3xx visible, and WALL carries it to the app shell, the one place
+# that knows which pages this export has.
+WALL = None
+
+
+class _RoseNoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # None is urllib's 'do not follow': it raises the HTTPError instead, so
+        # the status and the Location stay readable here.
+        return None
+
+
+_ROSE_OPENER = urllib.request.build_opener(_RoseNoRedirect)
+
+# The minimal session relay: the most recent Set-Cookie header, sent back
+# verbatim as the next request's Cookie header. One value, latest wins - the
+# server formatted it, the kit only carries it. Without it a signed-in session
+# never reaches this app: every request would arrive unauthenticated.
+SESSION_COOKIE = ''
+
+
+def _rose_capture_cookie(headers):
+    """Store the Set-Cookie header the response just carried, if any."""
+    global SESSION_COOKIE
+    try:
+        value = headers.get('Set-Cookie') if headers is not None else None
+    except Exception:
+        value = None
+    if value:
+        SESSION_COOKIE = value
+
+
+def wall_path(location):
+    """The route a wall's Location names: the path of an absolute URL, no
+    query, no doubled slash and no trailing slash - /admin/ is the same wall
+    as /admin."""
+    path = str(location or '')
+    if '://' in path:
+        path = path.split('://', 1)[1]
+        slash = path.find('/')
+        path = path[slash:] if slash >= 0 else '/'
+    cut = path.find('?')
+    if cut >= 0:
+        path = path[:cut]
+    while '//' in path:
+        path = path.replace('//', '/')
+    if len(path) > 1 and path.endswith('/'):
+        path = path[:-1]
+    return path
+
+
+def wall_status(error):
+    """(status, location) when this HTTP error is a middleware wall, else None.
+    Only a 3xx that names a destination, or a bare 401/403, is a wall; every
+    other failure keeps the data-less answer it always had."""
+    status = int(getattr(error, 'code', 0) or 0)
+    location = ''
+    try:
+        if error.headers is not None:
+            location = error.headers.get('Location') or ''
+    except Exception:
+        location = ''
+    if 300 <= status < 400 and location:
+        return status, location
+    if status in (401, 403):
+        return status, ''
+    return None
 
 
 def data_patch(route):
     """The JSON half of a render: the state the page's $data produced."""
+    global WALL
+    WALL = None
     if not API_BASE:
         return {}
     url = API_BASE + '/__rosezm/data?path=' + urllib.parse.quote(route)
+    request = urllib.request.Request(url)
+    if SESSION_COOKIE:
+        request.add_header('Cookie', SESSION_COOKIE)
     try:
-        with urllib.request.urlopen(url, timeout=3) as response:
+        with _ROSE_OPENER.open(request, timeout=3) as response:
+            _rose_capture_cookie(response.headers)
             payload = json.loads(response.read().decode('utf-8'))
         state = payload.get('state')
         return state if isinstance(state, dict) else {}
+    except urllib.error.HTTPError as error:
+        # A wall's body is the sign-in page, never data: it is dropped, and the
+        # app shell opens the page the redirect names (or says it has none).
+        _rose_capture_cookie(error.headers)
+        WALL = wall_status(error)
+        return {}
     except Exception:
         # A missing server is a data-less window, not a crash.
         return {}
@@ -753,18 +846,28 @@ def t(key, params=None):
 
 def action_patch(route, name):
     """POST __action=<name> - the framework's own server-action protocol."""
+    global WALL
+    WALL = None
     if not API_BASE:
         return {}
     url = API_BASE + route
     body = urllib.parse.urlencode({'__action': name}).encode('utf-8')
     request = urllib.request.Request(url, data=body, method='POST')
     request.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    if SESSION_COOKIE:
+        request.add_header('Cookie', SESSION_COOKIE)
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with _ROSE_OPENER.open(request, timeout=5) as response:
+            _rose_capture_cookie(response.headers)
             payload = json.loads(response.read().decode('utf-8'))
         if isinstance(payload, dict) and isinstance(payload.get('state'), dict):
             return payload['state']
         return payload if isinstance(payload, dict) else {}
+    except urllib.error.HTTPError as error:
+        # The action was walled: its body is the sign-in page, not a patch.
+        _rose_capture_cookie(error.headers)
+        WALL = wall_status(error)
+        return {}
     except Exception:
         return {}
 ${nativeBlock}`;
@@ -779,6 +882,8 @@ Generated by \`rosezm export python\` from the project's \`.rose\` pages.
 - Run: \`python app.py\`
 - Server: \`rosezm export python --api <base>\` writes the base URL into
   \`rosezm.py\` (data channel + server actions). Current: \`${apiBase || '(unset)'}\`
+- Override at runtime without a re-export: set the \`ROSEZM_API\` environment
+  variable to the base URL before launching (\`unset\` = use the value above).
 
 The state fields, handlers and the view tree are generated from the same IR the
 web build and the mini-program target use. Every element is resolved through
@@ -795,13 +900,15 @@ class bound to state (class={expr}) resolves at runtime from styles.py.
 ${renderWarningSection(warnings)}`;
 }
 
-function renderApp(pages: Array<{ route: string; name: string; params: string[]; title: string }>): string {
+function renderApp(pages: Array<{ route: string; name: string; params: string[]; title: string }>, app: AppIdentity): string {
+  const appName = app.name;
   const imports = pages.map((p) => `from pages import ${p.name} as page_${p.name}`).join('\n');
   const table = pages.map((p) => `    ('${p.route}', page_${p.name}),`).join('\n');
   return `"""rosezm - the exported Python desktop app (stdlib Tkinter)."""
 import json
 import os
 import re
+import sys
 import tkinter as tk
 from tkinter import ttk
 
@@ -850,7 +957,7 @@ class RoseState(dict):
 class RoseApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('rosezm')
+        self.title('${appName}')
         self.geometry('900x720')
         self.configure(bg='#ffffff')
         # The shell's body { padding: 2rem }: a Frame's padx/pady is interior
@@ -870,8 +977,10 @@ class RoseApp(tk.Tk):
         self.bind_all('<Alt-Left>', lambda e: self.back())
         self.bind_all('<Escape>', lambda e: self.back())
 
-    def resolve(self, route):
-        """Match a route against the page table, dynamic segments included."""
+    def page_of(self, route):
+        """The page this route names, or None when this export has none.
+        resolve() answers the launch page for anything it does not know; a
+        redirect must not - an unexported /sign would open the index page."""
         for pattern, module in PAGES:
             if pattern == route:
                 return pattern, module, {}
@@ -889,41 +998,83 @@ class RoseApp(tk.Tk):
                     break
             if ok:
                 return pattern, module, params
+        return None
+
+    def resolve(self, route):
+        """Match a route against the page table, dynamic segments included."""
+        hit = self.page_of(route)
+        if hit:
+            return hit
         return PAGES[0][0], PAGES[0][1], {}
 
     def state_of(self, route):
         pattern, module, params = self.resolve(route)
-        if pattern not in self.states:
-            # R253: a seed that reads the app handle is a lambda on the module
-            # (STATE is built before any RoseApp exists), and build() resolves it
-            # LATER - this copy is taken BEFORE that, so resolving the callables
-            # here too. Without it st['q'] held the lambda itself and the page
-            # read it as a string ('function' object has no attribute 'strip').
-            st = RoseState(getattr(module, 'PERSIST', ()), {})
-            __seeds = set(getattr(module, '__APP_SEEDS', ()))
-            for __k, __v in getattr(module, 'STATE', {}).items():
-                if callable(__v):
-                    st[__k] = __v(self) if __k in __seeds else __v()
-                else:
-                    st[__k] = __v
-            st.update(params)
-            st.update(rosezm.data_patch(route))
-            # A $persist field starts from the on-disk store when it has been
-            # written before - that is what makes it survive a restart.
-            for __k in getattr(module, 'PERSIST', ()):
-                if __k in _rose_store:
-                    st[__k] = _rose_store[__k]
+        if pattern in self.states:
+            return self.states[pattern]
+        # R253: a seed that reads the app handle is a lambda on the module
+        # (STATE is built before any RoseApp exists), and build() resolves it
+        # LATER - this copy is taken BEFORE that, so resolving the callables
+        # here too. Without it st['q'] held the lambda itself and the page
+        # read it as a string ('function' object has no attribute 'strip').
+        st = RoseState(getattr(module, 'PERSIST', ()), {})
+        __seeds = set(getattr(module, '__APP_SEEDS', ()))
+        for __k, __v in getattr(module, 'STATE', {}).items():
+            if callable(__v):
+                st[__k] = __v(self) if __k in __seeds else __v()
+            else:
+                st[__k] = __v
+        st.update(params)
+        st.update(rosezm.data_patch(route))
+        # A $persist field starts from the on-disk store when it has been
+        # written before - that is what makes it survive a restart.
+        for __k in getattr(module, 'PERSIST', ()):
+            if __k in _rose_store:
+                st[__k] = _rose_store[__k]
+        # A walled route has no server data to remember: keeping it out of the
+        # cache means a later visit asks again instead of painting the empty
+        # shell forever.
+        if not rosezm.WALL:
             self.states[pattern] = st
-        return self.states[pattern]
+        return st
 
-    def show(self, route, push=True):
+    def show(self, route, push=True, follow=True):
         pattern, module, _ = self.resolve(route)
         if push and self.current != pattern:
             self.history.append(self.current)
         self.current = pattern
+        state = self.state_of(route)
+        if rosezm.WALL:
+            # A middleware wall answered the data channel, so the state holds no
+            # server data: the server sent a redirect or a refusal, never a
+            # patch. Say which route was walled - always - and go where the
+            # redirect names when this export has that page. One hop only: a
+            # redirect loop (A -> B -> A) must not recurse.
+            status, location = rosezm.WALL
+            rosezm.WALL = None
+            target = rosezm.wall_path(location)
+            hit = self.page_of(target) if target else None
+            if follow and hit and hit[0] != pattern:
+                print('rosezm: %s is behind a middleware wall (%d -> %s); opening %s'
+                      % (route, status, location, target), file=sys.stderr)
+                self.show(target, push=False, follow=False)
+                return
+            if hit and hit[0] == pattern:
+                # The redirect names the page it walled (its trailing-slash
+                # form, say): there is nowhere else to go.
+                print('rosezm: %s is behind a middleware wall (%d -> %s); it names this same page'
+                      % (route, status, location), file=sys.stderr)
+            elif hit:
+                # This hop was the redirect: the page it named is walled too.
+                print('rosezm: %s is behind a middleware wall (%d -> %s); it points at a page that is walled too'
+                      % (route, status, location), file=sys.stderr)
+            elif location:
+                print('rosezm: %s is behind a middleware wall (%d -> %s); this export has no page for it'
+                      % (route, status, location), file=sys.stderr)
+            else:
+                print('rosezm: %s is behind a middleware wall (%d); the server refused it'
+                      % (route, status), file=sys.stderr)
         for child in list(self.body.winfo_children()):
             child.destroy()
-        state = self.state_of(route)
         module.build(self, state, self.body)
 
     def back(self):

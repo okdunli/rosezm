@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
@@ -80,6 +81,8 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'java');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   const srcRoot = path.join(out, 'src', 'main', 'java', PKG_PATH);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
@@ -170,7 +173,7 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(srcRoot, 'RoseTheme.java'), renderTheme(styles), 'utf8');
   await fs.promises.writeFile(path.join(srcRoot, 'RoseKit.java'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
-  await fs.promises.writeFile(path.join(srcRoot, 'RoseApp.java'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
+  await fs.promises.writeFile(path.join(srcRoot, 'RoseApp.java'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))], app), 'utf8');
   await fs.promises.writeFile(path.join(srcRoot, 'Main.java'), renderMain(), 'utf8');
   for (const comp of components) {
     await fs.promises.writeFile(path.join(srcRoot, 'components', comp.cls + 'View.java'), renderComponent(comp, styles, warnings, sheets.get(comp.cls) ?? parseStylesheet('')), 'utf8');
@@ -178,8 +181,8 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   for (const page of pages) {
     await fs.promises.writeFile(path.join(srcRoot, 'pages', page.cls + 'Page.java'), renderPage(page, components, styles, warnings, content, sheets.get(page.cls) ?? parseStylesheet('')), 'utf8');
   }
-  await fs.promises.writeFile(path.join(out, 'pom.xml'), renderPom(), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'pom.xml'), renderPom(app), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(app, opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
   return {
     pages: pages.map((p) => `src/main/java/${PKG_PATH}/pages/${p.cls}Page.java`),
     components: components.map((c) => `src/main/java/${PKG_PATH}/components/${c.cls}View.java`),
@@ -1889,18 +1892,35 @@ public static Object roseThrow(Object message) {
     throw new RuntimeException(String.valueOf(message));
 }
 public final class RoseKit {
-    public static final String API_BASE = ${JSON.stringify(apiBase)};
+    /** The backend URL: ROSEZM_API overrides the value baked at export time, so dev/staging/prod switch without a re-export. */
+    public static final String API_BASE = System.getenv("ROSEZM_API") != null ? System.getenv("ROSEZM_API") : ${JSON.stringify(apiBase)};
+
+    /** The session cookie the server last set: the raw Set-Cookie header value
+     *  of the most recent response, relayed verbatim as the Cookie header on the
+     *  next request. Not a cookie jar - one string, latest response wins - just
+     *  enough that a session one channel establishes is carried on both. */
+    private static String sessionCookie = "";
 ${contentBlock}${nativeKit(native)}
 
     private RoseKit() {}
 
     /** The JSON half of a render: the state the page's $data produced. */
-    @SuppressWarnings("unchecked")
     public static Map<String, Object> data(String route) {
+        return data(route, null);
+    }
+
+    /** The same channel with the app's own router: a middleware wall is never
+     *  parsed as data, and a redirect to a page this export carries is opened
+     *  (the predicate says whether it could). */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> data(String route, java.util.function.Predicate<String> open) {
         if (API_BASE.isEmpty()) return new LinkedHashMap<>();
         try {
-            String body = request(API_BASE + "/__rosezm/data?path=" + URLEncoder.encode(route, "UTF-8"), "GET", null);
-            Object parsed = Json.parse(body);
+            Response response = request(API_BASE + "/__rosezm/data?path=" + URLEncoder.encode(route, "UTF-8"), "GET", null);
+            if (wall(route, response.status, response.location, open)) return new LinkedHashMap<>();
+            // Any other non-2xx is the same data-less screen it always was.
+            if (response.status < 200 || response.status >= 300) return new LinkedHashMap<>();
+            Object parsed = Json.parse(response.body);
             if (parsed instanceof Map) {
                 Object state = ((Map<String, Object>) parsed).get("state");
                 if (state instanceof Map) return (Map<String, Object>) state;
@@ -1917,8 +1937,10 @@ ${contentBlock}${nativeKit(native)}
     public static Map<String, Object> action(String route, String name) {
         if (API_BASE.isEmpty()) return new LinkedHashMap<>();
         try {
-            String response = request(API_BASE + route, "POST", "__action=" + URLEncoder.encode(name, "UTF-8"));
-            Object parsed = Json.parse(response);
+            Response response = request(API_BASE + route, "POST", "__action=" + URLEncoder.encode(name, "UTF-8"));
+            if (wall(route, response.status, response.location, null)) return new LinkedHashMap<>();
+            if (response.status < 200 || response.status >= 300) return new LinkedHashMap<>();
+            Object parsed = Json.parse(response.body);
             if (parsed instanceof Map) {
                 Object state = ((Map<String, Object>) parsed).get("state");
                 if (state instanceof Map) return (Map<String, Object>) state;
@@ -1929,11 +1951,72 @@ ${contentBlock}${nativeKit(native)}
         return new LinkedHashMap<>();
     }
 
-    private static String request(String url, String method, String body) throws IOException {
+    /** A middleware wall answers the data channel and the action channel exactly
+     *  as it answers a document: a 302 to the sign-in page, or a bare 401/403.
+     *  The kit used to swallow it, so a walled page painted its empty shell with
+     *  no hint at all - the app looked broken rather than logged out. The wall's
+     *  body is never data: a 302 body can be the sign-in page's HTML. Answers
+     *  true when the response was a wall. */
+    private static boolean wall(String route, int status, String location, java.util.function.Predicate<String> open) {
+        if (status >= 300 && status < 400) {
+            String target = wallTarget(location);
+            boolean opened = !target.isEmpty() && open != null && open.test(target);
+            System.err.println("rosezm: " + route + " is behind a middleware wall (" + status
+                    + (target.isEmpty() ? "" : " -> " + target) + ")"
+                    + (opened ? "; opening " + target : "; this export has no page for it"));
+            return true;
+        }
+        if (status == 401 || status == 403) {
+            System.err.println("rosezm: " + route + " is behind a middleware wall (" + status + ")");
+            return true;
+        }
+        return false;
+    }
+
+    /** A wall's Location header reduced to the route it names: any scheme and
+     *  host dropped, query and fragment dropped, double slashes collapsed and
+     *  one trailing slash removed - a trailing slash is not a different route. */
+    static String wallTarget(String location) {
+        String path = location == null ? "" : location.trim();
+        // Only a location that STARTS with a scheme is absolute: a sign-in
+        // redirect's own ?next=https://... must not lose its route to that URL.
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            int slash = path.indexOf('/', path.indexOf("://") + 3);
+            path = slash >= 0 ? path.substring(slash) : "/";
+        }
+        int query = path.indexOf('?');
+        if (query >= 0) path = path.substring(0, query);
+        int hash = path.indexOf('#');
+        if (hash >= 0) path = path.substring(0, hash);
+        while (path.contains("//")) path = path.replace("//", "/");
+        if (path.length() > 1 && path.endsWith("/")) path = path.substring(0, path.length() - 1);
+        if (!path.isEmpty() && !path.startsWith("/")) path = "/" + path;
+        return path;
+    }
+
+    /** What the server answered. The status is kept because a wall answers
+     *  302/401/403, and that answer must never be mistaken for data. */
+    private static final class Response {
+        final int status;
+        final String location;
+        final String body;
+
+        Response(int status, String location, String body) {
+            this.status = status;
+            this.location = location;
+            this.body = body;
+        }
+    }
+
+    private static Response request(String url, String method, String body) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setRequestMethod(method);
+        // A wall must be seen, not followed: following the 302 hands back the
+        // sign-in page as if it were this route's data.
+        connection.setInstanceFollowRedirects(false);
         connection.setConnectTimeout(5000);
         connection.setReadTimeout(8000);
+        if (!sessionCookie.isEmpty()) connection.setRequestProperty("Cookie", sessionCookie);
         if (body != null) {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
@@ -1941,11 +2024,23 @@ ${contentBlock}${nativeKit(native)}
                 out.write(body.getBytes(StandardCharsets.UTF_8));
             }
         }
-        try (InputStream in = connection.getInputStream()) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } finally {
+        int status = connection.getResponseCode();
+        String location = connection.getHeaderField("Location");
+        String setCookie = connection.getHeaderField("Set-Cookie");
+        if (setCookie != null && !setCookie.isEmpty()) sessionCookie = setCookie;
+        String text = "";
+        // An error status used to raise on getInputStream and leave the page
+        // data-less; its body stays unread, which is the same outcome.
+        if (status < 400) {
+            try (InputStream in = connection.getInputStream()) {
+                text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            } finally {
+                connection.disconnect();
+            }
+        } else {
             connection.disconnect();
         }
+        return new Response(status, location, text);
     }
 
     /** A minimal JSON parser: objects, arrays, strings, numbers, booleans, null. */
@@ -2077,7 +2172,8 @@ public final class Main {
 `;
 }
 
-function renderApp(pages: Array<{ route: string; cls: string; params: string[] }>, persistKeys: string[] = []): string {
+function renderApp(pages: Array<{ route: string; cls: string; params: string[] }>, persistKeys: string[] = [], app: AppIdentity): string {
+  const appName = app.name;
   const branches: string[] = [];
   for (const p of pages) {
     if (p.params.length === 0) {
@@ -2100,12 +2196,18 @@ import java.util.*;
 
 /** The frame, the shared state and the route table. */
 public final class RoseApp {
-    private static final String[] PERSIST_KEYS = {${persistKeys}};
-    private final JFrame frame = new JFrame("rosezm");
+    private static final String[] PERSIST_KEYS = {${persistKeys.map((k) => JSON.stringify(k)).join(", ")}};
+    /** Every route this export has a page for: a wall's redirect is only opened
+     *  when the route table carries it. */
+    private static final String[] ROUTES = {${pages.map((p) => JSON.stringify(p.route)).join(', ')}};
+    private final JFrame frame = new JFrame("${appName}");
     private final Map<String, Object> state = new LinkedHashMap<>();
     private final Map<String, String> params = new LinkedHashMap<>();
     private final Set<String> loadedRoutes = new HashSet<>();
     private String route = "/";
+    /** Bumped whenever a wall moves the view, so the render that started the
+     *  redirect stops instead of painting over the page the wall opened. */
+    private int wallMoves;
     private final java.util.ArrayDeque<String> history = new java.util.ArrayDeque<>();
     /** Keys a page declared with $persist: they are mirrored into Preferences. */
     private final Set<String> persisted = new HashSet<>(java.util.Arrays.asList(PERSIST_KEYS));
@@ -2168,6 +2270,31 @@ public final class RoseApp {
         render();
     }
 
+    /** The page a middleware wall's redirect names, or null when this export
+     *  never wrote that route. The kit already dropped a trailing slash, so
+     *  /sign and /sign/ arrive here as the same route. */
+    private String wallPage(String target) {
+        for (String pattern : ROUTES) {
+            if (pattern.indexOf(':') < 0) {
+                if (pattern.equals(target)) return target;
+            } else if (java.util.regex.Pattern.compile("^" + pattern.replaceAll(":[^/]+", "([^/]+)") + "$").matcher(target).matches()) {
+                return target;
+            }
+        }
+        return null;
+    }
+
+    /** RoseKit calls this when a wall answers: open the exported page the
+     *  redirect names, or answer false so the kit logs that this export has no
+     *  page for it. A route is fetched once, so two walled pages that redirect
+     *  to each other cannot bounce forever. */
+    private boolean openWall(String target) {
+        if (target == null || wallPage(target) == null) return false;
+        wallMoves++;
+        navigate(target);
+        return true;
+    }
+
     public void render() {
         JPanel content = new JPanel();
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
@@ -2176,7 +2303,10 @@ public final class RoseApp {
 
         // Server data: the route's $data, once per route visit.
         if (loadedRoutes.add(route)) {
-            Map<String, Object> patch = RoseKit.data(route);
+            int moves = wallMoves;
+            Map<String, Object> patch = RoseKit.data(route, this::openWall);
+            // A wall opened another page: that render already painted the frame.
+            if (wallMoves != moves) return;
             for (Map.Entry<String, Object> entry : patch.entrySet()) {
                 if (!state.containsKey(entry.getKey())) state.put(entry.getKey(), entry.getValue());
             }
@@ -2203,15 +2333,15 @@ ${branches.join('\n')}
 `;
 }
 
-function renderPom(): string {
+function renderPom(app: AppIdentity): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <groupId>dev.rosezm</groupId>
-    <artifactId>rosezm-desktop</artifactId>
-    <version>1.0.0</version>
+    <artifactId>${app.slug}</artifactId>
+    <version>${app.version}</version>
     <packaging>jar</packaging>
 
     <properties>
@@ -2240,13 +2370,13 @@ function renderPom(): string {
 `;
 }
 
-function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[]): string {
+function renderReadme(app: AppIdentity, apiBase: string, pageCount: number, compCount: number, warnings: string[]): string {
   return `# rosezm -> Java desktop (Swing, stdlib only)
 
 Generated by \`rosezm export java\` from the project's \`.rose\` pages.
 
 - ${pageCount} page(s), ${compCount} component(s)
-- Build: \`mvn package\`, run: \`java -jar target/rosezm-desktop-1.0.0.jar\`
+- Build: \`mvn package\`, run: \`java -jar target/${app.slug}-${app.version}.jar\`
   (or open the folder in IntelliJ IDEA / Eclipse / VS Code)
 - Server: \`rosezm export java --api <base>\` writes the base URL into
   \`src/main/java/${PKG_PATH}/RoseKit.java\`. Current: \`${apiBase || '(unset)'}\`

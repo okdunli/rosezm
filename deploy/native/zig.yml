@@ -1,0 +1,46 @@
+# rosezm - Zig cross-compile (GitHub Actions).
+#
+# `rosezm export zig` copies this file into the export tree as
+# .github/workflows/zig.yml. The whole point of this target is that ONE machine
+# cross-compiles for every server OS, so the matrix is targets, not runners.
+#
+# No credential is written into this file; there is nothing to sign - the
+# artifact is a static binary you scp and run.
+
+name: Zig
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+          - x86_64-macos
+          - aarch64-macos
+          - x86_64-windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+
+      # ReleaseSmall: the binary is shipped, not debugged, and the asset table is
+      # already in memory - size is the only axis that matters here.
+      - name: zig build ${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseSmall -Dtarget=${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rosezm-zig-${{ matrix.target }}
+          path: zig-out/bin/*
+          if-no-files-found: error

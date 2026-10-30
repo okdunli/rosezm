@@ -1786,5 +1786,89 @@ function flip(): void { $setState('known', !known()); }
   rmSync(svgOut, { recursive: true, force: true });
 }
 
+// CH (BUG.md): a `style="...{state}..."` attribute must follow the state. The
+// reporter saw both branches frozen on the first frame; it does not reproduce
+// here, which is exactly why the behaviour is locked now - a style binding that
+// stops updating hides whole rows and looks like a logic bug in the app.
+{
+  const styRoot = join(tmpdir(), 'rosezm-style-src');
+  rmSync(styRoot, { recursive: true, force: true });
+  mkdirSync(join(styRoot, 'src', 'pages'), { recursive: true });
+  writeFileSync(join(styRoot, 'src', 'pages', 'index.rose'), `<script>
+let known = $state(false);
+let v = $state('--');
+function flip(): void { known = true; v = '84'; }
+</script>
+<svg viewBox="0 0 100 100">
+  <text x="10" y="20" style="display: {known() ? '' : 'none'};">{v()}</text>
+  <text x="10" y="40" style="display: {known() ? 'none' : ''};">dash</text>
+</svg>
+<button on:click={flip}>go</button>
+`);
+  const { buildProject } = await import('../src/compiler/index.js');
+  const styOut = join(tmpdir(), 'rosezm-style-dist');
+  rmSync(styOut, { recursive: true, force: true });
+  await buildProject(styRoot, styOut);
+  const styServer = await import(pathToFileURL(join(styOut, 'server.js')).href);
+  const home = await styServer.renderPage('/');
+  document.getElementById('__rosezm_state')?.remove();
+  const stateEl = document.createElement('script');
+  stateEl.id = '__rosezm_state';
+  stateEl.textContent = home.state;
+  document.body.appendChild(stateEl);
+  appEl.innerHTML = home.html;
+  const styClient = await import(pathToFileURL(join(styOut, 'client.js')).href);
+  await styClient.start(appEl, '/', true);
+  const texts = [...appEl.querySelectorAll('svg text')];
+  assert(texts.length === 2, 'the two styled texts rendered');
+  assert(texts[0]!.getAttribute('style')!.includes('none'), 'the first frame hides the number');
+  assert(!texts[1]!.getAttribute('style')!.includes('none'), 'the first frame shows the dash');
+  (appEl.querySelector('[data-on-click]')! as any).click();
+  await tick();
+  assert(!texts[0]!.getAttribute('style')!.includes('none'), 'a style attribute follows the state on the first text');
+  assert(texts[1]!.getAttribute('style')!.includes('none'), 'and on the second - both branches swapped');
+  assert(texts[0]!.textContent === '84', 'the text binding in the same element updated too');
+  rmSync(styRoot, { recursive: true, force: true });
+  rmSync(styOut, { recursive: true, force: true });
+}
+
+// BL: a client-side navigation asks the server's middleware gate BEFORE it
+// paints. That is the whole point - no middleware can run in the browser, so a
+// wall that answers 302 only on the server must still stop the page.
+{
+  const real = (globalThis as any).fetch;
+  const seen: string[] = [];
+  let gateAnswer: any = { ok: true, status: 200, json: async () => ({ redirect: '/sign', status: 302 }) };
+  (globalThis as any).fetch = async (url: string) => {
+    const u = String(url);
+    if (u.startsWith('/__rosezm/gate')) {
+      seen.push(u);
+      return gateAnswer;
+    }
+    return real(url);
+  };
+  const beforeGate = appEl.innerHTML;
+  await start(appEl, '/vault', false);
+  assert(seen.length === 1 && seen[0]!.includes('path=%2Fvault'), 'a client-side navigation asks the gate for the target path');
+  assert(appEl.innerHTML === beforeGate, 'a walled route is NOT painted - the gate said where to go, so nothing renders');
+
+  // The same route, walled differently: a gate that answers a bare status must
+  // hand the whole request back to the server rather than render.
+  seen.length = 0;
+  gateAnswer = { ok: true, status: 200, json: async () => ({ redirect: '', status: 401 }) };
+  const beforeRefusal = appEl.innerHTML;
+  await start(appEl, '/vault', false);
+  assert(appEl.innerHTML === beforeRefusal, 'a gate that answers a status with no redirect paints nothing either');
+
+  // A free route: 204 with no body, so the render happens locally as before.
+  seen.length = 0;
+  gateAnswer = { ok: true, status: 204, json: async () => { throw new Error('no body'); } };
+  await start(appEl, '/about', false);
+  assert(seen.length === 1, 'a free route still asks the gate (one few-byte request)');
+  assert(appEl.innerHTML.includes('About'), 'a free route renders client-side exactly as before');
+
+  (globalThis as any).fetch = real;
+}
+
 console.log(`\nAll client pipeline checks passed - ${checks} assertions.`);
 

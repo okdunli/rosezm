@@ -21,14 +21,17 @@
  * no Dart equivalent are replaced by a warned stub instead of emitting broken code.
  */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { transformSync } from 'esbuild';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , pageTitle} from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
+import { appIdentity, type AppIdentity } from './app-identity.js';
 import { nativeDependencies, nativeUsage, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
@@ -120,6 +123,8 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'flutter');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   tagStyles = new Map<string, StyleModel>();
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
@@ -162,7 +167,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
       script: scripts.join('\n'),
       style,
       params: [...stem.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]),
-      title: titleOf(parsed.head),
+      title: pageTitle(parsed.head, stem),
     });
   }
 
@@ -205,7 +210,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const allActiveKeys = new Set<string>();
   for (const s of scopedStyles) for (const k of s.activeKeys) allActiveKeys.add(k);
   const styles = scopedStyles.flatMap((s) => s.rules);
-  const allCss = [...pages.map((pg) => pg.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
+  const allCss = [globalCss, ...pages.map((pg) => pg.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
   const content = bakeContent(root);
   // useNative(...) calls: the plugins and the kit helper the project needs.
   // Empty when no page asks for a device capability, so a plain app keeps the
@@ -216,7 +221,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDependencies('flutter', native)), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDependencies('flutter', native), app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
 
   for (const comp of components) {
@@ -231,6 +236,15 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   }
   await fs.promises.writeFile(path.join(out, 'lib', 'main.dart'), renderMain(pages, components), 'utf8');
   await writeDeployScaffold('flutter', out, warnings);
+  // The Dart sources are the whole app, but Flutter cannot build a platform it
+  // has no runner folder for: `flutter build apk` in this tree fails with "No
+  // Android project configured", and desktop and web the same way. The runners
+  // are SDK-version-specific templates (Gradle wrapper, Xcode project, CMake,
+  // C++ window shell), which is exactly why `flutter create` owns them and not
+  // this exporter - a hand-written copy would be a stale guess within a release
+  // or two. So: ask the local SDK for them, and when there is no SDK, say the
+  // one command that supplies them instead of pretending the tree is complete.
+  await addPlatformRunners(out, warnings, app);
 
   return {
     pages: pages.map((p) => `lib/pages/${p.fileName}.dart`),
@@ -244,12 +258,6 @@ function routeOf(stem: string): string {
   if (parts.length === 1 && parts[0] === 'index') return '/';
   if (parts[parts.length - 1] === 'index') parts.pop();
   return '/' + parts.join('/');
-}
-
-function titleOf(head: string | null): string {
-  if (!head) return '';
-  const m = /<title>([\s\S]*?)<\/title>/.exec(head);
-  return m ? m[1].replace(/\{[^}]*\}/g, '').trim() : '';
 }
 
 function substituteSlot(nodes: IrNode[], content: IrNode[]): IrNode[] {
@@ -1047,6 +1055,11 @@ import 'dart:io';
 /// Base URL of the deployed rosezm server (rosezm export --api).
 const String rosezmApiBase = ${q};
 
+/// The raw Set-Cookie of the most recent response, relayed back as Cookie on
+/// the next request - the middleware's session survives across requests
+/// without a cookie jar.
+String rosezmCookie = '';
+
 /// The {#await} reject branch: a promise that never resolves, it throws.
 Never roseThrow(Object e) => throw e is Exception ? e : Exception(e.toString());
 
@@ -1141,6 +1154,47 @@ T rosezmKv<T>(String name, T Function() compute, int ttlSeconds) {
   return value;
 }
 
+/// A path with the scheme, host and query dropped, doubled slashes collapsed
+/// and one trailing slash removed: /sign, /sign/ and //sign name one route, so
+/// a redirect that only normalises the path is not a wall.
+String rosezmCanon(String target) {
+  var path = target;
+  final scheme = path.indexOf('://');
+  if (scheme >= 0) {
+    final rest = path.substring(scheme + 3);
+    final slash = rest.indexOf('/');
+    path = slash >= 0 ? rest.substring(slash) : '/';
+  }
+  final cut = path.indexOf(RegExp(r'[?#]'));
+  if (cut >= 0) path = path.substring(0, cut);
+  while (path.contains('//')) {
+    path = path.replaceAll('//', '/');
+  }
+  if (path.length > 1 && path.endsWith('/')) path = path.substring(0, path.length - 1);
+  return path;
+}
+
+/// True when a response is a middleware wall - a 3xx that points at another
+/// path (the sign-in page) or a bare 401/403 - and prints the one line that
+/// names it. The caller must then drop the body: a wall's body is the sign-in
+/// page's HTML, never data. The kit has no router to follow the redirect with,
+/// so the console line is the whole answer on this target.
+bool rosezmWall(String route, String asked, int status, String location) {
+  if (status >= 300 && status < 400) {
+    final target = rosezmCanon(location);
+    if (target.isNotEmpty && target == rosezmCanon(asked)) return false;
+    stderr.writeln(target.isEmpty
+        ? 'rosezm: \$route is behind a middleware wall (\$status); the page renders without data'
+        : 'rosezm: \$route is behind a middleware wall (\$status -> \$target); the page renders without data');
+    return true;
+  }
+  if (status == 401 || status == 403) {
+    stderr.writeln('rosezm: \$route is behind a middleware wall (\$status); the page renders without data');
+    return true;
+  }
+  return false;
+}
+
 /// The JSON half of a render: the state the page's $data produced.
 /// Same contract the mini-program target uses (/__rosezm/data).
 Future<Map<String, dynamic>> rosezmData(String route) async {
@@ -1149,7 +1203,17 @@ Future<Map<String, dynamic>> rosezmData(String route) async {
   try {
     final uri = Uri.parse('\$rosezmApiBase/__rosezm/data?path=\${Uri.encodeComponent(route)}');
     final req = await client.getUrl(uri);
+    if (rosezmCookie.isNotEmpty) req.headers.set(HttpHeaders.cookieHeader, rosezmCookie);
     final res = await req.close();
+    final setCookie = res.headers.value(HttpHeaders.setCookieHeader);
+    if (setCookie != null && setCookie.isNotEmpty) rosezmCookie = setCookie;
+    // A wall answers 302 to the sign-in page, and the client follows it - the
+    // hop it took is still on the response, so the wall is not lost behind the
+    // 200 of the page it landed on.
+    final hop = res.redirects.isEmpty ? null : res.redirects.first;
+    if (rosezmWall(route, uri.path, hop?.statusCode ?? res.statusCode, hop == null ? '' : hop.location.toString())) {
+      return <String, dynamic>{};
+    }
     final body = await res.transform(utf8.decoder).join();
     if (res.statusCode != 200) return <String, dynamic>{};
     final decoded = jsonDecode(body);
@@ -1177,10 +1241,18 @@ Future<Map<String, dynamic>> rosezmAction(String route, String name, [Map<String
     final uri = Uri.parse('\$rosezmApiBase\$route');
     final req = await client.postUrl(uri);
     req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
+    if (rosezmCookie.isNotEmpty) req.headers.set(HttpHeaders.cookieHeader, rosezmCookie);
     const __body = StringBuffer('__action=\${Uri.encodeComponent(name)}');
     if (fields != null) fields.forEach((k, v) { if (v != null) __body.write('&\${Uri.encodeComponent(k)}=\${Uri.encodeComponent('\$v')}'); });
     req.write(__body.toString());
-    final res = await req.close();    final body = await res.transform(utf8.decoder).join();
+    final res = await req.close();
+    final setCookie = res.headers.value(HttpHeaders.setCookieHeader);
+    if (setCookie != null && setCookie.isNotEmpty) rosezmCookie = setCookie;
+    final hop = res.redirects.isEmpty ? null : res.redirects.first;
+    if (rosezmWall(route, uri.path, hop?.statusCode ?? res.statusCode, hop == null ? '' : hop.location.toString())) {
+      return <String, dynamic>{};
+    }
+    final body = await res.transform(utf8.decoder).join();
     final decoded = jsonDecode(body);
     if (decoded is Map && decoded['state'] is Map) {
       return Map<String, dynamic>.from(decoded['state'] as Map);
@@ -1283,8 +1355,24 @@ ${rows || '// no vector assets in this export'}
 `;
 }
 
-function renderPubspec(pages: Array<{ className: string }>, assets: string[] = [], fonts: Array<{ family: string; file: string }> = [], nativeDeps: string[] = []): string {
-  const name = 'rosezm_app';
+/**
+ * Flutter's package name must be a valid Dart identifier, and it decides the
+ * Android applicationId the platform runner is created with (org + "." + name) -
+ * so it is the id's last label, lowercased and sanitised. Org is the rest, which
+ * makes the generated applicationId reproduce the requested id exactly.
+ */
+function dartPackageName(app: AppIdentity): string {
+  const labels = app.id.split('.');
+  return labels[labels.length - 1].replace(/[^\w]/g, '_').toLowerCase();
+}
+
+function dartOrg(app: AppIdentity): string {
+  const labels = app.id.split('.');
+  return labels.slice(0, -1).join('.') || 'dev.rosezm';
+}
+
+function renderPubspec(pages: Array<{ className: string }>, assets: string[] = [], fonts: Array<{ family: string; file: string }> = [], nativeDeps: string[] = [], app: AppIdentity = { id: 'dev.rosezm.app', name: 'rosezm', slug: 'rosezm-app', version: '1.0.0' }): string {
+  const name = dartPackageName(app);
   const fontBlock = fonts.length
     ? '  fonts:\n' + fonts.map((f) => `    - family: ${f.family}\n      fonts:\n        - asset: assets/fonts/${f.file.split('/').pop()}`).join('\n') + '\n'
     : '';
@@ -1296,7 +1384,7 @@ function renderPubspec(pages: Array<{ className: string }>, assets: string[] = [
   return `name: ${name}
 description: A rosezm app, exported with rosezm export flutter.
 publish_to: none
-version: 1.0.0
+version: ${app.version}
 environment:
   sdk: ">=3.0.0 <4.0.0"
 dependencies:
@@ -1329,6 +1417,52 @@ The output has no third-party dependencies: \`dart:io\` HTTP for the data
 channel and the action POST, Material widgets for the view tree. A construct
 that could not map is commented at its site and printed by the exporter.
 ${renderWarningSection(warnings)}`;
+}
+
+/** Every platform the Dart sources can build for. Flutter discovers them by
+ *  looking for their runner folder, so this is the list `flutter create` is
+ *  asked to supply. */
+const FLUTTER_PLATFORMS = 'android,ios,web,windows,macos,linux';
+
+/**
+ * Give the exported project the runner folders Flutter needs.
+ *
+ * The generation happens in a SCRATCH directory on purpose: `flutter create .`
+ * writes its own `lib/main.dart` (the counter template) and its own `test/`, and
+ * running it inside the export would clobber the app this emitter just wrote.
+ * Only the platform folders are copied back, so `lib/` is never touched.
+ */
+async function addPlatformRunners(out: string, warnings: string[], app: AppIdentity): Promise<void> {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'rosezm-flutter-create-'));
+  try {
+    const created = spawnSync('flutter', ['create', '--project-name', dartPackageName(app), '--org', dartOrg(app), '--platforms', FLUTTER_PLATFORMS, '.'], {
+      cwd: scratch,
+      encoding: 'utf8',
+      // Enough for one template generation, short enough that a hung SDK does
+      // not hang the export.
+      timeout: 120_000,
+      windowsHide: true,
+      shell: process.platform === 'win32',
+    });
+    if (created.status !== 0) {
+      warnings.push(`flutter: the platform runners were not created (${(created.stderr || created.stdout || `flutter exited ${created.status}`).trim().slice(0, 120)}) - run \`flutter create --platforms=${FLUTTER_PLATFORMS} .\` in the exported project once, then \`flutter build <platform>\``);
+      return;
+    }
+    let copied = 0;
+    for (const platform of FLUTTER_PLATFORMS.split(',')) {
+      if (!fs.existsSync(path.join(scratch, platform))) continue;
+      await fs.promises.cp(path.join(scratch, platform), path.join(out, platform), { recursive: true });
+      copied++;
+    }
+    warnings.push(`flutter: ${copied} platform runner(s) came from the local Flutter SDK (${FLUTTER_PLATFORMS}) - a different SDK version re-runs \`flutter create --platforms=${FLUTTER_PLATFORMS} .\``);
+  } catch (err) {
+    // No Flutter SDK on PATH, most often. The Dart sources are complete; the
+    // runners are the one thing the SDK has to supply, and saying so is the
+    // difference between "exported" and "runnable".
+    warnings.push(`flutter: the Flutter SDK is not on PATH (${String((err as Error)?.message ?? err).slice(0, 80)}) - run \`flutter create --platforms=${FLUTTER_PLATFORMS} .\` in the exported project once, then \`flutter build <platform>\``);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 function renderMain(pages: Array<{ className: string; fileName: string; route: string; params: string[]; title: string }>, components: Array<{ className: string }>): string {

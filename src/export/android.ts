@@ -25,12 +25,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity, xmlEscape } from './app-identity.js';
+import { appIcon } from './app-icon.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
-import { nativeUsage, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
+import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, vectorDrawableXml } from './svg-path.js';
 import {
@@ -68,6 +70,11 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // project ships no theme, and then every sheet below stays byte-identical.
   const globalCss = sanitizeFor('android', opts.globalCss ?? '');
   const root = opts.projectRoot;
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(root);
+  // versionCode is the monotonic integer Google Play requires; deriving it from
+  // the semver means a project maintains one version number, not two.
+  const versionCode = app.version.split(/[.-]/).slice(0, 3).map((p) => Number(p) || 0).reduce((acc, n) => acc * 1000 + n, 0);
   const out = path.join(opts.outDir, 'android');
   tagStyles = new Map<string, StyleModel>();
   const javaRoot = path.join(out, 'app', 'src', 'main', 'java', PKG_PATH);
@@ -127,11 +134,15 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   await fs.promises.mkdir(drawable, { recursive: true });
 
   const media = await copyMedia(root, drawable, pages.map((p) => p.nodes), warnings);
+  await fs.promises.writeFile(path.join(drawable, 'ic_launcher.png'), appIcon(root, 'android', warnings));
   // Styles: every page compiles its own <style> block under its own scope -
   // two pages may both define .rcard (the demo does), and a merged table
   // would leak one page's border into the other's card.
   const styles = new Map<string, StyleModel>();
-  const allCss = [...pages.map((p) => p.style ?? ''), SHELL_STYLES].join('\n');
+  // The theme counts for the font scan: a font-family a page never names can
+  // still come from the site's stylesheet, and a family with no bundled file is
+  // a silent fall back to the system default.
+  const allCss = [globalCss, ...pages.map((p) => p.style ?? ''), SHELL_STYLES].join('\n');
   const fontMap = await copyFonts(root, path.join(out, 'app', 'src', 'main', 'res', 'font'), allCss, warnings);
   // The scope is the page's class name: two pages may both define `.rcard`
   // (the demo does - pink on home, green on about) and a merged table would
@@ -149,7 +160,7 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
-  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route)), 'utf8');
   // The style table for the dynamic half: a class bound to state has to be
   // resolved while the composable recomposes, so the compiled classes ship as
   // data and the kit merges them exactly like the cascade does.
@@ -196,15 +207,19 @@ kotlin.code.style=official
 }
 
 android {
+    // The store identity comes from the project's rosezm.app.json. namespace
+    // (the Kotlin package) and applicationId (what the store sees) are
+    // deliberately different things, so the package stays fixed and only the
+    // identity moves with the project.
     namespace = "${PKG}"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "${PKG}"
+        applicationId = "${app.id}"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = ${versionCode}
+        versionName = "${app.version}"
     }
 
     buildFeatures {
@@ -237,9 +252,10 @@ dependencies {
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-
+${nativeManifestEntries('android', native).map((perm) => `    <uses-permission android:name="${perm}" />`).join('\n')}
     <application
         android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.rosezm">
@@ -257,7 +273,7 @@ dependencies {
 `, 'utf8');
   await fs.promises.writeFile(path.join(out, 'app', 'src', 'main', 'res', 'values', 'strings.xml'), `<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">rosezm</string>
+    <string name="app_name">${xmlEscape(app.name)}</string>
 </resources>
 `, 'utf8');
   await fs.promises.writeFile(path.join(out, 'app', 'src', 'main', 'res', 'values', 'themes.xml'), `<?xml version="1.0" encoding="utf-8"?>
@@ -1208,7 +1224,7 @@ ${branches}
 `;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = []): string {
   const contentBlock = content ? `
 /**
  * The project's markdown collections, baked at export time. A page reads them
@@ -1254,10 +1270,87 @@ ${nativeKit(native)}
 /// Base URL of the deployed rosezm server (rosezm export --api).
 const val ROSE_API_BASE: String = ${JSON.stringify(apiBase)}
 
+/// The routes this export carries - RoseApp's own table, as patterns. A wall's
+/// redirect is looked up here before anything tries to open it.
+internal val ROSE_PAGES: List<String> = listOf(${routes.map((r) => JSON.stringify(r)).join(', ')})
+
+/**
+ * Where a middleware wall's redirect goes when the server names a page this
+ * export carries: RoseApp installs the same navigate lambda every page already
+ * receives. A wall is not data - a 302's body is the sign-in page's HTML - so
+ * the response is reported (and, when one exists, the page opened) instead of
+ * being read as a state patch.
+ */
+var roseWallNavigate: ((String) -> Unit)? = null
+
+/**
+ * A wall's Location header reduced to the route it names: no query, no
+ * fragment, no doubled slash and no trailing slash - "/admin/" and "/admin"
+ * are the same route, and an absolute URL counts only by its path.
+ */
+private fun roseWallPath(location: String): String {
+    var path = location
+    val scheme = path.indexOf("://")
+    if (scheme >= 0) {
+        val slash = path.indexOf('/', scheme + 3)
+        path = if (slash >= 0) path.substring(slash) else "/"
+    }
+    path = path.substringBefore('?').substringBefore('#')
+    while (path.contains("//")) path = path.replace("//", "/")
+    if (path.length > 1 && path.endsWith("/")) path = path.dropLast(1)
+    return if (path.isEmpty()) "/" else path
+}
+
+/** Does this export carry a page for the path - exactly, or through the
+ *  :param / * pattern RoseApp matches a route with? */
+private fun roseWallHasPage(path: String): Boolean {
+    for (pattern in ROSE_PAGES) {
+        if (pattern == path) return true
+    }
+    val got = path.split("/")
+    for (pattern in ROSE_PAGES) {
+        if (!pattern.contains(":") && !pattern.contains("*")) continue
+        val want = pattern.split("/")
+        if (want.size != got.size) continue
+        var same = true
+        for (i in want.indices) {
+            val seg = want[i]
+            if (seg.startsWith(":") || seg.startsWith("*")) continue
+            if (seg != got[i]) { same = false; break }
+        }
+        if (same) return true
+    }
+    return false
+}
+
+/**
+ * A middleware wall answers the data channel and the action channel exactly as
+ * it answers a document: 302 to the sign-in page, or a bare 401/403. The kit
+ * used to read the response as state regardless, so a walled page painted its
+ * empty shell with no reason given - it looked broken rather than logged out.
+ * A wall is never data: it opens the page its redirect names when this export
+ * carries one, and otherwise says on stderr which route is walled.
+ */
+private fun roseWall(route: String, status: Int, location: String?): Boolean {
+    if (status == 401 || status == 403) {
+        System.err.println("rosezm: " + route + " is behind a middleware wall (" + status + ")")
+        return true
+    }
+    if (!(status >= 300 && status < 400) || location.isNullOrEmpty()) return false
+    val target = roseWallPath(location)
+    val navigate = roseWallNavigate
+    if (navigate != null && roseWallHasPage(target)) {
+        navigate(target)
+    } else {
+        System.err.println("rosezm: " + route + " is behind a middleware wall (" + status + " -> " + target + "); this export has no page for it")
+    }
+    return true
+}
+
 /// The JSON half of a render: the state the page's \$data produced.
 fun roseData(route: String): Map<String, Any?> {
     if (ROSE_API_BASE.isEmpty()) return emptyMap()
-    return roseRequest(ROSE_API_BASE + "/__rosezm/data?path=" + java.net.URLEncoder.encode(route, "UTF-8"), "GET", null)
+    return roseRequest(ROSE_API_BASE + "/__rosezm/data?path=" + java.net.URLEncoder.encode(route, "UTF-8"), "GET", null, route)
 }
 
 /// Call a server action - the framework's own protocol: POST __action=<name>.
@@ -1272,7 +1365,7 @@ fun roseAction(route: String, name: String, fields: Map<String, Any?>? = null): 
         if (v != null) body.append("&").append(java.net.URLEncoder.encode(k, "UTF-8"))
             .append("=").append(java.net.URLEncoder.encode(v.toString(), "UTF-8"))
     }
-    return roseRequest(ROSE_API_BASE + route, "POST", body.toString())
+    return roseRequest(ROSE_API_BASE + route, "POST", body.toString(), route)
 }
 
 /// A kv memo: the value is computed at most once per TTL window for the life of
@@ -1429,18 +1522,32 @@ fun roseIndexOf(value: Any?, item: Any?): Int {
     return roseTextOf(value).indexOf(want)
 }
 
-private fun roseRequest(url: String, method: String, body: String?): Map<String, Any?> {
+/// The session cookie: the last Set-Cookie the server sent, relayed verbatim on
+/// the next request. One variable, most recent wins - the minimum that keeps a
+/// signed-in visitor signed in, not a cookie jar.
+private var roseCookie: String = ""
+
+private fun roseRequest(url: String, method: String, body: String?, route: String): Map<String, Any?> {
     var connection: HttpURLConnection? = null
     return try {
         connection = URL(url).openConnection() as HttpURLConnection
         connection.requestMethod = method
+        // HttpURLConnection follows a 3xx on its own, which is how a wall stayed
+        // invisible: the sign-in page's HTML came back looking like a 200. The
+        // status is the wall's only honest signal.
+        connection.instanceFollowRedirects = false
         connection.connectTimeout = 5000
         connection.readTimeout = 8000
+        if (roseCookie.isNotEmpty()) connection.setRequestProperty("Cookie", roseCookie)
         if (body != null) {
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
         }
+        // Read before the wall check: the sign-in action answers with the very
+        // 302 the wall reports, and its Set-Cookie is the session.
+        connection.headerFields?.get("Set-Cookie")?.joinToString("; ")?.let { roseCookie = it }
+        if (roseWall(route, connection.responseCode, connection.getHeaderField("Location"))) return emptyMap()
         val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         val json = JSONObject(text)
         val state = json.optJSONObject("state") ?: json
@@ -1570,6 +1677,7 @@ function renderApp(pages: Array<{ route: string; cls: string; params: string[] }
 
 import androidx.compose.runtime.*
 import androidx.activity.compose.BackHandler
+import ${PKG}.kit.roseWallNavigate
 ${imports}
 
 private const val ROSE_HOME = "/"
@@ -1581,6 +1689,9 @@ fun RoseApp() {
     val navigate: (String) -> Unit = { target ->
         if (route != target) { history.add(route); route = target }
     }
+    // A middleware wall that names a page this app carries is followed through
+    // this same lambda - the one every page already receives (RoseKit.roseWall).
+    SideEffect { roseWallNavigate = navigate }
     val back: () -> Unit = {
         if (history.isNotEmpty()) route = history.removeAt(history.lastIndex)
     }

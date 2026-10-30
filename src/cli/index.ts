@@ -1152,6 +1152,53 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
           return;
         }
       }
+      // BL: the middleware gate. A client-side navigation renders in the
+      // browser, where no middleware can run - so it asks this before painting
+      // anything. The answer is a few bytes and NO render: {redirect} when a
+      // wall answered, 204 when the route is free. Judged on the canonicalized
+      // TARGET path (the same rule the data channel learned), with the browser's
+      // own headers, so an Accept-Language redirect behaves as it does on a
+      // document request.
+      if (pathnameOf(req.url) === '/__rosezm/gate' && req.method === 'GET') {
+        let target = '/';
+        try {
+          target = new URL(req.url || '/', 'http://localhost').searchParams.get('path') || '/';
+        } catch { /* a malformed url asks about the home page */ }
+        const split = target.indexOf('?');
+        const targetPath = dataChannelPath(split < 0 ? target : target.slice(0, split));
+        const targetQuery = split < 0 ? '' : target.slice(split);
+        const targetUrl = targetPath + targetQuery;
+        res.setHeader('content-type', 'application/json; charset=utf-8');
+        res.setHeader('access-control-allow-origin', '*');
+        res.setHeader('cache-control', 'no-store');
+        if (!ssrModule.middleware) {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        try {
+          const mw = await ssrModule.runMiddleware({ url: targetUrl, method: 'GET', headers: req.headers });
+          if (!mw) {
+            res.statusCode = 204;
+            res.end();
+            return;
+          }
+          // Always 200 with a JSON body - never a 3xx. `fetch` follows a
+          // redirect transparently, so a 302 here would hand the browser the
+          // sign-in DOCUMENT instead of the instruction to go there, and the
+          // client would paint it inside the old page. A set-cookie from the
+          // gate still travels: refreshing a session and redirecting is one
+          // round trip.
+          const setCookie = mw.headers.get('set-cookie');
+          if (setCookie) res.setHeader('set-cookie', setCookie);
+          res.statusCode = 200;
+          res.end(JSON.stringify({ redirect: mw.headers.get('location') || '', status: mw.status }));
+        } catch (err) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
       // 0.2.0: the native data channel. An exported mini program / mobile client
       // cannot execute the render, so it asks for the JSON half of one: the state
       // a page's $data produced. Middleware ran just above, so a walled route is
@@ -1934,6 +1981,24 @@ function templatesDir(): string | null {
 
 /** The TypeScript-ready files every scaffolded project gets: the ambient
  *  globals (editors and tsc both see them) and a strict tsconfig. */
+/**
+ * The app's identity, written into a new project so its store name is not the
+ * framework default. Never overwrites: a template that ships its own manifest
+ * keeps it.
+ */
+function writeAppIdentity(dir: string): void {
+  const file = path.join(dir, 'rosezm.app.json');
+  if (fs.existsSync(file)) return;
+  const name = path.basename(dir);
+  const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'app';
+  fs.writeFileSync(file, JSON.stringify({
+    id: `dev.rosezm.${slug.replace(/-/g, '')}`,
+    name,
+    version: '0.1.0',
+    slug,
+  }, null, 2) + '\n');
+}
+
 function writeTypeScriptReady(dir: string): void {
   fs.writeFileSync(path.join(dir, 'rosezm-env.d.ts'), `/// <reference types="rosezm" />\n`);
   fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
@@ -1986,6 +2051,7 @@ function copyTemplate(dir: string, name: string, display: string): void {
     fs.writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
   }
   writeTypeScriptReady(dir);
+  writeAppIdentity(dir);
   console.log(`🌹 rosezm new: ${display}/ from the '${path.basename(src)}' template`);
   console.log(`\n   cd ${display}`);
   console.log(`   npm install && npm run dev`);
@@ -2043,6 +2109,7 @@ async function scaffold(): Promise<void> {
   }, null, 2) + '\n');
 
   writeTypeScriptReady(dir);
+  writeAppIdentity(dir);
 
   fs.writeFileSync(path.join(pages, 'index.rose'), `<script>
   
@@ -2337,23 +2404,57 @@ async function exportCmd(): Promise<void> {
     };
     const outRootAll = flagAll('--out');
     const apiAll = flagAll('--api');
+    const cssAll = flagAll('--css');
     const startedAll = Date.now();
     const done: string[] = [];
-    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number }> = [];
+    const failures: Array<{ target: string; error: string }> = [];
+    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; error?: string }> = [];
+    // One target's failure must not hide the other sixteen: a batch command
+    // reports everything it did, everything that failed, and exits non-zero
+    // only after it has actually finished trying.
     for (const info of Object.values(TARGETS)) {
       if (info.status !== 'ready') continue;
-      const result = await exportProject(info.name, projectRootAll, { apiBase: apiAll, outRoot: outRootAll });
-      allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length });
-      if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) -> ${result.outDir}`);
-      done.push(info.name);
+      try {
+        const result = await exportProject(info.name, projectRootAll, { apiBase: apiAll, outRoot: outRootAll, globalCss: readGlobalCss(cssAll), cloud: rest.includes('--cloud') ? true : undefined, cloudEnv: flagAll('--cloud-env') });
+        allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length });
+        if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) -> ${result.outDir}`);
+        done.push(info.name);
+      } catch (err) {
+        allResults.push({ target: info.name, pages: 0, components: 0, outDir: '', warnings: 0, error: err instanceof Error ? err.message : String(err) });
+        failures.push({ target: info.name, error: err instanceof Error ? err.message : String(err) });
+        if (!asJson) console.log(`  ${info.name.padEnd(10)} FAILED - ${err instanceof Error ? err.message.split(String.fromCharCode(10))[0] : String(err)}`);
+      }
+    }
+    // One file a CI can read: `export all` writes seventeen trees, and this is
+    // the index that says where each one landed.
+    const manifestRoot = path.resolve(outRootAll ?? path.join(projectRootAll, '.rosezm-export'));
+    try {
+      await fs.promises.mkdir(manifestRoot, { recursive: true });
+      await fs.promises.writeFile(path.join(manifestRoot, 'rosezm-export-all.json'), JSON.stringify({
+        framework: 'rosezm',
+        generatedBy: 'rosezm export all',
+        ok: failures.length === 0,
+        targets: allResults.map((entry) => ({ ...entry, outDir: path.relative(manifestRoot, entry.outDir).split(path.sep).join('/') })),
+      }, null, 2) + '\n', 'utf8');
+    } catch (err) {
+      console.warn(`rosezm: could not write the export manifest (${err instanceof Error ? err.message : String(err)}) - the trees are complete`);
     }
     if (asJson) {
-      process.stdout.write(`${JSON.stringify({ ok: true, targets: allResults, ms: Date.now() - startedAll })}\n`);
+      // The machine reader gets ok:false AND a process that exits non-zero: a
+      // CI step that only checks $LASTEXITCODE must still stop.
+      process.exitCode = failures.length ? 1 : 0;
+      process.stdout.write(`${JSON.stringify({ ok: failures.length === 0, targets: allResults, failed: failures, ms: Date.now() - startedAll })}\n`);
       return;
     }
     const totalWarnings = allResults.reduce((n, entry) => n + entry.warnings, 0);
     console.log(`rosezm exported ${done.length} targets in ${Date.now() - startedAll}ms: ${done.join(', ')}`);
     if (totalWarnings) console.log(`  ${totalWarnings} warning(s) across targets - run one target to see them`);
+    if (failures.length) {
+      // A batch that fails everywhere says so once, at the end, and leaves the
+      // exit code non-zero so CI stops here instead of publishing half a matrix.
+      console.error(`rosezm export all: ${failures.length} target(s) failed - ${failures.map((f) => f.target).join(', ')}`);
+      process.exitCode = 1;
+    }
     return;
   }
   if (!isTarget(target)) {
@@ -2409,7 +2510,10 @@ async function exportCmd(): Promise<void> {
       .replace(/^[a-z]+: /, '')
       .replace(/[A-Za-z]:\\[^:]+?\.rose/g, '<file>')
       .replace(/\b[\w./-]+\.rose\b/g, '<file>')
-      .replace(/load from GET \/__rosezm\/data \([^)]*\)/, 'load from the data channel');
+      .replace(/load from GET \/__rosezm\/data \([^)]*\)/, 'load from the data channel')
+      // The missing-endpoint warning counts calls in its text; the count and the
+      // file list are the noise, the fact is one line.
+      .replace(/^\d+ server call\(s\) in .*/, 'server calls with no --api endpoint');
     grouped.set(key, (grouped.get(key) ?? 0) + 1);
   }
   if (grouped.size) {
@@ -2417,10 +2521,6 @@ async function exportCmd(): Promise<void> {
     const entries = [...grouped.entries()].sort((a, b) => b[1] - a[1]);
     for (const [key, count] of entries.slice(0, 8)) console.log(`    - ${key}${count > 1 ? ` (x${count})` : ''}`);
     if (entries.length > 8) console.log(`    ... and ${entries.length - 8} more kind(s); pass --json for the full list`);
-  }
-
-  if (!apiBase) {
-    console.log('  note: no --api <base> given, so server actions and $data have no endpoint in the exported app');
   }
 }
 

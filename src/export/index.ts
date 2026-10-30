@@ -15,11 +15,15 @@ import { emitArkTs } from './arkts.js';
 import { emitAndroid } from './android.js';
 import { emitSwift } from './swift.js';
 import { emitElectron } from './electron.js';
+import { emitWails } from './wails.js';
+import { emitTauri } from './tauri.js';
 import { emitJava } from './java.js';
 import { emitDotnet } from './dotnet.js';
 import { emitCpp } from './cpp.js';
+import { emitZig } from './zig.js';
+import { forgetAppIdentity } from './app-identity.js';
 import { effectBodies, effectDropWarning } from './state-ops.js';
-import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
+import { scanRoseFiles, scanComponentFiles, RoseError } from '../compiler/index.js';
 
 export type TargetName =
   | MiniProgramTarget
@@ -28,14 +32,17 @@ export type TargetName =
   | 'arkts'
   | 'xcode'
   | 'electron'
+  | 'wails'
+  | 'tauri'
   | 'python'
   | 'dotnet'
   | 'java'
-  | 'cpp';
+  | 'cpp'
+  | 'zig';
 
 export interface TargetInfo {
   name: TargetName;
-  family: 'mini-program' | 'native' | 'desktop';
+  family: 'mini-program' | 'native' | 'desktop' | 'server';
   /** Output directory name under the export root. */
   dir: string;
   status: 'ready' | 'planned';
@@ -54,10 +61,13 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   arkts: { name: 'arkts', family: 'native', dir: 'arkts', status: 'ready', summary: 'HarmonyOS project (ArkTS + ArkUI, DevEco Studio)' },
   xcode: { name: 'xcode', family: 'native', dir: 'xcode', status: 'ready', summary: 'Xcode project (SwiftUI, iOS/macOS)' },
   electron: { name: 'electron', family: 'desktop', dir: 'electron', status: 'ready', summary: 'Electron desktop shell around the built web app' },
+  wails: { name: 'wails', family: 'desktop', dir: 'wails', status: 'ready', summary: 'Wails v2 desktop app (Go, the built site embedded in one binary)' },
+  tauri: { name: 'tauri', family: 'desktop', dir: 'tauri', status: 'ready', summary: 'Tauri v2 desktop app (Rust, a WebView window over the built site)' },
   python: { name: 'python', family: 'desktop', dir: 'python', status: 'ready', summary: 'Python desktop app (stdlib Tkinter, no pip install)' },
   dotnet: { name: 'dotnet', family: 'desktop', dir: 'dotnet', status: 'ready', summary: '.NET desktop app (WPF, net8.0-windows, C#)' },
   java: { name: 'java', family: 'desktop', dir: 'java', status: 'ready', summary: 'JVM desktop app (Java Swing, stdlib only)' },
   cpp: { name: 'cpp', family: 'desktop', dir: 'cpp', status: 'ready', summary: 'C++ desktop app (Qt 6 Widgets, CMake)' },
+  zig: { name: 'zig', family: 'server', dir: 'zig', status: 'ready', summary: 'Zig static server (the baked site in one cross-compiled binary)' },
 };
 
 export interface ExportOptions {
@@ -90,6 +100,8 @@ export interface ExportResult {
   components: string[];
   warnings: string[];
 }
+
+export { forgetAppIdentity };
 
 export function isTarget(name: string): name is TargetName {
   return Object.prototype.hasOwnProperty.call(TARGETS, name);
@@ -125,6 +137,35 @@ const EFFECTLESS: Partial<Record<TargetName, string>> = {
   cpp: 'cpp',
   python: 'python',
 };
+
+/**
+ * Without `--api`, a server action and a `$data` read have no endpoint: the
+ * exported app paints correctly and then does nothing when tapped. On the web
+ * the same source talks to its own server, so nothing in it looks wrong - which
+ * is exactly why this is named, per file, with the flag that fixes it. A project
+ * that makes no such call gets no warning.
+ */
+async function auditMissingApiBase(target: TargetName, projectRoot: string, apiBase: string | undefined, warnings: string[]): Promise<void> {
+  if (apiBase) return;
+  const files = [...(await scanRoseFiles(projectRoot)), ...(await scanComponentFiles(projectRoot))];
+  let calls = 0;
+  const named: string[] = [];
+  for (const file of files) {
+    let src = '';
+    try {
+      src = await fs.promises.readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const n = (src.match(/\$data\s*\(|\$action\s*\(|fetch\(\s*['"`]\/api\//g) ?? []).length;
+    if (!n) continue;
+    calls += n;
+    named.push(path.relative(projectRoot, file).replace(/\\/g, '/'));
+  }
+  if (!calls) return;
+  const where = named.slice(0, 3).join(', ') + (named.length > 3 ? `, +${named.length - 3} more` : '');
+  warnings.push(`${target}: ${calls} server call(s) in ${where} - no --api <base> was given, so they have no endpoint in the exported app (re-export with --api https://your-server)`);
+}
 
 async function auditDroppedEffects(target: TargetName, projectRoot: string, warnings: string[]): Promise<void> {
   const label = EFFECTLESS[target];
@@ -188,6 +229,7 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
   }
   const globalCss = opts.globalCss ?? (await discoverGlobalCss(projectRoot));
   await auditDroppedEffects(target, projectRoot, warnings);
+  await auditMissingApiBase(target, projectRoot, opts.apiBase, warnings);
   if (info.family === 'mini-program') {
 
     const result = await emitMiniProgram({
@@ -273,6 +315,13 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
     }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
+  if (target === 'zig') {
+    const result = await emitZig({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const dir = path.join(outRoot, 'zig');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
+  }
   if (target === 'cpp') {
     const result = await emitCpp({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'cpp');
@@ -300,6 +349,20 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
+  if (target === 'wails') {
+    const result = await emitWails({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const dir = path.join(outRoot, 'wails');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
+  }
+  if (target === 'tauri') {
+    const result = await emitTauri({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const dir = path.join(outRoot, 'tauri');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
+  }
   if (target === 'xcode') {
     const result = await emitSwift({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'xcode');
@@ -324,5 +387,5 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
-  throw new Error(`no emitter for target family "${info.family}"`);
+  throw new RoseError('E-EXPORT-FAMILY', `no emitter for target family "${info.family}"`);
 }

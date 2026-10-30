@@ -100,6 +100,23 @@ const withEdgeQueue = <T>(fn: () => Promise<T>): Promise<T> => {
  *   per isolate. Anything provided here is used verbatim; anything absent
  *   falls back to reading it from outDir, exactly as before.
  */
+/**
+ * The path the middleware judges, canonicalized the way a document request
+ * reaches it: dot segments resolved, duplicate slashes collapsed, one trailing
+ * slash dropped. The data channel learned this the hard way - ?path=/vault was
+ * walled while ?path=/vault/ sailed through.
+ */
+function canonicalTarget(target: string): string {
+  let p: string;
+  try {
+    p = new URL('/' + target.replace(/^\/+/, ''), 'http://localhost').pathname;
+  } catch {
+    p = target.split('?')[0];
+  }
+  if (!p.startsWith('/')) p = '/' + p;
+  return p.replace(/\/+$/, '') || '/';
+}
+
 export async function createEdgeHandler(
   outDir: string,
   preloaded?: { server?: ServerModule; client?: string; styles?: string; broken?: string[] },
@@ -182,6 +199,28 @@ export async function createEdgeHandler(
     if (mod.middleware) {
       const mw = await mod.runMiddleware(request);
       if (mw) return hookCtx ? mod.runResponseHooks(hookCtx, mw) : mw;
+    }
+    // BL: the middleware gate - the door a client-side navigation knocks on,
+    // because it renders in the browser where no middleware can run. Answered
+    // on the canonicalized TARGET path with the caller's own headers, and always
+    // as 200 + JSON: a 3xx would be followed by fetch and hand the page the
+    // redirect's DOCUMENT instead of the instruction to go there.
+    if (pathname === '/__rosezm/gate' && request.method === 'GET') {
+      const target = searchParams.get('path') || '/';
+      const split = target.indexOf('?');
+      const targetPath = canonicalTarget(split < 0 ? target : target.slice(0, split));
+      const targetUrl = targetPath + (split < 0 ? '' : target.slice(split));
+      const headers: Record<string, string> = { 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'content-type': 'application/json; charset=utf-8' };
+      if (!mod.middleware) return new Response(null, { status: 204, headers });
+      try {
+        const mw = await mod.runMiddleware(new Request(new URL(targetUrl, request.url), { method: 'GET', headers: request.headers }));
+        if (!mw) return new Response(null, { status: 204, headers });
+        const setCookie = mw.headers.get('set-cookie');
+        if (setCookie) headers['set-cookie'] = setCookie;
+        return new Response(JSON.stringify({ redirect: mw.headers.get('location') || '', status: mw.status }), { status: 200, headers });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }), { status: 500, headers });
+      }
     }
     // 0.2.0: the native data channel. A mini program / mobile client cannot
     // execute the render, so it asks for the JSON half of one - the state the

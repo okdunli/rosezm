@@ -7075,6 +7075,14 @@ export { ensureLocale, loadLocale } from './runtime.js';
 ${v.prefetchDoor}
 ${vitalsBlock}
 ${v.nav}
+// BL: a _middleware.rose only ran on the server, so a wall (an auth check
+// answering 302) vanished the moment a visitor navigated CLIENT-SIDE - the
+// admin shell painted right there in the browser. When the app HAS a
+// middleware, start() asks the server's gate for the target route first: one
+// few-byte JSON request, no render, and a redirect is honoured by a full
+// navigation (where the middleware fires for real). Apps without a middleware
+// get false and keep the old path - no extra request.
+const __hasMiddleware = ${middlewareIdx >= 0 ? 'true' : 'false'};
 const routes = [
   ${v.routes}
 ];
@@ -7341,12 +7349,29 @@ async function __swap(container, html) {
   }
 }
 
-export async function start(container, pathname, initial) {
+export async function start(container, pathname, initial, skipGate) {
   clearMounts(); 
   // stale mounts from a failed render never fire
   if (initial) {
     const el = document.getElementById('__rosezm_state');
     if (el) resumeState(el.textContent);
+  }
+  // The server is the only place a middleware runs, so a client-side
+  // navigation asks its gate before painting anything. The answer is tiny
+  // ({"redirect":...} or 204) - the gate never renders a document.
+  if (__hasMiddleware && !initial && !skipGate) {
+    let gate = null;
+    try {
+      const r = await fetch('/__rosezm/gate?path=' + encodeURIComponent(pathname), { headers: { accept: 'application/json' } });
+      // A static deploy has no middleware and answers 404 here: nothing to
+      // gate, render from the bundle exactly as before.
+      if (r.ok) gate = await r.json().catch(() => null);
+      else if (r.status === 401 || r.status === 403) { location.href = pathname; return; }
+    } catch { /* offline or the server is gone: render locally */ }
+    if (gate && typeof gate.redirect === 'string' && gate.redirect) { location.href = gate.redirect; return; }
+    // A wall that answers a bare status (no Location) still refused: let the
+    // server paint its own answer instead of rendering the gated route here.
+    if (gate && (gate.status === 401 || gate.status === 403)) { location.href = pathname; return; }
   }
   for (const route of routes) {
     if (matchRoute(route.pattern, pathname)) {
@@ -7462,7 +7487,9 @@ export async function adopt(container, html, stateJson, pathname) {
 // === refresh() implementation === Re-render the current route in place: the client half of router.refresh() (a router refresh) / (a full invalidation).
 setRefreshHook(async () => {
   prefetchCache.delete(location.pathname);
-  await start(document.getElementById('app'), location.pathname, false);
+  // skipGate: this route is the one the document already passed the gate for -
+  // a refresh must cost zero requests (the render runs in the page).
+  await start(document.getElementById('app'), location.pathname, false, true);
 });
 `;
   // === Sliced mode's two generated pieces ===

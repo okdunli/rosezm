@@ -23,6 +23,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
+import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
@@ -75,6 +76,8 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'dotnet');
+  // The store identity, from the project's rosezm.app.json (defaults otherwise).
+  const app = appIdentity(opts.projectRoot);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
 
@@ -157,10 +160,10 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
   await fs.promises.writeFile(path.join(out, 'RoseTheme.cs'), renderTheme([...pageStyles].map(([scope, styles]) => ({ scope, styles })), shell, theme), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseApp.cs'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'rosezmApp.csproj'), renderCsproj(), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'rosezmApp.csproj'), renderCsproj(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'App.xaml'), renderAppXaml(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'App.xaml.cs'), renderAppXamlCs(), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml'), renderMainXaml(), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml'), renderMainXaml(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'MainWindow.xaml.cs'), renderMainXamlCs(), 'utf8');
   for (const comp of components) {
     await fs.promises.writeFile(path.join(out, 'Components', comp.cls + 'View.cs'), renderComponent(comp, componentStyles.get(comp.cls)!, warnings), 'utf8');
@@ -1742,7 +1745,8 @@ using System.Text.Json;
 /// <summary>The data channel and the action protocol over HTTP.</summary>
 public static class RoseKit
 {
-    public const string ApiBase = ${JSON.stringify(apiBase)};
+    /// <summary>The data channel base: ROSEZM_API overrides the URL baked at export.</summary>
+    public static string ApiBase = Environment.GetEnvironmentVariable("ROSEZM_API") ?? ${JSON.stringify(apiBase)};
 ${contentBlock}${nativeKit(native)}
 
     /// <summary>The {#await} reject branch: it always throws, so the catch arm renders.</summary>
@@ -1884,17 +1888,78 @@ ${contentBlock}${nativeKit(native)}
 
     public static List<object?> List(params object?[] items) => new List<object?>(items);
 
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
+    // A middleware wall answers the data channel as it answers a document: a 302
+    // to the sign-in page, or a bare 401/403. HttpClient follows a redirect on
+    // its own, which turned a wall into the sign-in page's HTML parsed as JSON -
+    // the page then painted an empty shell with no reason given. A
+    // non-redirecting handler keeps the 3xx visible, and WallStatus/WallLocation
+    // carry it to the app shell, the one place that knows which pages this
+    // export has. UseCookies=false: the handler's own (empty) cookie container
+    // would otherwise swallow the Cookie header the request sites set below.
+    private static readonly HttpClient Http = new(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(8) };
+
+    // The minimal session relay: the most recent Set-Cookie header, sent back
+    // verbatim as the next request's Cookie header. One value, latest wins -
+    // the server formatted it, the kit only carries it. Without it a signed-in
+    // session never reaches this app: every request would arrive unauthenticated.
+    private static string SessionCookie = "";
+
+    /// <summary>The status of the last wall (0 when there was none) and the
+    /// destination its 3xx named.</summary>
+    public static int WallStatus;
+    public static string WallLocation = "";
+
+    /// <summary>Records a wall and answers true. Only a 3xx that names a
+    /// destination, or a bare 401/403, is one; every other failure keeps the
+    /// data-less answer it always had.</summary>
+    private static bool IsWall(HttpResponseMessage response)
+    {
+        var status = (int)response.StatusCode;
+        var location = response.Headers.Location?.OriginalString ?? "";
+        if (status >= 300 && status < 400 && location.Length > 0)
+        {
+            WallStatus = status;
+            WallLocation = location;
+            return true;
+        }
+        if (status == 401 || status == 403)
+        {
+            WallStatus = status;
+            WallLocation = "";
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Store the Set-Cookie header the response just carried, if any -
+    /// the session relay the request sites send back on their next call.</summary>
+    private static void CaptureCookie(HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues("Set-Cookie", out var values))
+        {
+            var first = values.FirstOrDefault();
+            if (!string.IsNullOrEmpty(first)) SessionCookie = first;
+        }
+    }
 
     /// <summary>The JSON half of a render: the state the page's $data produced.</summary>
     public static Dictionary<string, object?> Data(string route)
     {
         if (ApiBase.Length == 0) return new Dictionary<string, object?>();
+        WallStatus = 0;
+        WallLocation = "";
         try
         {
             var url = ApiBase + "/__rosezm/data?path=" + Uri.EscapeDataString(route);
-            var text = Http.GetStringAsync(url).GetAwaiter().GetResult();
-            return State(text);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (SessionCookie.Length > 0) request.Headers.Add("Cookie", SessionCookie);
+            using var response = Http.SendAsync(request).GetAwaiter().GetResult();
+            CaptureCookie(response);
+            // A wall's body is the sign-in page, never data: it is dropped.
+            if (IsWall(response)) return new Dictionary<string, object?>();
+            // Anything else non-2xx threw inside GetStringAsync before: no data.
+            if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300) return new Dictionary<string, object?>();
+            return State(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
         }
         catch (Exception)
         {
@@ -1907,10 +1972,17 @@ ${contentBlock}${nativeKit(native)}
     public static Dictionary<string, object?> Action(string route, string name)
     {
         if (ApiBase.Length == 0) return new Dictionary<string, object?>();
+        WallStatus = 0;
+        WallLocation = "";
         try
         {
             using var content = new FormUrlEncodedContent(new Dictionary<string, string> { ["__action"] = name });
-            var response = Http.PostAsync(ApiBase + route, content).GetAwaiter().GetResult();
+            using var request = new HttpRequestMessage(HttpMethod.Post, ApiBase + route) { Content = content };
+            if (SessionCookie.Length > 0) request.Headers.Add("Cookie", SessionCookie);
+            using var response = Http.SendAsync(request).GetAwaiter().GetResult();
+            CaptureCookie(response);
+            // The walled action's body is the sign-in page, not a state patch.
+            if (IsWall(response)) return new Dictionary<string, object?>();
             return State(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
         }
         catch (Exception)
@@ -1955,7 +2027,7 @@ ${contentBlock}${nativeKit(native)}
 `;
 }
 
-function renderCsproj(): string {
+function renderCsproj(app: AppIdentity): string {
   return `<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
@@ -1965,7 +2037,9 @@ function renderCsproj(): string {
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>${NS}</RootNamespace>
-    <AssemblyName>${NS}</AssemblyName>
+    <AssemblyName>${app.slug}</AssemblyName>
+    <Version>${app.version}</Version>
+    <Product>${xmlEscape(app.name)}</Product>
   </PropertyGroup>
 
   <ItemGroup>
@@ -1997,11 +2071,12 @@ public partial class App : Application
 `;
 }
 
-function renderMainXaml(): string {
+function renderMainXaml(app: AppIdentity): string {
+  const appName = app.name;
   return `<Window x:Class="${NS}.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="rosezm" Height="800" Width="1100">
+        Title="${appName}" Height="800" Width="1100">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <ContentControl x:Name="Host" Margin="16" />
     </ScrollViewer>
@@ -2041,6 +2116,14 @@ function renderApp(pages: Array<{ route: string; cls: string; params: string[] }
   const paramSeeds = pages.filter((p) => p.params.length > 0)
     .flatMap((p) => p.params.map((name) => `            if (Params.TryGetValue("${name}", out var seed${p.cls}${name}) && !State.ContainsKey("${name}")) State["${name}"] = seed${p.cls}${name};`))
     .join('\n');
+  // The two shapes the route branches match - a literal for a static page, the
+  // segment regex for a dynamic one - so a redirect may only follow a page this
+  // export really has. The launch page is the branches' fallback, not an answer
+  // for a miss.
+  const routeNames = pages.filter((p) => p.params.length === 0).map((p) => JSON.stringify(p.route)).join(', ');
+  const routePatterns = pages.filter((p) => p.params.length > 0)
+    .map((p) => JSON.stringify('^' + p.route.replace(/:[^/]+/g, '([^/]+)') + '$'))
+    .join(', ');
   return `namespace ${NS};
 
 using System.Windows.Controls;
@@ -2050,6 +2133,8 @@ using System.Windows.Media;
 public sealed class RoseApp
 {
     private static readonly string[] PersistKeys = {${persistKeys.map((k) => JSON.stringify(k)).join(', ')}};
+    private static readonly string[] RouteNames = {${routeNames}};
+    private static readonly string[] RoutePatterns = {${routePatterns}};
     private readonly ContentControl host;
     private readonly HashSet<string> loadedRoutes = new();
     private static readonly string StorePath = System.IO.Path.Combine(AppContext.BaseDirectory, ".rosezm-state.json");
@@ -2094,13 +2179,15 @@ public sealed class RoseApp
 
     public string Param(string key) => Params.TryGetValue(key, out var value) ? value : "";
 
-    public void Navigate(string target)
+    public void Navigate(string target) => Navigate(target, true);
+
+    private void Navigate(string target, bool followWall)
     {
         if (string.IsNullOrEmpty(target)) return;
         if (Route != target) history.Push(Route);
         Route = target;
         Params.Clear();
-        Render();
+        Render(followWall);
     }
 
     public void Back()
@@ -2111,7 +2198,73 @@ public sealed class RoseApp
         Render();
     }
 
-    public void Render()
+    /// <summary>Does this export have a page for <c>target</c>?</summary>
+    private static bool HasPage(string target)
+    {
+        foreach (var name in RouteNames) if (name == target) return true;
+        foreach (var pattern in RoutePatterns) if (System.Text.RegularExpressions.Regex.IsMatch(target, pattern)) return true;
+        return false;
+    }
+
+    /// <summary>The route a wall's Location names: the path of an absolute URL,
+    /// no query, no doubled slash and no trailing slash - /admin/ is the same
+    /// wall as /admin.</summary>
+    private static string WallPath(string location)
+    {
+        var path = location ?? "";
+        var scheme = path.IndexOf("://", StringComparison.Ordinal);
+        if (scheme >= 0)
+        {
+            path = path.Substring(scheme + 3);
+            var slash = path.IndexOf('/');
+            path = slash >= 0 ? path.Substring(slash) : "/";
+        }
+        var query = path.IndexOf('?');
+        if (query >= 0) path = path.Substring(0, query);
+        while (path.Contains("//")) path = path.Replace("//", "/");
+        if (path.Length > 1 && path.EndsWith("/", StringComparison.Ordinal)) path = path.Substring(0, path.Length - 1);
+        return path;
+    }
+
+    /// <summary>A middleware wall answered the data channel, so this route has
+    /// no server data: open the page the redirect names when this export has
+    /// it, and always say which route was walled instead of painting a silent
+    /// empty shell. <c>followWall</c> is false for the hop itself, so a
+    /// redirect loop (A -&gt; B -&gt; A) cannot recurse.</summary>
+    private bool FollowWall(string route, bool followWall)
+    {
+        if (RoseKit.WallStatus == 0) return false;
+        var status = RoseKit.WallStatus;
+        var location = RoseKit.WallLocation;
+        RoseKit.WallStatus = 0;
+        RoseKit.WallLocation = "";
+        // A walled visit carries no data: a later visit asks again.
+        loadedRoutes.Remove(route);
+        var target = WallPath(location);
+        var here = WallPath(route);
+        if (followWall && target.Length > 0 && target != here && HasPage(target))
+        {
+            Console.Error.WriteLine("rosezm: " + route + " is behind a middleware wall (" + status + " -> " + location + "); opening " + target);
+            Navigate(target, false);
+            return true;
+        }
+        if (target.Length > 0 && target == here)
+            // The redirect names the page it walled (its trailing-slash form,
+            // say): there is nowhere else to go.
+            Console.Error.WriteLine("rosezm: " + route + " is behind a middleware wall (" + status + " -> " + location + "); it names this same page");
+        else if (target.Length > 0 && HasPage(target))
+            // This hop was the redirect: the page it named is walled too.
+            Console.Error.WriteLine("rosezm: " + route + " is behind a middleware wall (" + status + " -> " + location + "); it points at a page that is walled too");
+        else if (location.Length > 0)
+            Console.Error.WriteLine("rosezm: " + route + " is behind a middleware wall (" + status + " -> " + location + "); this export has no page for it");
+        else
+            Console.Error.WriteLine("rosezm: " + route + " is behind a middleware wall (" + status + "); the server refused it");
+        return false;
+    }
+
+    public void Render() => Render(true);
+
+    private void Render(bool followWall)
     {
         var panel = new StackPanel { Orientation = Orientation.Vertical };
         var route = Route ?? "/";
@@ -2125,6 +2278,9 @@ public sealed class RoseApp
             }
 ${paramSeeds.length ? paramSeeds : '            // (no dynamic routes)'}
         }
+        // A wall from this route's data, or from an action the page ran, means
+        // the page has no server data: go where it points.
+        if (FollowWall(route, followWall)) return;
 
 ${branches.join('\n')}
         if (history.Count > 0)
@@ -2149,7 +2305,8 @@ Generated by \`rosezm export dotnet\` from the project's \`.rose\` pages.
 - ${pageCount} page(s), ${compCount} component(s)
 - Build: \`dotnet build\`, run: \`dotnet run\` (Windows)
 - Server: \`rosezm export dotnet --api <base>\` writes the base URL into \`RoseKit.cs\`.
-  Current: \`${apiBase || '(unset)'}\`
+  Current: \`${apiBase || '(unset)'}\`. The \`ROSEZM_API\` environment variable
+  overrides it at run time.
 
 State lives in the app's dictionary, a handler mutates it and re-renders, and the
 data channel / action protocol are the same ones the web build uses.

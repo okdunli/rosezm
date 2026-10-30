@@ -139,6 +139,34 @@ export interface ParsedFile {
 }
 
 /** A whole component/page source, split into its blocks and its parsed tree. */
+/**
+ * `<title>` as a navigation bar can show it.
+ *
+ * A title built from state - `{title()} - rosezm` - cannot be static: the bar is
+ * set before any state exists. Stripping the interpolation leaves the dangling
+ * "- rosezm" that three targets were shipping, so a title that interpolates
+ * falls back to the route's own name ("About", "Blog") instead.
+ */
+export function pageTitle(head: string | null, route: string): string {
+  const raw = /<title>([\s\S]*?)<\/title>/.exec(head ?? '')?.[1] ?? '';
+  if (!raw.trim()) return '';
+  if (/\{[\s\S]*\}/.test(raw)) return routeTitle(route);
+  return raw.trim().replace(/\s+/g, ' ');
+}
+
+/** `/blog/:id` -> "Blog": the last segment a human typed, not the parameter. */
+export function routeTitle(route: string): string {
+  const segs = route.split('/').filter(Boolean);
+  let last = '';
+  for (let i = segs.length - 1; i >= 0; i--) {
+    if (segs[i].startsWith(':') || segs[i].startsWith('*') || segs[i].startsWith('[')) continue;
+    last = segs[i];
+    break;
+  }
+  if (!last) return 'Home';
+  return last.replace(/[-_]+/g, ' ').split(' ').map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
 export function parseRose(source: string, file = '<template>', platform?: string): ParsedFile {
   const warnings: string[] = [];
   // Comments are removed BEFORE the block split: a comment that mentions

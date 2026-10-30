@@ -1559,7 +1559,15 @@ const MINI_FAMILY = new Set(['weapp', 'qq', 'alipay', 'baidu', 'toutiao']);
 
 /** At-rules no native toolkit can evaluate. `@media` is kept - the engine
  *  turns a min/max-width guard into a real variant. */
-const DROP_AT = /^@(font-face|import|charset|page|supports|layer|container)\b/i;
+const DROP_AT = /^@(import|charset|page|supports|layer|container)\b/i;
+/**
+ * `@font-face` is the one at-rule that depends on the emitter: four of them
+ * bundle the file, the rest do not. The mini-program family provably ignores it
+ * on a real device while still inflating the package, and the four desktop
+ * toolkits name a system font - so keeping the rule there would be a reference
+ * to a file the export never ships.
+ */
+const FONT_BUNDLING = new Set(['flutter', 'android', 'arkts', 'xcode']);
 /** Selectors no native tree can test. */
 const DROP_SELECTOR = /:has\(|:is\(|:where\(|::view-transition|::part\(|::slotted\(/i;
 /** A mini program adds the pseudo-elements its components never expose, and
@@ -1648,6 +1656,7 @@ export function sanitizeFor(target: string, css: string): string {
       if (depth > 0) bodies[depth - 1] += text.slice(0, cut + 1);
       const dropping = dropDepth >= 0
         || DROP_AT.test(at)
+        || (/^@font-face\b/i.test(at) && !FONT_BUNDLING.has(target))
         || (/^@media\b/i.test(at) && /\bprint\b/i.test(at))
         || (!at.startsWith('@') && !kept);
       if (dropping && dropDepth < 0) dropDepth = depth;

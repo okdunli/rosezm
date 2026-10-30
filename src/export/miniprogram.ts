@@ -20,12 +20,13 @@ import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type AttrValue } from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type AttrValue , pageTitle} from './ir.js';
 import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
 import { inlineFontFaces, kvDeclarations, kvCallable, serverOnlyGlobals, bakeContent, rewriteThrowNew, renderWarningSection, callifyBareReads, rewriteNullish } from './state-ops.js';
 import { objectEntriesOf, literalTruth, cssLiteralValue, cssPropOf, sanitizeFor } from './style-engine.js';
 import { rewriteStateWrites, setStateSpell } from '../compiler/state-writes.js';
+import { appIdentity } from './app-identity.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, nativeManifestEntries } from './native-api.js';
 
 export type MiniProgramTarget = 'weapp' | 'qq' | 'alipay' | 'baidu' | 'toutiao';
@@ -243,7 +244,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     }
     pages.push({
       file, route: routeOf(stem), name: pageNameOf(stem), scope: scopeOf(rel), nodes: parsed.nodes,
-      script: parsed.script, style: parsed.style, title: titleOf(parsed.head), layoutChain: chain,
+      script: parsed.script, style: parsed.style, title: pageTitle(parsed.head, stem), layoutChain: chain,
     });
   }
 
@@ -368,7 +369,9 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   const nativeScopes = nativeManifestEntries(opts.target, nativeUsage([...pages.map((p) => p.script), ...comps.map((c) => c.script)]));
   await fs.promises.writeFile(path.join(out, 'app.json'), JSON.stringify({
     pages: pageList,
-    window: { navigationBarTitleText: 'rosezm', navigationBarBackgroundColor: '#ffffff', navigationBarTextStyle: 'black' },
+    // The app's own name, not the framework's: this is the title every page
+    // without its own <title> shows.
+    window: { navigationBarTitleText: appIdentity(root).name, navigationBarBackgroundColor: '#ffffff', navigationBarTextStyle: 'black' },
     ...(nativeScopes.length ? { permission: Object.fromEntries(nativeScopes.map((s) => [s, { desc: 'rosezm uses this to answer a useNative() call' }])) } : {}),
   }, null, 2) + '\n', 'utf8');
   if (contentBaked) {
@@ -399,7 +402,12 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     // project.config.json, or rosezm.mp.json's "appid"), it wins. Only a
     // project with nothing to inherit stays a tourist.
     let appid = 'touristappid';
-    let projectName = 'rosezm-export';
+    // The identity manifest seeds the project name: a project that named itself
+    // in rosezm.app.json should not see every DevTools project listed as
+    // "rosezm-export". The later config files still override it; a project with
+    // no manifest keeps the default this export always had.
+    const identity = appIdentity(root);
+    let projectName = identity.slug === 'rosezm-desktop' ? 'rosezm-export' : identity.slug;
     let inheritedEnv = '';
     const inherit = (rawPath: string) => {
       try {
@@ -670,13 +678,6 @@ function pageNameOf(stem: string): string {
 
 function scopeOf(rel: string): string {
   return rel.replace(/\.rose$/, '');
-}
-
-function titleOf(head: string | null): string {
-  if (!head) return '';
-  const m = /<title>([\s\S]*?)<\/title>/.exec(head);
-  if (!m) return '';
-  return m[1].replace(/\{[^}]*\}/g, '').trim();
 }
 
 function applyLayouts(pageNodes: IrNode[], chain: LayoutFile[]): IrNode[] {
@@ -3115,6 +3116,40 @@ function routeOf(self, fallback) {
   return self.__rosezmRoute || self.route || fallback || '';
 }
 
+/**
+ * A web route from a wall's Location header -> the exported page that carries
+ * it. The route table is the same one navigation uses; an unexported target
+ * (a page the project never wrote) answers '' and the caller warns.
+ */
+function routePage(target) {
+  var path = String(target || '');
+  var q = path.indexOf('?');
+  if (q >= 0) path = path.slice(0, q);
+  if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.slice(0, -1);
+  var table;
+  try {
+    table = require('./rosezm-routes.js');
+  } catch (e) {
+    return '';
+  }
+  if (table && table[path]) return table[path];
+  // A dynamic route (/blog/7 against /blog/:id): match segment by segment.
+  for (var pattern in table) {
+    if (!/[:*]/.test(pattern)) continue;
+    var want = pattern.split('/');
+    var got = path.split('/');
+    if (want.length !== got.length) continue;
+    var ok = true;
+    for (var i = 0; i < want.length; i++) {
+      var seg = want[i];
+      if (seg.charAt(0) === ':' || seg.charAt(0) === '*') continue;
+      if (seg !== got[i]) { ok = false; break; }
+    }
+    if (ok) return table[pattern];
+  }
+  return '';
+}
+
 function rosePage(definitions, def) {
   installFormData();
   const page = {};
@@ -3263,10 +3298,43 @@ function rosePage(definitions, def) {
         method: 'POST',
         header: { 'content-type': 'application/x-www-form-urlencoded' },
         data: body,
-        success: (res) => { applyPatch(self, res.data && res.data.state ? res.data.state : res.data); resolve(res); },
+        success: (res) => { if (page.__wall(res)) { resolve(res); return; } applyPatch(self, res.data && res.data.state ? res.data.state : res.data); resolve(res); },
         fail: (err) => { console.warn('rosezm: action "' + name + '" failed', err); resolve(err); },
       });
     });
+  };
+  // A middleware wall answers the data channel and the action channel exactly
+  // as it answers a document: 302 to the sign-in page, or a bare 401/403. The
+  // kit used to apply res.data regardless, so a walled page painted its empty
+  // shell with no hint at all - the exported app looked broken rather than
+  // logged out. Every wall now either navigates to the exported page the
+  // redirect names, or says in the console which route was walled.
+  page.__wall = function (res) {
+    var status = (res && res.statusCode) || 0;
+    if (status >= 300 && status < 400) {
+      var loc = (res.header && (res.header.location || res.header.Location)) || '';
+      var page_path = loc ? routePage(loc) : '';
+      var api = requestApi();
+      if (page_path && api && api.redirectTo) {
+        api.redirectTo({ url: '/' + page_path });
+      } else {
+        console.warn('[rosezm] a middleware wall answered ' + status + ' for ' + routeOf(this, def.route)
+          + (loc ? ' (redirect to ' + loc + ', which this export has no page for)' : ''));
+      }
+      return true;
+    }
+    if (status === 401 || status === 403) {
+      console.warn('[rosezm] a middleware wall refused ' + routeOf(this, def.route) + ' (' + status + ')');
+      return true;
+    }
+    // Any other failure is not data either: a 500 carries an error envelope and
+    // a 0 is a dead socket, and patching the body into the page put "error" in
+    // the state, where it looked like a page field. Both are named instead.
+    if (status && (status < 200 || status >= 300)) {
+      console.warn('[rosezm] the data channel answered ' + status + ' for ' + routeOf(this, def.route) + ' - the page renders without data');
+      return true;
+    }
+    return false;
   };
   page.__loadData = function () {
     const self = this;
@@ -3283,7 +3351,7 @@ function rosePage(definitions, def) {
       api.request({
         url: apiBase + "/__rosezm/data?path=" + encodeURIComponent(routeOf(self, def.route)),
         method: "GET",
-        success: (res) => { applyPatch(self, res.data && res.data.state ? res.data.state : res.data); resolve(res); },
+        success: (res) => { if (page.__wall(res)) { resolve(res); return; } applyPatch(self, res.data && res.data.state ? res.data.state : res.data); resolve(res); },
         fail: (err) => { console.warn("rosezm: $data channel failed", err); resolve(err); },
       });
     });
