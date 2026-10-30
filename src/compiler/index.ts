@@ -5096,7 +5096,10 @@ const IMG_MIME: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
-const INLINE_IMG_MAX = 4096;
+// 8192 = the Next.js default: a 4-8 KB icon is a round-trip on the wire or
+// +33% base64 inline, and the round-trip is the worse half on a cold mobile
+// link. The demo's rose.png (4.9 KB) rides the document for exactly this.
+const INLINE_IMG_MAX = 8192;
 const INLINE_SVG_MAX = 16384;
 
 import { readImageSize } from "../cli/image-size";
@@ -6824,6 +6827,38 @@ export async function handleApi(method, pathname, request) {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+// BC: $data (and any server code) may call fetch('/api/...') with a RELATIVE
+// url. Node's fetch needs an absolute one, so every such call used to throw
+// and push pages into middleware-preload workarounds. Route the relative call
+// to this bundle's own handleApi: same process, the calling request's context
+// (its bag rides along), zero network. An absolute url keeps the platform
+// fetch. The context's params/url are saved around the dispatch - the api
+// handler writes its own, and the page's must still be there when the await
+// returns. Symbol.for keeps a dev hot-reload from stacking the wrapper: every
+// reload re-patches onto the one true native fetch, never onto the last patch.
+const __NATIVE_FETCH = Symbol.for('rosezm.nativeFetch');
+if (!globalThis[__NATIVE_FETCH]) globalThis[__NATIVE_FETCH] = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (input, init) => {
+  const raw = typeof input === 'string' ? input : input instanceof URL ? input.pathname + input.search : '';
+  if (!raw.startsWith('/api/') && raw !== '/api') return globalThis[__NATIVE_FETCH](input, init);
+  let req;
+  try {
+    req = new Request('http://rosezm.internal' + raw, init);
+  } catch {
+    return globalThis[__NATIVE_FETCH](input, init);
+  }
+  const u = new URL(req.url);
+  let ctx = null;
+  try { ctx = getContext(); } catch { /* no context store (edge/test) - fine */ }
+  const savedParams = ctx?.params;
+  const savedUrl = ctx?.url;
+  try {
+    return await handleApi((init?.method ?? 'GET').toUpperCase(), u.pathname, req);
+  } finally {
+    if (ctx) { ctx.params = savedParams; ctx.url = savedUrl; }
+  }
+};
 
 // === Streaming SSR === The static shell (doctype, <head>, body + container open) flushes BEFORE the - possibly slow - render completes: the first byte.
 export async function renderPageStream(pathname, write, shellOpen, clientTag) {

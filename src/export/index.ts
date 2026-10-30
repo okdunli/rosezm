@@ -227,6 +227,15 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
   if (info.status !== 'ready') {
     throw new Error(`export target "${target}" is planned, not implemented yet - shipping targets today:\n${targetList()}`);
   }
+  // A missing project root or a root with no pages produces a broken export:
+  // the tree "succeeds" with zero pages, and the user gets a useless app with
+  // no explanation. Named here, once, at the entry point.
+  const roseFiles = await scanRoseFiles(projectRoot);
+  if (roseFiles.length === 0) {
+    throw new RoseError('E-EXPORT-EMPTY', `no .rose pages found under ${path.join(projectRoot, 'src', 'pages')}`, {
+      hint: 'run from a project root (a directory with src/pages/), or create one: rosezm new <name>',
+    });
+  }
   const globalCss = opts.globalCss ?? (await discoverGlobalCss(projectRoot));
   await auditDroppedEffects(target, projectRoot, warnings);
   await auditMissingApiBase(target, projectRoot, opts.apiBase, warnings);

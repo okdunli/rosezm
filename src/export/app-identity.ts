@@ -98,7 +98,15 @@ export function appIdentity(projectRoot: string): AppIdentity {
   if (st) {
     // A Windows editor writes a BOM and JSON.parse rejects it - strip it first,
     // the same courtesy `rosezm.mp.json` already gets.
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as Record<string, unknown>;
+    const rawText = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(rawText) as Record<string, unknown>;
+    } catch (err) {
+      // A malformed manifest is a user-input error: name the file and say what
+      // went wrong instead of leaking a JSON.parse stack trace.
+      throw new RoseError('E-IDENTITY-JSON', `${file} is not valid JSON`, { file, hint: `check the syntax: ${(err instanceof Error ? err.message : String(err)).slice(0, 80)}` });
+    }
     app = validate(raw ?? {}, file);
   }
   cache.set(projectRoot, { app, stamp });

@@ -26,7 +26,11 @@ import { createHash } from 'node:crypto';
 
 /** A weak, content-derived validator for the exact bytes going on the wire. */
 export function contentEtag(raw: Buffer): string {
-  return 'W/"' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
+  // The `-` prefix marks a CONTENT-derived tag (the handler's own bytes),
+  // next to the file lane's `W/"size-mtime"` - the two shapes say on the wire
+  // which exit answered. R197's convention; the refactor that unified the
+  // hash dropped the marker and the e2e suite caught it.
+  return 'W/"-' + createHash('sha1').update(raw).digest('base64url').slice(0, 24) + '"';
 }
 
 /** The validator this response carries: the app's own if it published one,

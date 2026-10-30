@@ -22,7 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig';
+export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig' | 'electron';
 
 /** One workflow + manual per target, keyed by the export target name. */
 const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; deployMd: string; label: string }> = {
@@ -32,6 +32,7 @@ const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; deployMd: stri
   android: { workflow: 'android.yml', deployMd: 'android.DEPLOY.md', label: 'android' },
   xcode: { workflow: 'ios.yml', deployMd: 'ios.DEPLOY.md', label: 'xcode' },
   flutter: { workflow: 'flutter.yml', deployMd: 'flutter.DEPLOY.md', label: 'flutter' },
+  electron: { workflow: 'electron.yml', deployMd: 'electron.DEPLOY.md', label: 'electron' },
 };
 
 /**

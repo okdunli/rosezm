@@ -957,7 +957,10 @@ try {
   const cliEntry = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
   const cliBuild = spawnSync(process.execPath, ['--import', tsxLoader, cliEntry, 'build', '.'], { cwd: example, encoding: 'utf8' });
   assert(cliBuild.status === 0 && existsSync(join(example, 'dist', 'index.html')), 'the demo builds a shell document for the desktop target');
-  // Poison the project's dist/ with a build the export must NOT ship.
+  // Poison the project's dist/ with a build the export must NOT ship - and
+  // restore the real bytes afterwards: the fixture once left the poison on
+  // disk, and a later preview/e2e run against the same example served it.
+  const realIndex = readFileSync(join(example, 'dist', 'index.html'), 'utf8');
   writeFileSync(join(example, 'dist', 'index.html'), '<!DOCTYPE html><title>stale</title><p>stale build</p>');
   const electronDir = join(scratch, 'electron');
   const electron = await exportProject('electron', example, { apiBase: 'https://api.example.com', outRoot: scratch });
@@ -977,6 +980,8 @@ try {
   // The poisoned index.html above must not be in the export: if the emitter
   // ever goes back to copying dist/, this is the line that fails.
   assert(!existsSync(join(erdir, 'dist', 'index.html')) || !readFileSync(join(erdir, 'dist', 'index.html'), 'utf8').includes('stale build'), 'a stale dist/ in the project never reaches the export (the shell compiles the sources)');
+  assert(existsSync(join(erdir, '.github', 'workflows', 'electron.yml')) && existsSync(join(erdir, 'DEPLOY.md')), 'the electron export ships its CI workflow and DEPLOY.md');
+  writeFileSync(join(example, 'dist', 'index.html'), realIndex);
   void electronDir;
 
   // 11. the desktop JVM family: Java Swing, stdlib only.

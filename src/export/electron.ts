@@ -25,6 +25,7 @@ import { buildProject, scanRoseFiles, scanComponentFiles } from '../compiler/ind
 import { nativeUsage, type NativeCapability } from './native-api.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
+import { writeDeployScaffold } from './deploy-scaffold.js';
 
 export interface EmitElectronOptions {
   projectRoot: string;
@@ -95,6 +96,7 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
   const native = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
   await fs.promises.writeFile(path.join(out, 'preload.cjs'), renderPreload(native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? ''), 'utf8');
+  await writeDeployScaffold('electron', out, opts.warnings);
   // R231: the manifest used to claim zero pages, which made the export look
   // empty to anything reading rosezm-export.json. Report the project's pages.
   const pages = pageFiles.map((f) => path.basename(f, '.rose'));

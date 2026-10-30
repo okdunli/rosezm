@@ -8,7 +8,7 @@
  * brace counter (the " inside the regex opened a phantom string), the decl
  * was misjudged as nested and hoisted past its readers - TDZ at runtime.
  */
-import { compileComponent, scopeCss } from '../src/compiler/index.ts';
+import { compileComponent, scopeCss, buildProject } from '../src/compiler/index.ts';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -2109,6 +2109,48 @@ function onKey(e) { console.log(e.key); }
   check('on:keydown|window (the supported form) compiles clean', okMsg === '', okMsg.slice(0, 160));
   fs.rmSync(tmpCD, { force: true });
   fs.rmSync(tmpOK, { force: true });
+}
+
+// BUG.md BC: $data may fetch('/api/...') with a RELATIVE url on the server.
+// Node's fetch used to throw on it and pushed every page into middleware
+// workarounds. The server bundle now routes the relative call to its own
+// handleApi - same process, the calling request's context, zero network.
+{
+  const proj = path.join(HERE, '.test-bc-proj');
+  const dist = path.join(proj, 'dist');
+  safeRm(proj, { recursive: true });
+  fs.mkdirSync(path.join(proj, 'src/pages/api'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'src/pages/api/hello.rose'), `<script>
+export function GET(req) {
+  return { hello: new URL(req.url).searchParams.get('q') || 'world' };
+}
+</script>
+`, 'utf-8');
+  fs.writeFileSync(path.join(proj, 'src/pages/api/echo.rose'), `<script>
+export async function POST(req) {
+  return { ping: (await req.json()).ping };
+}
+</script>
+`, 'utf-8');
+  fs.writeFileSync(path.join(proj, 'src/pages/index.rose'), `<script>
+let greeting = $data(async () => {
+  const r = await fetch('/api/hello?q=internal');
+  return (await r.json()).hello;
+});
+let echoed = $data(async () => {
+  const r = await fetch('/api/echo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ping: 'pong' }) });
+  return (await r.json()).ping;
+});
+</script>
+<head><title>t</title></head>
+<p>{greeting()} {echoed()}</p>
+`, 'utf-8');
+  await buildProject(proj, dist);
+  const server = await import(pathToFileURL(path.join(dist, 'server.js')).href);
+  const page = await (server as any).renderPage('/');
+  check('BC: a $data body fetches /api/... relatively on the server (no absolute URL, no network)', String(page.html).includes('internal'), String(page.html).slice(0, 200));
+  check('BC: the internal fetch carries a method and body (POST json echoed back)', String(page.html).includes('pong'), String(page.html).slice(0, 200));
+  safeRm(proj, { recursive: true });
 }
 
 if (failures > 0) {

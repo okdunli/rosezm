@@ -115,7 +115,8 @@ async function sendHtml(req: any, res: any, status: number, html: string, extraH
   // below is still content-negotiated - both dimensions must survive.
   addVary(res, 'Accept-Encoding');
   // A weak ETag over the rendered bytes: revalidation answers a bodiless 304 for dynamic renders too (a middleware makes every page route dynamic).
-  const etag = 'W/"' + createHash('sha1').update(html, 'utf8').digest('base64url').slice(0, 24) + '"';
+  // The `-` marks a content-derived tag, next to the file lane's size-mtime shape.
+  const etag = 'W/"-' + createHash('sha1').update(html, 'utf8').digest('base64url').slice(0, 24) + '"';
   // RFC 9110: a 304 must carry the validators a 200 would have carried, so the
   // header is set BEFORE the match - a client that gets a 304 without its ETag
   // cannot tell which representation it just revalidated.

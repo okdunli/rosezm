@@ -1,0 +1,57 @@
+# rosezm - Electron build (GitHub Actions).
+#
+# `rosezm export electron` copies this file into the export tree as
+# .github/workflows/electron.yml. The shell is pure Node (main.cjs + preload.cjs)
+# wrapping a static server, so the build is just npm install + electron-builder.
+#
+# No credential is written into this file. Codesigning/notarization reads its
+# material from ${{ secrets.NAME }} - see DEPLOY.md, the manual step.
+
+name: Electron
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+          - os: macos-latest
+            platform: mac
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Linux needs basic GUI libs for electron-builder's archive step.
+      - if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools
+
+      - name: npm install
+        run: npm install
+
+      - name: electron-builder (dir only, no installer)
+        run: npx electron-builder --dir
+        env:
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED: '1'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rosezm-electron-${{ matrix.platform }}
+          path: |
+            dist/**/*
+          if-no-files-found: warn
