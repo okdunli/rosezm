@@ -819,7 +819,13 @@ def data_patch(route):
     if not API_BASE:
         return {}
     url = API_BASE + '/__rosezm/data?path=' + urllib.parse.quote(route)
-    request = urllib.request.Request(url)
+    try:
+        request = urllib.request.Request(url)
+    except ValueError:
+        # A junk --api base ('x' not 'http://x') builds a relative URL the
+        # Request constructor refuses. The pages still render; only the
+        # server half is dead - the same answer a missing server gets.
+        return {}
     if SESSION_COOKIE:
         request.add_header('Cookie', SESSION_COOKIE)
     try:
@@ -852,7 +858,10 @@ def action_patch(route, name):
         return {}
     url = API_BASE + route
     body = urllib.parse.urlencode({'__action': name}).encode('utf-8')
-    request = urllib.request.Request(url, data=body, method='POST')
+    try:
+        request = urllib.request.Request(url, data=body, method='POST')
+    except ValueError:
+        return {}
     request.add_header('Content-Type', 'application/x-www-form-urlencoded')
     if SESSION_COOKIE:
         request.add_header('Cookie', SESSION_COOKIE)
@@ -986,11 +995,23 @@ class RoseApp(tk.Tk):
                 return pattern, module, {}
             parts = pattern.strip('/').split('/')
             actual = route.strip('/').split('/')
-            if len(parts) != len(actual):
+            # A catch-all segment (:...slug) swallows the rest of the path, so a
+            # 3-deep route can name a 2-segment pattern - skip the length check
+            # when one is present and let the per-segment loop decide.
+            catch_all = any(seg[1:].startswith('...') for seg in parts if seg.startswith(':'))
+            if len(parts) != len(actual) and not catch_all:
                 continue
             params = {}
             ok = True
             for want, got in zip(parts, actual):
+                # A catch-all segment (*slug) swallows the rest of the path,
+                # and a :param takes one - neither compares literally.
+                if want.startswith('*'):
+                    ok = True
+                    break
+                if want.startswith(':...'):
+                    params[want[1:]] = '/'.join(actual[len(parts) - 1:])
+                    break
                 if want.startswith(':'):
                     params[want[1:]] = got
                 elif want != got:
@@ -2285,10 +2306,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     // chained `.pack(...).configure(bg=...)` died with
     // "AttributeError: 'NoneType' object has no attribute 'configure'" the
     // moment the page rendered.
-    // shortcut: background does NOT ride textCarry (it would repaint buttons and
-    // inputs, whose browser chrome is not transparent, and reshuffle the inline
-    // decls the suite pins byte-for-byte) - revisit when the suite's
-    // constructor-string pins are allowed to move.
+    // Background is inherited through ctx.surface (every container's real bg
+    // rides the constructor down), NOT through textCarry: buttons and inputs
+    // have opaque browser chrome, and CSS does not inherit background into
+    // them either - so the two paths agree with the browser on purpose.
     const inheritedBg = !decls.some((d) => d.key === 'bg') && model.background === undefined && ctx.surface ? `, bg=${ctx.surface}` : '';
     const call = `tk.Label(${ctx.parent}, text=${text}, wraplength=${wrap}${decls.length ? ', ' + declsKw(decls) : ''}${inheritedBg})`;
     if (binding.hasDynamic) {

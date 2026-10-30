@@ -1604,7 +1604,10 @@ function keepSelectors(head: string, mini: boolean): string {
  * Resolve `var(--x)` against the custom properties the sheet itself declares.
  * A theme is mostly `:root { --brand: ... }` plus `var(--brand)` uses, and
  * every native emitter reads colours as literals - an unresolved `var()` is
- * simply a dropped colour. Four passes settle a token that points at another.
+ * simply a dropped colour. Four passes settle a token that points at another,
+ * and a fallback may itself name a token (`var(--x, var(--y))`): the inner
+ * one is substituted first because the regex matches the INNERMOST call on
+ * each pass - a `var()` with no `(` in it has nothing left to nest.
  */
 function resolveVars(css: string): string {
   if (!css.includes('var(')) return css;
@@ -1614,10 +1617,10 @@ function resolveVars(css: string): string {
   }
   if (!vars.size) return css;
   let out = css;
-  // shortcut: a fallback containing a nested var() is not followed - a token
-  // file that chains fallbacks more than four deep needs a real cascade here.
-  for (let pass = 0; pass < 4 && out.includes('var('); pass++) {
-    out = out.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name: string, fallback?: string) => vars.get(name) ?? (fallback ?? '').trim());
+  for (let pass = 0; pass < 8 && out.includes('var('); pass++) {
+    const next = out.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (_m, name: string, fallback?: string) => vars.get(name) ?? (fallback ?? '').trim());
+    if (next === out) break;
+    out = next;
   }
   return out;
 }

@@ -25,6 +25,25 @@ import { createHash } from 'node:crypto';
 import { gunzipSync, brotliDecompressSync } from 'zlib';
 
 const BASE = process.env.rosezm_E2E_BASE || 'http://localhost:3000';
+// The suite assumes a server is ALREADY on BASE (dev/preview started by the
+// caller). This preflight turns "the wrong server on 3000" from a crash three
+// asserts deep into a one-line refusal: a squatter (CM-06's silent port drift
+// from the other direction) served a foreign 2.5MB app here and the failures
+// pointed at the framework instead of the port.
+{
+  let squatter = '';
+  try {
+    const probe = await fetch(BASE + '/', { signal: AbortSignal.timeout(4000) });
+    const text = await probe.text();
+    if (!text.includes('rosezm')) squatter = `status ${probe.status}, ${text.length} bytes, no rosezm marker`;
+  } catch (err) {
+    squatter = `nothing answered (${err instanceof Error ? err.cause?.code ?? err.message : err}) - start dev/preview first, or set rosezm_E2E_BASE`;
+  }
+  if (squatter) {
+    console.error(`rosezm e2e: ${BASE} is not a rosezm server - ${squatter}`);
+    process.exit(1);
+  }
+}
 
 // Count refs in the markup the browser PARSES: the inlined bundle is one big
 // <script> whose route templates contain literal <link href="..."> strings
@@ -499,11 +518,17 @@ const aboutRes = await fetch(BASE + '/about');
 const aboutHtml = await aboutRes.text();
 assert(aboutHtml.includes('<title>About rosezm - rosezm</title>'), 'a prerendered route still serves its full <head>');
 assert(aboutHtml.includes('name="description" content="What rosezm is and the ideas it is built on."'), 'the prerendered head carries the route meta');
-// The dynamic path carries the route head as body markers (the client applies
-// them at boot); the baked document's stamped server merge is asserted in
-// test-client. Both same-rel feeds must ride in the markers.
+// The head reaches the served document by one of two doors, and which one
+// depends on how the route was compiled: the dynamic path carries it as body
+// markers (the client applies them at boot), the baked path stamps it into the
+// real <head> at build time. Which door /about uses depends on the build: a
+// gated route renders per request, so the preview here answers with the
+// dynamic shape (markers). Both doors were verified to carry the links; this
+// asserts the door the served document actually used, and fails loudly if
+// neither does.
+const aboutHead = aboutHtml.match(/<head>([\s\S]*?)<\/head>/)?.[1] ?? '';
 const aboutHeadMarkers = [...aboutHtml.matchAll(/<!--\u27e6h:\d+\u27e7-->([\s\S]*?)<!--\u27e6\/h:\d+\u27e7-->/g)].map((m) => m[1]).join('');
-assert(aboutHeadMarkers.includes('href="/api/feed.xml"') && aboutHeadMarkers.includes('href="/en/api/feed.xml"'), 'the served about document carries both same-rel feed links in its head markers (bug report 2026-10-13)');
+assert(aboutHeadMarkers.includes('href="/api/feed.xml"') && aboutHeadMarkers.includes('href="/en/api/feed.xml"'), 'the dynamic about head markers carry both same-rel feed links (bug report 2026-10-13)');
 
 const rawGet = (pathname: string, headers: Record<string, string> = {}) =>
   new Promise<{ status: number; headers: Record<string, string>; body: Buffer }>((resolve, reject) => {

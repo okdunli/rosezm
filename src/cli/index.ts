@@ -1053,28 +1053,54 @@ function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => v
     const seed = devResume;
     devResume = null;
     const isHtml = () => String(res.getHeader('content-type') || '').includes('text/html');
-    const inject = (chunk: any): any => {
-      if (injected || !isHtml()) return chunk;
-      const s = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-      const at = s.indexOf('<head>');
-      if (at < 0) return chunk;
-      
-      injected = true;
+    // The reload bridge is injected from the COMPLETE document at end().
+    // Deciding per chunk looked at a document that had not arrived yet: a
+    // zero-JS route is buffered, so its first chunk carried <head> and no
+    // script, and the bridge was skipped on every page - hot reload died
+    // outright. The whole body is what tells you whether the document ships
+    // JS at all, and a zero-JS route ships none: injecting the bridge would
+    // break the very promise the route was compiled for (the e2e suite
+    // asserts zero script tags on one).
+    const parts: Buffer[] = [];
+    let html = false;
+    const take = (chunk: any): void => {
+      if (chunk === undefined || chunk === null) return;
+      parts.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8'));
+    };
+    const withBridge = (bridge: string): Buffer => {
+      const whole = Buffer.concat(parts).toString('utf8');
+      const at = whole.indexOf('<head>');
+      if (at < 0 || !bridge) return Buffer.from(whole, 'utf8');
       // The seed is JSON TEXT; the shell reads it back with
       // JSON.parse(window.__rosezm_resume), so it must arrive as a STRING.
-      // Injecting it bare made the assignment an object literal and the
-      // parse threw "[object Object] is not valid JSON" - which killed the
-      // whole boot script on every hot reload that carried state.
-      const resume = seed ? `<script>window.__rosezm_resume=${JSON.stringify(seed).replace(/<\/script>/g, '')}</script>` : '';
-      const out = s.slice(0, at + 6) + resume + DEV_BRIDGE + s.slice(at + 6);
-      return Buffer.isBuffer(chunk) ? Buffer.from(out, 'utf8') : out;
+      // Injecting it bare made the assignment an object literal and the parse
+      // threw "[object Object] is not valid JSON" - which killed the whole boot
+      // script on every hot reload that carried state.
+      const resume = seed ? '<script>window.__rosezm_resume=' + JSON.stringify(seed).replace(/<\/script>/g, '') + '</script>' : '';
+      return Buffer.from(whole.slice(0, at + 6) + resume + bridge + whole.slice(at + 6), 'utf8');
     };
     const write = res.write.bind(res);
-    res.write = (chunk: any, ...rest: any[]) => write(inject(chunk), ...rest);
+    res.write = (chunk: any, ...rest: any[]) => {
+      html = html || isHtml();
+      if (!html) return write(chunk, ...rest);
+      take(chunk);
+      return true;
+    };
     const end = res.end.bind(res);
     res.end = (chunk: any, ...rest: any[]) => {
-      if (!res.headersSent && isHtml()) res.removeHeader('Content-Security-Policy');
-      end(chunk === undefined || chunk === null ? chunk : inject(chunk), ...rest);
+      html = html || isHtml();
+      if (!html) {
+        if (!res.headersSent && isHtml()) res.removeHeader('Content-Security-Policy');
+        return end(chunk, ...rest);
+      }
+      take(chunk);
+      const shipsJs = /<script/.test(Buffer.concat(parts).toString('utf8'));
+      const body = withBridge(shipsJs ? DEV_BRIDGE : '');
+      if (!res.headersSent) {
+        res.removeHeader('Content-Security-Policy');
+        res.setHeader('content-length', String(body.length));
+      }
+      return end(body, ...rest);
     };
     inner(req, res);
   };

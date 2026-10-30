@@ -2275,8 +2275,11 @@ public final class RoseApp {
      *  /sign and /sign/ arrive here as the same route. */
     private String wallPage(String target) {
         for (String pattern : ROUTES) {
-            if (pattern.indexOf(':') < 0) {
+            if (pattern.indexOf(':') < 0 && pattern.indexOf('*') < 0) {
                 if (pattern.equals(target)) return target;
+            } else if (pattern.indexOf('*') >= 0) {
+                // A catch-all segment (*slug) swallows the rest of the path.
+                if (target.startsWith(pattern.substring(0, pattern.indexOf('*')))) return target;
             } else if (java.util.regex.Pattern.compile("^" + pattern.replaceAll(":[^/]+", "([^/]+)") + "$").matcher(target).matches()) {
                 return target;
             }

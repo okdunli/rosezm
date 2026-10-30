@@ -219,7 +219,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
 
   assetMap = await copyDartAssets(root, path.join(out, 'assets', 'images'), warnings);
   await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route)), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDependencies('flutter', native), app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme), 'utf8');
@@ -899,7 +899,7 @@ CrossAxisAlignment? _roseCross(String? a) {
 `;
 }
 
-function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = []): string {
   const q = JSON.stringify(apiBase);
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
@@ -1194,18 +1194,59 @@ String rosezmCanon(String target) {
   return path;
 }
 
+/// The app's navigator: RoseApp installs it so a middleware wall's redirect
+/// can be followed to the page it names (the /sign page, say) instead of the
+/// visitor staring at a data-less screen. rosezmWall runs inside the awaited
+/// rosezmData (between frames, never during a build, so pushNamed is legal);
+/// currentState is null before the first frame and the call falls back to the
+/// log line until then.
+/// can be followed to the page it names (the /sign page, say) instead of the
+/// visitor staring at a data-less screen.
+final rosezmNavigatorKey = GlobalKey<NavigatorState>();
+
+/// The static routes this export carries, written per export: a wall's
+/// redirect is only followed to one of these (dynamic patterns are matched
+/// segment-wise in rosezmPageFor).
+const rosezmRouteNames = <String>{${staticRoutes.map((r) => `  '${r}',`).join('\n')}};
+/// The exported page a wall's redirect names, from the route table the app
+/// was built with - '' when this export carries no such page.
+String rosezmPageFor(String target) {
+  final path = rosezmCanon(target);
+  if (path.isEmpty) return '';
+  if (rosezmRouteNames.contains(path)) return path;
+  // Dynamic patterns: /blog/7 matches /blog/:id segment by segment.
+  final got = path.split('/');
+  for (final pattern in rosezmRouteNames) {
+    final want = pattern.split('/');
+    if (want.length != got.length) continue;
+    var ok = true;
+    for (var i = 0; i < want.length; i++) {
+      if (want[i].startsWith(':') || want[i].startsWith('*')) continue;
+      if (want[i] != got[i]) { ok = false; break; }
+    }
+    if (ok) return pattern;
+  }
+  return '';
+}
+
 /// True when a response is a middleware wall - a 3xx that points at another
-/// path (the sign-in page) or a bare 401/403 - and prints the one line that
-/// names it. The caller must then drop the body: a wall's body is the sign-in
-/// page's HTML, never data. The kit has no router to follow the redirect with,
-/// so the console line is the whole answer on this target.
+/// path (the sign-in page) or a bare 401/403 - and handles it: the redirect is
+/// followed through the navigator when this export carries that page, and the
+/// one console line always names what happened. The caller must then drop the
+/// body: a wall's body is the sign-in page's HTML, never data.
 bool rosezmWall(String route, String asked, int status, String location) {
   if (status >= 300 && status < 400) {
     final target = rosezmCanon(location);
     if (target.isNotEmpty && target == rosezmCanon(asked)) return false;
+    final page = target.isEmpty ? '' : rosezmPageFor(target);
+    final nav = rosezmNavigatorKey.currentState;
+    if (page.isNotEmpty && nav != null) {
+      nav.pushNamed(page);
+      return true;
+    }
     stderr.writeln(target.isEmpty
         ? 'rosezm: \$route is behind a middleware wall (\$status); the page renders without data'
-        : 'rosezm: \$route is behind a middleware wall (\$status -> \$target); the page renders without data');
+        : 'rosezm: \$route is behind a middleware wall (\$status -> \$target); this export has no page for it');
     return true;
   }
   if (status == 401 || status == 403) {
@@ -1518,6 +1559,7 @@ import 'vectors.dart';
 
 void main() => runApp(const RoseApp());
 
+
 class RoseApp extends StatelessWidget {
   const RoseApp({super.key});
 
@@ -1525,6 +1567,7 @@ class RoseApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'rosezm',
+      navigatorKey: rosezmNavigatorKey,
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFFE91E63)),
       initialRoute: roseDeepLinkRoute(WidgetsBinding.instance.platformDispatcher.defaultRouteName),
       routes: {

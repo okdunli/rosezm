@@ -1374,7 +1374,7 @@ bool RoseApp::hasRoute(const std::string& target) const {
     // only followed to a page this export actually carries.
     return ${pages.length ? pages.map((p) => (p.params.length === 0
       ? `target == ${JSON.stringify(p.route)}`
-      : `std::regex_match(target, std::regex(${JSON.stringify('^' + p.route.replace(/:[^/]+/g, '([^/]+)') + '$')}))`)).join('\n        || ') : 'false'};
+      : `std::regex_match(target, std::regex(${JSON.stringify('^' + p.route.replace(/:[^/]+/g, '([^/]+)').replace(/\*\w+/g, '.*') + '$')}))`)).join('\n        || ') : 'false'};
 }
 
 // --- session cookie ---------------------------------------------------------------

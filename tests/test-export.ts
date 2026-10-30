@@ -3090,6 +3090,26 @@ try {
     assert(stIndex.includes("roseResolve(const <String>['a', 'c'], 'index', inline: RoseStyle(color: Color(0xFFFF0000)"), 'flutter: literal entries fold into a const list with the color as a real Color');
     assert(saIndex.includes('roseResolve("p", listOf("always", (if ((count > 1)) "on" else ""), (if ((count <= 1)) "off" else "")), "Index"'), 'android: the conditional class names are Kotlin if-expressions inside the runtime list, with the tag carried');
     assert(saIndex.includes('Text("literal", color = Color(0xFFFF0000)'), 'android: the literal style object paints the text');
+  // A catch-all route (/docs/[...slug]) names its pattern /docs/:...slug in the
+  // PAGES table, and page_of used to require equal segment counts - a deep
+  // /docs/a/b found nothing. The matchers must let a catch-all swallow the
+  // rest of the path.
+  {
+    const root = join(tmpdir(), 'rosezm-catchall-proj');
+    mkdirSync(join(root, 'src/pages/docs'), { recursive: true });
+    writeFileSync(join(root, 'src/pages/docs/[...slug].rose'), '<p id="doc">{slug}</p>\n');
+    writeFileSync(join(root, 'src/pages/index.rose'), '<p>home</p>\n');
+    const py = await exportProject('python', root, { apiBase: 'x', outRoot: join(tmpdir(), 'rosezm-catchall-py') });
+    const rosezmPy = readFileSync(join(py.outDir, 'rosezm.py'), 'utf8');
+    // A junk --api base builds a relative URL the Request constructor
+    // refuses - the kit used to let that ValueError escape through show()
+    // and kill the window. The pages still render; only the server half is
+    // dead, the same answer a missing server gets.
+    assert(rosezmPy.includes('except ValueError:'), 'python: the kit guards the Request constructor against a junk --api base');
+    assert(readFileSync(join(py.outDir, 'app.py'), 'utf8').includes('catch_all = any'), 'python: the len check is skipped for a catch-all pattern (app.py)');
+    assert(readFileSync(join(py.outDir, 'app.py'), 'utf8').includes("startswith(':...')"), 'python: the deep-slug mapping lands in app.py beside the len check');
+  }
+
     assert(/roseResolve\("p", \["always", \(count > 1\) \? "on" : "", \(count <= 1\) \? "off" : ""\], "IndexView"/.test(sxIndex), 'xcode: the shorthand expands into the SwiftUI resolver array, conditionals included, with the tag carried');
     assert(sxIndex.includes('Text("literal").foregroundColor(Color.rose("ff0000"))'), 'xcode: the literal style object paints the text');
     assert(spIndex.includes(`rose_join(["always", rose_tokens(('on' if (st.get('count') > 1) else '')), rose_tokens(('off' if (st.get('count') <= 1) else ''))])`), 'python: the dynamic entries are conditional class names the kit tokenises');
@@ -5490,6 +5510,7 @@ h2 { font-size: 40px; }
     assert(bundled.length === 1 && bundled[0] === 'brandface.ttf', `android: the theme's @font-face is bundled, not dropped (fonts: ${bundled.join(', ') || 'none'})`);
     assert(/brandface/i.test(readFileSync(join(themed.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseTheme.kt'), 'utf8')), 'android: the theme rule that names the family reaches the style table');
     assert(!native.includes(':root'), 'a token-only :root block is dropped once the vars are inlined');
+    assert(sanitizeFor('android', ':root { --one: #101112; }\n  p { color: var(--nope, var(--one)); }').includes('color: #101112'), 'a nested fallback resolves to the inner token value');
     assert(sanitizeFor('electron', theme) === theme, 'electron wraps the real web build, so it takes the sheet verbatim');
 
     const withTheme = async (target: 'weapp' | 'android' | 'python', css?: string) => {
