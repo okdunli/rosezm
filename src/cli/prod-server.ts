@@ -605,6 +605,9 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathna
     fileCache.set(pathname, entry);
     if (fileCache.size > 500) fileCache.delete(fileCache.keys().next().value as string);
   }
+  // Unreachable - the miss path above just built one - but it pins the type
+  // for the whole serve half below without a second cache lookup.
+  if (!entry) return false;
   res.statusCode = 200;
   res.setHeader('Content-Type', TYPES[ext]);
   res.setHeader('ETag', entry.etag);

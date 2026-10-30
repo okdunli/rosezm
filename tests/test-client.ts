@@ -12,9 +12,24 @@ import { readFileSync, readdirSync, existsSync, mkdtempSync, mkdirSync, cpSync, 
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { spawnSync } from 'child_process';
 import { renderPage, renderPageStream, canStream, shellOff, handleApi, isApi, apiPrerender, localeList, defaultLocale } from '../dist/server.js';
 import { buildShell, getHtmlShell, shellOpen, securityHeaders } from '../src/cli/shell.js';
+
+// The suite drives the BUILT bundle in dist/ - and the cli suite builds the
+// example VARIANTS (examples/blog-pg, oauth, jwt) into the SAME dist, so a
+// leftover bundle renders the wrong project's home and every assertion reads
+// like a compiler bug. Build the example here: ~5s, and the suite never
+// inherits another project's server.
+{
+  const repo = new URL('..', import.meta.url);
+  const build = spawnSync(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'src/cli/index.ts', 'build', 'example'], { cwd: fileURLToPath(repo) });
+  if (build.status !== 0) {
+    console.error(`the example build failed - the suite cannot run:`, String(build.stderr).slice(-400));
+    process.exit(1);
+  }
+}
 
 const dom = new JSDOM('<!DOCTYPE html><html><body><div id="app"></div></body></html>');
 (globalThis as any).document = dom.window.document;
@@ -59,6 +74,24 @@ const assert = (cond: boolean, msg: string) => {
   }
   console.log(`ok - ${msg}`);
 };
+
+// BUG.md AQ (R345): a head entry the document ALREADY carries (the SSR render
+// put it there; the state re-shipped the same string) must not be inserted
+// twice - a 72 KB inline style arrived twice and doubled the page's CSS.
+{
+  const { clearHead } = await import('../src/runtime/index.js');
+  const first = '<style id="aq-theme">.aq{color:red}</style>';
+  applyHead(first);
+  assert(document.head.querySelectorAll('#aq-theme').length === 1, 'AQ: the first application inserts once');
+  applyHead(first);
+  assert(document.head.querySelectorAll('#aq-theme').length === 1, 'AQ: re-applying the same entry does not duplicate it (the 72 KB cssInline case)');
+  assert(document.head.querySelector('#aq-theme')?.getAttribute('data-rosezm-head') !== null, 'AQ: the adopted node is managed, so the next clearHead finds it');
+  applyHead('<style id="aq-theme">.aq{color:red}.b{color:blue}</style>');
+  const node = document.head.querySelector('#aq-theme');
+  assert(node && document.head.querySelectorAll('#aq-theme').length === 1 && (node.textContent ?? '').includes('.b{color:blue}'), 'AQ: a changed entry replaces the stale copy instead of joining it');
+  clearHead();
+  assert(!document.head.querySelector('#aq-theme'), 'AQ: clearHead still removes the adopted node');
+}
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -1871,4 +1904,8 @@ function flip(): void { known = true; v = '84'; }
 }
 
 console.log(`\nAll client pipeline checks passed - ${checks} assertions.`);
+// A fixture page can still carry a live interval (the heartbeat demo mounts
+// one; the suite ends without navigating away), and its jsdom timer holds the
+// Node loop - every assertion passed, so exit instead of hanging the runner.
+process.exit(0);
 

@@ -16,7 +16,8 @@
  *     "id": "com.example.myapp",   // store identity: applicationId / bundle id / bundleName / tauri identifier
  *     "name": "My App",            // launcher label, window title, product name
  *     "version": "1.2.0",          // versionName / CFBundleShortVersionString / package version
- *     "slug": "my-app"             // artifact and binary names (npm-safe, Dart-safe, no spaces)
+ *     "slug": "my-app",            // artifact and binary names (npm-safe, Dart-safe, no spaces)
+ *     "scheme": "myapp"            // optional: deep links - myapp://blog/7 opens the app on /blog/7
  *   }
  *
  * Absent, every value keeps the default it had before this file existed, so a
@@ -41,6 +42,12 @@ export interface AppIdentity {
   slug: string;
   /** Semantic version, as a string - every platform wants to format it itself. */
   version: string;
+  /**
+   * URL scheme for deep links: `myapp://blog/7` opens the app on /blog/7.
+   * Optional - absent (empty) means no deep links and the exported manifests
+   * keep no VIEW filter, byte-identically.
+   */
+  scheme: string;
 }
 
 const DEFAULTS: AppIdentity = {
@@ -48,6 +55,7 @@ const DEFAULTS: AppIdentity = {
   name: 'rosezm',
   slug: 'rosezm-desktop',
   version: '1.0.0',
+  scheme: '',
 };
 
 /** Per project: the parsed identity plus the mtime it was read at. The exporters
@@ -61,15 +69,15 @@ const cache = new Map<string, { app: AppIdentity; stamp: string }>();
  * file named in the message.
  */
 function validate(raw: Record<string, unknown>, file: string): AppIdentity {
-  const pick = (key: keyof AppIdentity): string => {
+  const pick = (key: keyof AppIdentity, allowEmpty = false): string => {
     const value = raw[key];
     if (value === undefined) return DEFAULTS[key];
-    if (typeof value !== 'string' || !value.trim()) {
+    if (typeof value !== 'string' || (!value.trim() && !allowEmpty)) {
       throw new RoseError('E-IDENTITY', `${file}: "${key}" must be a non-empty string`, { file, hint: 'every field in rosezm.app.json must be a non-empty string' });
     }
     return value.trim();
   };
-  const app: AppIdentity = { id: pick('id'), name: pick('name'), slug: pick('slug'), version: pick('version') };
+  const app: AppIdentity = { id: pick('id'), name: pick('name'), slug: pick('slug'), version: pick('version'), scheme: pick('scheme', true) };
   if (!/^[A-Za-z][\w-]*(\.[A-Za-z][\w-]*)+$/.test(app.id)) {
     throw new RoseError('E-IDENTITY-ID', `${file}: "id" must look like a reverse-DNS name, got ${JSON.stringify(app.id)}`, { file, hint: 'reverse-DNS: com.example.myapp - every store keys the app on this' });
   }
@@ -78,6 +86,12 @@ function validate(raw: Record<string, unknown>, file: string): AppIdentity {
   }
   if (!/^\d+\.\d+\.\d+/.test(app.version)) {
     throw new RoseError('E-IDENTITY-VERSION', `${file}: "version" must start with major.minor.patch, got ${JSON.stringify(app.version)}`, { file, hint: 'semver: 1.2.3 - every platform store requires it' });
+  }
+  // RFC 3986: a scheme is ALPHA followed by ALPHA/DIGIT/+/-/. - Android's
+  // manifest <data android:scheme> and iOS's CFBundleURLSchemes both enforce
+  // this shape, so a bad one is refused here, hours before either tool sees it.
+  if (app.scheme && !/^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(app.scheme)) {
+    throw new RoseError('E-IDENTITY-SCHEME', `${file}: "scheme" must look like a URL scheme, got ${JSON.stringify(app.scheme)}`, { file, hint: 'lowercase letters, digits, plus, dash, dot after a letter: myapp - deep links are myapp://route' });
   }
   return app;
 }

@@ -174,7 +174,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     // already named by the fixed header above, so they stay excluded.
     await fs.promises.writeFile(path.join(etsRoot, 'pages', page.struct + '.ets'), pageSrc.replace(KIT_IMPORT_SLOT, kitImportLine(pageSrc, kitExports, new Set(['roseData', 'roseAction', 'roseKv']))), 'utf8');
   }
-  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(), 'utf8');
+  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(app.scheme), 'utf8');
   await fs.promises.writeFile(path.join(pkgRoot, 'resources', 'base', 'profile', 'main_pages.json'), JSON.stringify({
     src: pages.map((p) => `pages/${p.struct}`),
   }, null, 2) + '\n', 'utf8');
@@ -205,7 +205,10 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
           startWindowIcon: '$media:app_icon',
           startWindowBackground: '$media:startIcon',
           exported: true,
-          skills: [{ entities: ['entity.system.home'], actions: ['action.system.home'] }],
+          skills: [
+            { entities: ['entity.system.home'], actions: ['action.system.home'] },
+            ...(app.scheme ? [{ actions: ['ohos.want.action.viewData'], uris: [{ scheme: app.scheme }] }] : []),
+          ],
         },
       ],
     },
@@ -662,6 +665,30 @@ function roseWallPath(location: string): string {
   while (path.indexOf('//') >= 0) path = path.replace('//', '/');
   if (path.length > 1 && path.charAt(path.length - 1) === '/') path = path.substring(0, path.length - 1);
   return path.length > 0 ? path : '/';
+}
+
+/// A deep link's rebuilt path (the ability parks scheme://host/path as
+/// host+path in AppStorage) resolved against the route table: an exact match
+/// wins; a ':param' pattern matches by segment count and the captured values
+/// ride as router params. null = no page carries this route - the entry page
+/// stays home.
+export function roseDeepLinkPage(deepLink: string): { url: string; params: Record<string, string> } | null {
+  if (!deepLink || deepLink === '/') return null;
+  const exact = ROSE_PAGES[deepLink];
+  if (exact) return { url: exact, params: {} };
+  const parts = deepLink.split('/');
+  for (const pattern of Object.keys(ROSE_PAGES)) {
+    const segs = pattern.split('/');
+    if (segs.length !== parts.length) continue;
+    const params: Record<string, string> = {};
+    let ok = true;
+    for (let i = 0; i < segs.length; i++) {
+      if (segs[i].startsWith(':')) params[segs[i].substring(1)] = parts[i];
+      else if (segs[i] !== parts[i]) { ok = false; break; }
+    }
+    if (ok) return { url: ROSE_PAGES[pattern], params };
+  }
+  return null;
 }
 
 /** The registered page this export carries for a path, or '' - exactly, or
@@ -1255,7 +1282,7 @@ function renderBuildProfile(): string {
   }, null, 2) + '\n';
 }
 
-function renderAbility(): string {
+function renderAbility(scheme: string): string {
   return `import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
 import hilog from '@ohos.hilog';
@@ -1265,6 +1292,17 @@ import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(0x0000, 'rosezm', 'EntryAbility onCreate');
+    // A deep link (${scheme ? scheme : 'myscheme'}://blog/7) arrives as want.uri, which the
+    // system parses as scheme + host + path - the route is the host joined
+    // onto the path, the same rule the Android and iOS shells follow. The
+    // entry page picks the value up from AppStorage and routes itself.
+    const uri = want.uri ?? '';
+    ${scheme ? `if (uri.startsWith(${JSON.stringify(scheme + '://')})) {
+      const rest = uri.substring(${JSON.stringify((scheme + '://').length)});
+      const slash = rest.indexOf('/');
+      const deepLinkPath = slash >= 0 ? '/' + rest.substring(0, slash) + rest.substring(slash) : '/' + rest;
+      AppStorage.setOrCreate('rosezmDeepLink', deepLinkPath);
+    }` : '// no scheme declared - no deep links'}
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -1427,6 +1465,22 @@ function renderPage(
   // A kv field has no server to compute it here, so the page seeds it from its
   // own compute expression, memoized for the declared TTL.
   const kvDecls = kvDeclarations(page.script ?? '').filter((k) => new Set([...facts.state.map((s) => s.name), ...facts.data]).has(k.name));
+  // BUG-009 family: only the ENTRY page looks for a deep link - the ability
+  // parked the rebuilt path in AppStorage; the kit resolves it to a page.
+  const isEntry = page.route === '/';
+  const kitNames = isEntry ? 'roseData, roseAction, roseKv, roseDeepLinkPage' : 'roseData, roseAction, roseKv';
+  const deepLinkHook = isEntry
+    ? [
+        '    // A deep link parked by EntryAbility: resolve it and route on - one',
+        '    // frame of home at most (the platform delivers the link after launch).',
+        '    const deepLink = AppStorage.get<string>("rosezmDeepLink") ?? "";',
+        '    if (deepLink) {',
+        '      AppStorage.setOrCreate("rosezmDeepLink", "");',
+        '      const target = roseDeepLinkPage(deepLink);',
+        '      if (target) { router.pushUrl({ url: target.url, params: target.params }); return; }',
+        '    }',
+      ].join('\n')
+    : '';
   const kvSeedLines = kvDecls.map((k) => `    this.${k.name} = roseKv(${JSON.stringify(k.name)}, () => (${kvCallable(k.fn)}), ${k.ttl});`).join('\n');
   // The form's inputs keyed by their name, as the server action reads them.
   const formFieldsHelper = formFields.length
@@ -1461,7 +1515,7 @@ function renderPage(
     : bindFields;
   const paramLoad = page.params.map((p) => `    if (this.params['${p}']) this.${p} = this.params['${p}'];`).join('\n');
   return `import router from '@ohos.router';
-import { roseData, roseAction, roseKv } from '../kit/RoseKit';
+import { ${kitNames} } from '../kit/RoseKit';
 import { roseModifier } from '../kit/RoseStyles';
 ${KIT_IMPORT_SLOT}
 import { preferences } from '@kit.ArkData';
@@ -1488,7 +1542,7 @@ ${persistWatchers}${formFieldsHelper}
   aboutToAppear(): void {
 ${persist.length ? '    const __rosezmP = preferences.getPreferencesSync(getContext(this), \'rosezm\');' : ''}
 ${fontRegisters}${paramLoad || '    // no route parameters'}
-${persistSeeds}
+${persistSeeds}${deepLinkHook}
     this.loadData();
 ${ctx.awaits.map((a, i) => `    this.__runAwait${i}();`).join('\n')}
 ${ctx.deferred.map((d) => `    setTimeout(() => { this.${d.name} = true; }, ${d.hold});`).join('\n')}

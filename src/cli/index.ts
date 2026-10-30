@@ -260,6 +260,11 @@ if (__portArg) {
   if (__v && Number(__v) > 0) process.env.PORT = __v;
 }
 
+// --strict-port: bind the asked port or die. The default hops up to 20 ports
+// (nice for a human running dev), but a deploy script that checks a fixed
+// URL must not find its server three ports away - AW in BUG.md.
+const STRICT_PORT = process.argv.includes('--strict-port');
+
 
 const SRC_DIR = process.argv[3] && !process.argv[3].startsWith('-') ? path.resolve(process.argv[3]) : process.cwd();
 // The deploy dir is ./dist of the directory the command ran from - a documented contract (tests/test-cli.mjs asserts it): building a project.
@@ -1094,7 +1099,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
         res.end(JSON.stringify({ error: 'invalid token' })); return;
       }
       let body = '';
-      req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
+      req.on('data', (c: string | Buffer) => { body += c; if (body.length > 1e6) req.destroy(); });
       req.on('end', () => {
         try {
           const payload = JSON.parse(body || '{}');
@@ -1604,7 +1609,14 @@ function listenFree(server: any, port: number, onReady: (port: number) => void):
     };
     const onError = (err: any): void => {
       cleanup();
+      if (err && err.code === 'EADDRINUSE' && STRICT_PORT) {
+        console.error(`rosezm: port ${p} is in use and --strict-port is set - free the port or drop the flag (the default hops up to 20 ports)`);
+        process.exit(1);
+      }
       if (err && err.code === 'EADDRINUSE' && p - port < 20) {
+        // CM-06: a silent hop is how "the code did not take effect" happens -
+        // the old process on the asked port answers the probes. Name the move.
+        console.error(`rosezm: port ${p} is in use - serving on ${p + 1} instead (pass --strict-port to refuse)`);
         attempt(p + 1);
         return;
       }
@@ -1630,14 +1642,24 @@ function listenFree(server: any, port: number, onReady: (port: number) => void):
  * workers' own listenFree fallback covers that last step.
  */
 async function freePort(from: number): Promise<number> {
+  // Strict: no probe, no hop - hand the port back and let the bind answer
+  // with the strict error, so one message covers both paths.
+  if (STRICT_PORT) return from;
   const net = await import('node:net');
   for (let p = from; p < from + 20; p++) {
+    // Bind on 0.0.0.0 explicitly. The default probe listened on :: (IPv6
+    // any), and a squatter bound to 127.0.0.1 on the same port is INVISIBLE to
+    // it - CM-06's "port was occupied but nobody said so". The real server
+    // binds 0.0.0.0, so the probe must race the same stack.
     const free = await new Promise<boolean>((resolve) => {
       const probe = net.createServer();
       probe.once('error', () => resolve(false));
-      probe.listen(p, () => probe.close(() => resolve(true)));
+      probe.listen(p, '127.0.0.1', () => probe.close(() => resolve(true)));
     });
     if (free) return p;
+    // CM-06: name the hop. The old process on the asked port is what answers
+    // the probes after this - "the code did not take effect" starts here.
+    console.error(`rosezm: port ${p} is in use - serving on ${p + 1} instead (pass --strict-port to refuse)`);
   }
   return from;
 }
@@ -1677,10 +1699,28 @@ function projectTag(): string {
   }
 }
 
+/**
+ * The compiler's own fingerprint: 8 hex over the compiler source bytes. A dev
+ * server is long-lived and ESM caches the compiler module - after a framework
+ * fix the running dev keeps emitting OLD code until it is restarted (in the
+ * packed layout, until pack.mjs re-runs besides). The banner names the
+ * fingerprint so "I fixed it but nothing changed" is visible at a glance:
+ * two servers printing different fingerprints are running different
+ * compilers, whatever their version line says. AW in BUG.md.
+ */
+function compilerFingerprint(): string {
+  for (const rel of ['../compiler/index.ts', '../../src/compiler/index.ts']) {
+    try {
+      return createHash('sha1').update(fs.readFileSync(fileURLToPath(new URL(rel, import.meta.url)))).digest('hex').slice(0, 8);
+    } catch { /* not this layout */ }
+  }
+  return 'unknown';
+}
+
 async function dev(): Promise<void> {
   devMode = true;
   process.env.rosezm_DEV = '1';
-  console.log(`🌹 rosezm v${version()}${projectTag()} dev server starting...`);
+  console.log(`🌹 rosezm v${version()}${projectTag()} compiler ${compilerFingerprint()} dev server starting...`);
   try {
     await build();
   } catch (err) {
@@ -1712,7 +1752,7 @@ async function dev(): Promise<void> {
       // catch-up. Editor/rename scratch files (sed's sedyXXXXXX, ~$ locks)
       // carry no source extension and vanish by design: they are not deletions.
       try {
-        const st = fs.statSync(path.join(SRC_DIR, filename));
+        const st = fs.statSync(path.join(SRC_DIR, filename ?? ''));
         if (st.mtimeMs > devBuildStartMs) devDirtyMid = true;
       } catch {
         // filename can be null (fs.watch omits it when unavailable): path.extname
@@ -1755,7 +1795,7 @@ async function preview(): Promise<void> {
   const server = http.createServer(serveStatic(OUT_DIR, true));
 
   listenFree(server, PORT, (port) => {
-    console.log(`🌹 rosezm v${version()}${projectTag()} preview at http://localhost:${port}`);
+    console.log(`🌹 rosezm v${version()}${projectTag()} compiler ${compilerFingerprint()} preview at http://localhost:${port}`);
   });
 }
 
@@ -1785,7 +1825,7 @@ async function serve(): Promise<void> {
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
     cluster.on('exit', () => { if (--live <= 0) process.exit(0); });
-    console.log(`🌹 rosezm v${version()}${projectTag()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
+    console.log(`🌹 rosezm v${version()}${projectTag()} compiler ${compilerFingerprint()} serve: ${workers} worker${workers > 1 ? 's' : ''} on http://localhost:${port} (cluster, bounded bodies, graceful shutdown, access log on stdout)`);
     return;
   }
   
@@ -1824,7 +1864,7 @@ async function serve(): Promise<void> {
   const edgeReady = createEdgeHandler(OUT_DIR);
   // Warm every fixed dynamic route once per worker: the render memo is per-worker.
   edgeReady.then(async (handle) => {
-    await ready;
+    await loadServer();
     const list = ((serverModule?.dynamicRoutes as string[] | undefined) || []).filter((r) => !r.includes(':'));
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(4, list.length) }, async () => {
@@ -2204,7 +2244,7 @@ async function check(): Promise<void> {
       const req = createRequire(root);
       const mod = await import(pathToFileURL(req.resolve('typescript')).href) as typeof ts & { default?: typeof ts };
       const api = (mod && mod.ScriptTarget ? mod : mod.default) as typeof ts | undefined;
-      if (api && api.ScriptTarget && api.createProgram) { tsMod = api; break; }
+      if (api && api.ScriptTarget) { tsMod = api; break; }
     } catch { /* try the next root */ }
   }
   if (!tsMod) {
@@ -2229,7 +2269,7 @@ async function check(): Promise<void> {
     const script = scriptOf(source);
     if (!script) continue;
     const tagLine = source.slice(0, m!.index + '<script>'.length).split('\n').length;
-    let wired = scriptOf(source);
+    let wired = script;
     // Import-path parity with the build (CarModster 2026-10-26): esbuild bundles
     // every .rose into a FLAT build dir (.rosezm-build/<hash>/comp-N.ssr.js), so a
     // relative specifier resolves against that flat location - '../../src/server/db'
@@ -2558,4 +2598,4 @@ else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target> [dir] [--api <base>] [--out <dir>] [--css <file|dir>]` compiles the same pages into a mini program today, with the native targets on the way)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree)');

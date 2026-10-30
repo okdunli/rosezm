@@ -334,20 +334,103 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   // reporter's "点击卡片进不去详情页").
   const routeMap: Record<string, string> = {};
   for (const p of pages) routeMap[p.route] = `pages/${p.name}/${p.name}`;
-  // Tab membership rides along: navigating to a tab page with navigateTo
-  // ALWAYS fails first ("can not navigateTo a tabbar page") and the console
-  // shows an error on every tap of a working app. The kit checks this list and
-  // goes straight to switchTab.
+  // rosezm.mp.json, read once: the tab bar (native tabBar in app.json) and the
+  // subpackages (pages moved out of the main package - WeChat caps the main
+  // package at 2 MB) both come from it. A page placed in a subpackage cannot
+  // be a tab page, so the tabBar resolution waits until the placements are known.
   const tabBarPages = new Set<string>();
+  let mpTabBar: Record<string, unknown> | null = null;
+  let mpCfg: Record<string, any> | null = null;
+  const subOfRoute = new Map<string, string>();
+  const subPackages = new Map<string, string[]>();
   try {
     const mpPath = path.join(root, 'rosezm.mp.json');
     if (fs.existsSync(mpPath)) {
-      const mpCfg = JSON.parse((fs.readFileSync(mpPath, 'utf8') || '').replace(/^\uFEFF/, ''));
-      for (const item of mpCfg?.tabBar?.list ?? []) {
-        if (item && typeof item.pagePath === 'string') tabBarPages.add(item.pagePath);
+      mpCfg = JSON.parse((fs.readFileSync(mpPath, 'utf8') || '').replace(/^\uFEFF/, ''));
+    }
+  } catch { /* no/invalid manifest - defaults everywhere */ }
+  // subPackages: [{ root: 'pkg', pages: ['/a', '/b'] }] - a declared page is
+  // written under <root>/ and declared in app.json's subPackages block, not in
+  // `pages`. The root is a lowercase relative path; the same page in two
+  // blocks is a first-wins warning.
+  if (mpCfg && Array.isArray(mpCfg.subPackages)) {
+    for (const sp of mpCfg.subPackages) {
+      if (!sp || typeof sp !== 'object' || typeof sp.root !== 'string' || !/^[a-z][\w-]*(\/[\w-]+)*$/.test(sp.root)) {
+        warnings.push('subPackages: a root must be a lowercase relative path like "pkg" or "pkg/sub" - the block is skipped');
+        continue;
+      }
+      if (subPackages.has(sp.root)) {
+        warnings.push(`subPackages: the root "${sp.root}" is declared twice - the first block wins`);
+        continue;
+      }
+      subPackages.set(sp.root, []);
+      for (const r of (Array.isArray(sp.pages) ? sp.pages : [])) {
+        if (typeof r !== 'string') continue;
+        const route = '/' + r.replace(/^\/+/, '');
+        if (!routeMap[route]) {
+          warnings.push(`subPackages: pagePath "${r}" does not name an exported page - it is skipped`);
+          continue;
+        }
+        subOfRoute.set(route, sp.root);
       }
     }
+  }
+  // Tab membership rides along: navigating to a tab page with navigateTo
+  // ALWAYS fails first ("can not navigateTo a tabbar page") and the console
+  // shows an error on every tap of a working app. The kit checks this list and
+  // goes straight to switchTab. The tabBar resolution runs AFTER the loop (the
+  // placements decide the final page paths, and a tab page inside a
+  // subpackage is refused by the platform - the row is dropped with a warning).
+  try {
+    if (mpCfg && mpCfg.tabBar && typeof mpCfg.tabBar === 'object' && Array.isArray(mpCfg.tabBar.list) && mpCfg.tabBar.list.length) {
+      // A pagePath accepts the web route ('/index') or the package path
+      // ('pages/index/index') - both resolve through the route map.
+      const resolvePage = (pagePath: unknown): string | null => {
+        if (typeof pagePath !== 'string' || !pagePath) return null;
+        const bare = pagePath.replace(/^\/+/, '');
+        if (routeMap['/' + bare]) return routeMap['/' + bare];
+        const byRoute = Object.entries(routeMap).find(([r]) => r.replace(/^\/+/, '') === bare);
+        return byRoute ? byRoute[1] : null;
+      };
+      const resolved: Array<{ pagePath: string }> = [];
+      for (const item of mpCfg.tabBar.list) {
+        if (!item || typeof item !== 'object') continue;
+        const pkg = resolvePage((item as { pagePath?: unknown }).pagePath);
+        if (pkg && subOfRoute.size) {
+          const pkgRoute = Object.entries(routeMap).find(([, p]) => p === pkg)?.[0];
+          if (pkgRoute && subOfRoute.has(pkgRoute)) {
+            warnings.push(`tabBar: pagePath "${String((item as { pagePath?: unknown }).pagePath)}" lives in a subpackage - a tab page must be in the main package, the row is dropped`);
+            continue;
+          }
+        }
+        if (pkg) { resolved.push({ ...(item as Record<string, unknown>), pagePath: pkg }); tabBarPages.add(pkg); }
+        else warnings.push(`tabBar: pagePath "${String((item as { pagePath?: unknown }).pagePath)}" is not an exported page - the row is dropped (app.json's tabBar would be refused with it)`);
+      }
+      if (resolved.length) mpTabBar = { ...(mpCfg.tabBar as Record<string, unknown>), list: resolved };
+      else warnings.push('tabBar: none of its pagePaths name an exported page - the tabBar is skipped');
+    }
   } catch { /* no/invalid manifest - no tab shortcuts */ }
+
+  const pageList: string[] = [];
+  for (const page of pages) {
+    const nodes = applyLayouts(page.nodes, page.layoutChain);
+    const style = [page.style, ...page.layoutChain.map((l) => l.style)].filter((s): s is string => !!s).join('\n');
+    const sub = subOfRoute.get(page.route) ?? '';
+    routeMap[page.route] = (sub ? sub + '/' : '') + `pages/${page.name}/${page.name}`;
+    await writePage(out, root, dialect, opts.target, page, nodes, style, globalCss, usingComponents, compMap, warnings, contentBaked, sub);
+    // A subpackaged page is declared in app.json's subPackages block, relative
+    // to the root; only main-package pages ride the `pages` list.
+    if (sub) {
+      const list = subPackages.get(sub) ?? [];
+      list.push(`pages/${page.name}/${page.name}`);
+      subPackages.set(sub, list);
+    } else {
+      pageList.push(`pages/${page.name}/${page.name}`);
+    }
+  }
+
+  // The route map is final once every placement is known - a subpackaged
+  // page resolves to <root>/pages/..., and the kit navigates by that path.
   await fs.promises.writeFile(
     path.join(out, 'utils', 'rosezm-routes.js'),
     '// Generated by rosezm export: web route -> exported page path (+tab set).\n' +
@@ -355,15 +438,6 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     'module.exports.__tabs = ' + JSON.stringify([...tabBarPages]) + ';\n',
     'utf8',
   );
-
-  const pageList: string[] = [];
-  for (const page of pages) {
-    const nodes = applyLayouts(page.nodes, page.layoutChain);
-    const style = [page.style, ...page.layoutChain.map((l) => l.style)].filter((s): s is string => !!s).join('\n');
-    await writePage(out, root, dialect, opts.target, page, nodes, style, globalCss, usingComponents, compMap, warnings, contentBaked);
-    pageList.push(`pages/${page.name}/${page.name}`);
-  }
-
   // A page that asked for geolocation needs the scope declared, or the prompt
   // never appears and the API fails with a message that names no cause.
   const nativeScopes = nativeManifestEntries(opts.target, nativeUsage([...pages.map((p) => p.script), ...comps.map((c) => c.script)]));
@@ -372,6 +446,13 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     // The app's own name, not the framework's: this is the title every page
     // without its own <title> shows.
     window: { navigationBarTitleText: appIdentity(root).name, navigationBarBackgroundColor: '#ffffff', navigationBarTextStyle: 'black' },
+    // Subpackages (from rosezm.mp.json): pages moved out of the main package
+    // (WeChat caps it at 2 MB). Paths are relative to each root.
+    ...(subPackages.size ? { subPackages: [...subPackages].map(([root, pages]) => ({ root, pages })) } : {}),
+    // The native tab bar, from rosezm.mp.json: without it WeChat renders no
+    // tab bar at all and every switchTab in the kit fails (the fallback
+    // navigateTo still works, but the app has no persistent tabs).
+    ...(mpTabBar ? { tabBar: mpTabBar } : {}),
     ...(nativeScopes.length ? { permission: Object.fromEntries(nativeScopes.map((s) => [s, { desc: 'rosezm uses this to answer a useNative() call' }])) } : {}),
   }, null, 2) + '\n', 'utf8');
   if (contentBaked) {
@@ -805,8 +886,10 @@ async function writePage(
   compFiles: Map<string, ComponentFile>,
   warnings: string[],
   contentBaked: boolean,
+  /** The subpackage root this page ships under ('' = the main package). */
+  pkgRoot: string,
 ): Promise<void> {
-  const dir = path.join(out, 'pages', page.name);
+  const dir = path.join(out, pkgRoot, 'pages', page.name);
   await fs.promises.mkdir(dir, { recursive: true });
   // A layout is part of the page's script scope: its state initializes the
   // page's data and its helpers are visible to the page body, exactly as the

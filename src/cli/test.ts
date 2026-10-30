@@ -11,6 +11,8 @@ import { buildShell } from './shell.js';
 export interface TestRequest {
   headers?: Record<string, string>;
   cookies?: Record<string, string>;
+  /** Overrides the method the request runs under (default GET). */
+  method?: string;
 }
 
 /** What a render answers: the page the server would have sent, in pieces. */

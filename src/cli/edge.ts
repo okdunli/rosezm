@@ -145,7 +145,7 @@ export async function createEdgeHandler(
   // handed a directory, and a slice resolved against the wrong one would
   // silently fall back to the core (every route's chain in one document).
   const clientFor = (pathname: string): string | null =>
-    sliced ? getClientSource((mod as { sliceKeyFor: (p: string) => string | null }).sliceKeyFor(pathname), outDir) : client;
+    sliced ? getClientSource((mod as unknown as { sliceKeyFor: (p: string) => string | null }).sliceKeyFor(pathname), outDir) : client;
   if (preloaded && 'styles' in preloaded) {
     styles = preloaded.styles ?? '';
   } else {

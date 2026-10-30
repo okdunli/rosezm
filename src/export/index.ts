@@ -287,6 +287,16 @@ export async function exportProject(target: TargetName, projectRoot: string, opt
         delete overrides.projectName;
         delete overrides.cloudEnv;
         delete overrides.appid;
+        // tabBar is the GENERATOR's output, not an override: miniprogram.ts
+        // reads this same manifest, resolves each pagePath (web route -> the
+        // package path) and drops rows naming pages this export does not
+        // carry. The raw re-merge here would replace that resolved list with
+        // the manifest's original web-route paths (BUG-009-era tab work).
+        // subPackages is the same story: the generator places the pages under
+        // each root and declares them relative to it - the raw block would
+        // undo the placement.
+        delete overrides.tabBar;
+        delete overrides.subPackages;
         for (const key of Object.keys(overrides)) {
           const value = overrides[key];
           if (value && typeof value === 'object' && !Array.isArray(value)

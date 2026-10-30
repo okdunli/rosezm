@@ -235,7 +235,9 @@ export interface RouteInfo {
 
 interface Decl {
   name: string;
-  kind: 'state' | 'data' | 'kv' | 'persist';
+  // 'derived' is a computed read the state pass synthesizes from another
+  // declaration - the regex at ~2900 captures it, so the union must carry it.
+  kind: 'state' | 'data' | 'kv' | 'persist' | 'derived';
   expr: string;
   start: number;
   end: number;
@@ -3170,7 +3172,7 @@ function expandIfElseOnce(template: string): { template: string; changed: boolea
     const openCand = /\{#(if|each)\b/g;
     const openM = openCand.exec(slice);
     if (!openM) { out += template.slice(pos); break; }
-    const kind = openM[1];
+    const kind = openM[1] as 'if' | 'each';
     const openEndRel = blockOpenerEnd(slice, openM.index);
     if (openEndRel < 0) { out += template.slice(pos); break; }
     const head = slice.slice(openM.index + 2 + kind.length, openEndRel - 1);
@@ -3826,12 +3828,13 @@ function expandAwaitBlocks(template: string, filePath: string): { template: stri
       const nextClose = blockCloseRe.exec(template);
       const nextThen = thenRe.exec(template);
       const nextCatch = catchRe.exec(template);
+      const candidates: Array<[RegExpExecArray | null, string]> = [
+        [nextOpen, 'open'], [nextClose, 'close'], [nextThen, 'then'], [nextCatch, 'catch'],
+      ];
       let nearestPos = Infinity, kind = '', m: RegExpExecArray | null = null;
-      const consider = (mm: RegExpExecArray | null, k: string) => {
+      for (const [mm, k] of candidates) {
         if (mm && mm.index < nearestPos) { nearestPos = mm.index; kind = k; m = mm; }
-      };
-      consider(nextOpen, 'open'); consider(nextClose, 'close');
-      consider(nextThen, 'then'); consider(nextCatch, 'catch');
+      }
       if (!m) break;
       if (kind === 'open') { d++; j = m.index + m[0].length; continue; }
       if (kind === 'close') {
@@ -5526,6 +5529,10 @@ export async function buildProject(rootArg: string, outDirArg: string, opts: { m
   const outDir = path.resolve(outDirArg);
   const minify = opts.minify !== false;
   const incremental = opts.incremental === true;
+  // BUG-009's open layer: under VERCEL the platform hands every request to
+  // dist/server.js by filename, so the engine and the prod server swap names
+  // (see the wrapper write at the end of the build).
+  const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true';
   await fs.promises.mkdir(outDir, { recursive: true });
 
   const stale = (await fs.promises.readdir(outDir)).filter((f) =>
@@ -5854,7 +5861,7 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   // One file per route PATTERN (params share a slice), named by a stable hash
   // of the pattern: dist/slices/<key>.js. The server answers sliceKeyFor()
   // from the same table, so the CLI never recomputes the hash itself.
-  const sliceKey = (pattern: string): string => 's' + fnv1a32(pattern).toString(36);
+  const sliceKey = (pattern: string): string => 's' + fnv1a32(pattern);
   // The names the app's components actually reference out of the runtime's
   // export surface. A slice publishes exactly these on globalThis (the nav
   // chunk resolves them through the bridge), so an unused helper never
@@ -5939,6 +5946,41 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
 
   
   const middlewareIdx = infos.findIndex((info) => info.isMiddleware);
+
+  // The middleware's declared walls: `export const gated = ['/admin']` in
+  // pages/_middleware.rose. Baked into the client bundle so a client-side
+  // navigation outside every prefix skips the gate request. Located on the
+  // masked script (comments and strings blanked - prose that merely mentions
+  // the export must not match), parsed from the raw slice (the string
+  // contents are the value). Plain paths, single or double quotes.
+  let mwGatedPrefixes: string[] = [];
+  if (middlewareIdx >= 0) {
+    const mwRaw = await fs.promises.readFile(files[middlewareIdx], 'utf8');
+    const script = /<script>([\s\S]*?)<\/script>/.exec(mwRaw)?.[1] ?? '';
+    const masked = maskCommentsAndStrings(script);
+    const at = masked.search(/\bexport\s+const\s+gated\s*=\s*\[/);
+    if (at >= 0) {
+      const open = script.indexOf('[', at);
+      const close = matchBracketMasked(masked, masked.indexOf('[', at));
+      if (close < 0) {
+        throw new RoseError('E-EXPORT', `${files[middlewareIdx]}: export const gated is not a closed array`, {
+          file: files[middlewareIdx],
+          hint: 'the value must be an array of string prefixes, e.g. export const gated = [\'/admin\']',
+        });
+      }
+      const body = script.slice(open + 1, close);
+      const items = [...body.matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map((x) => x[2]);
+      const junk = body.replace(/(['"])((?:\\.|(?!\1).)*)\1/g, '').replace(/,/g, '');
+      if (junk.trim() || items.some((s) => !s.startsWith('/'))) {
+        throw new RoseError('E-EXPORT', `${files[middlewareIdx]}: export const gated accepts string path prefixes only`, {
+          file: files[middlewareIdx],
+          hint: `got ${JSON.stringify(body.trim())} - e.g. export const gated = ['/admin', '/vault']`,
+        });
+      }
+      mwGatedPrefixes = items;
+    }
+  }
+
 
   const serverRoutes = pages
     .map(({ info, i }) => {
@@ -6860,6 +6902,39 @@ globalThis.fetch = async (input, init) => {
   }
 };
 
+// A default export the platform runtimes accept. Vercel's Node runtime scans
+// the bundle and refuses an entry whose default is not a function or an
+// http.Server (BUG-009: the refusal named /var/task/server.js - THIS file).
+// The floor answers GET documents through the same render the Node server
+// uses; the full protocol - streaming, server actions, api dispatch, per-route
+// headers - remains prod.mjs / rosezm serve, or the deploy/api entry, which
+// wraps this bundle's named exports through the edge adapter.
+export default async function rosezmNodeEntry(req, res) {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.statusCode = 405;
+      res.setHeader('allow', 'GET, HEAD');
+      res.end('<h1>405</h1><p>This bare entry answers documents only - run rosezm serve for the full protocol.</p>');
+      return;
+    }
+    const page = await renderPage(url.pathname);
+    if (page.redirect) {
+      res.statusCode = page.status ?? 302;
+      res.setHeader('location', page.redirect);
+      res.end();
+      return;
+    }
+    res.statusCode = page.status ?? 200;
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    const attrs = (page.lang ? ' lang="' + page.lang + '"' : '') + (page.dir ? ' dir="' + page.dir + '"' : '');
+    res.end('<!DOCTYPE html><html' + attrs + '><head>' + (page.head ?? []).join('') + '</head><body><div id="app">' + page.html + '</div><script id="__rosezm_state" type="application/json">' + (page.state ?? '{}').replace(/</g, '\\u003c') + '</script></body></html>');
+  } catch {
+    res.statusCode = 500;
+    res.end('<h1>500</h1><p>Page not rendered</p>');
+  }
+}
+
 // === Streaming SSR === The static shell (doctype, <head>, body + container open) flushes BEFORE the - possibly slow - render completes: the first byte.
 export async function renderPageStream(pathname, write, shellOpen, clientTag) {
   // Isolated for the same reason as renderPage: a streaming render awaits inside route.render()
@@ -6980,7 +7055,7 @@ export { installContextStore };
   const bundleBuilds = runEsbuild(path.join(buildDir, 'server-entry.js'), {
     entryPoints: [path.join(buildDir, 'server-entry.js')],
     bundle: true,
-    outfile: path.join(outDir, 'server.js'),
+    outfile: path.join(outDir, isVercel ? 'engine.js' : 'server.js'),
     format: 'esm',
     platform: 'node',
     write: true,
@@ -7118,6 +7193,10 @@ ${v.nav}
 // navigation (where the middleware fires for real). Apps without a middleware
 // get false and keep the old path - no extra request.
 const __hasMiddleware = ${middlewareIdx >= 0 ? 'true' : 'false'};
+// The middleware's declared walls (export const gated = [...] in
+// _middleware.rose), baked at build time. Empty = the middleware can wall
+// anything and only it knows - the client asks the gate on every navigation.
+const __gatedPrefixes = ${JSON.stringify(mwGatedPrefixes)};
 const routes = [
   ${v.routes}
 ];
@@ -7302,6 +7381,12 @@ function bindEvents(container) {
       const el = e.target.closest('[data-on-' + ev + ']');
       if (!el || !container.contains(el)) return;
       const fn = el.getAttribute('data-on-' + ev);
+      // CM-04: currentTarget is the element the LISTENER sits on (#app) under
+      // delegation, so every e.currentTarget.dataset.* read in a handler saw
+      // the app root. Redefine it to the element the handler is BOUND to -
+      // which is what the name promises and what the web page's own
+      // addEventListener would have delivered.
+      Object.defineProperty(e, 'currentTarget', { value: el, configurable: true });
       if (fn.startsWith('$action:')) return $action(fn.slice(8), e);
       const h = handlers[fn];
       if (h) h(e);
@@ -7394,7 +7479,13 @@ export async function start(container, pathname, initial, skipGate) {
   // The server is the only place a middleware runs, so a client-side
   // navigation asks its gate before painting anything. The answer is tiny
   // ({"redirect":...} or 204) - the gate never renders a document.
+  // A middleware that declares its walls ('export const gated = ["/admin"]'
+  // in _middleware.rose) lets a target OUTSIDE every prefix skip the request
+  // entirely - the zero-request navigation, restored. Inside one, or with no
+  // list at all, the gate is asked as before.
   if (__hasMiddleware && !initial && !skipGate) {
+    const needsGate = !__gatedPrefixes.length || __gatedPrefixes.some((p) => p === '/' || pathname === p || pathname.startsWith(p + '/'));
+    if (needsGate) {
     let gate = null;
     try {
       const r = await fetch('/__rosezm/gate?path=' + encodeURIComponent(pathname), { headers: { accept: 'application/json' } });
@@ -7407,6 +7498,7 @@ export async function start(container, pathname, initial, skipGate) {
     // A wall that answers a bare status (no Location) still refused: let the
     // server paint its own answer instead of rendering the gated route here.
     if (gate && (gate.status === 401 || gate.status === 403)) { location.href = pathname; return; }
+    }
   }
   for (const route of routes) {
     if (matchRoute(route.pattern, pathname)) {
@@ -7685,6 +7777,26 @@ export const navError = ${errIdx >= 0 ? `{ render: ${compose(errIdx)} }` : 'null
         ...TS_LOADER,
       }, incremental);
   await Promise.all([bundleBuilds, clientBuild, prodBuild]);
+  // VERCEL: the platform picks dist/server.js by FILENAME as its root
+  // entrypoint ("Using dist/server.js as the root entrypoint" - platform-side
+  // copy, observed in BUG-009's deploy) and hands every request to it,
+  // ignoring vercel.json's functions and rewrites. The full protocol lives in
+  // the prod-server bundle, so under VERCEL the names swap: the engine ships
+  // as engine.js and server.js becomes a two-line wrapper that carries the
+  // engine's named exports (the edge adapter and prod-server import them
+  // unchanged) plus the prod server as the default (the root entry answers
+  // with the full protocol). Without VERCEL the build is byte-identical.
+  if (isVercel) {
+    await fs.promises.writeFile(path.join(outDir, 'server.js'), [
+      '// VERCEL root entrypoint (BUG-009): the platform hands every request to',
+      '// this file by name. The named exports are the engine (the edge adapter',
+      "// imports them); the default is the full prod server (http.Server, which",
+      '// does not listen when VERCEL is set - the platform drives it).',
+      "export * from './engine.js';",
+      "export { default } from './prod.mjs';",
+      '',
+    ].join('\n'), 'utf8');
+  }
   // R257: the createRequire shim goes into a bundle that really calls
   // require() (a CJS dependency doing a dynamic require of a node builtin).
   // It used to be an unconditional esbuild banner, so every server.js imported
@@ -7694,7 +7806,7 @@ export const navError = ${errIdx >= 0 ? `{ render: ${compose(errIdx)} }` : 'null
   // require() call (the Postgres example's is one) keeps that shape; one that
   // needs it gets the shim, because a Node server without it throws
   // "Dynamic require of \"events\" is not supported" (CarModster, 2026-10-26).
-  for (const f of [path.join(outDir, 'server.js'), path.join(outDir, 'prod.mjs')]) {
+  for (const f of [path.join(outDir, isVercel ? 'engine.js' : 'server.js'), path.join(outDir, 'prod.mjs')]) {
     try {
       if (!fs.existsSync(f)) continue;
       const src = await fs.promises.readFile(f, 'utf8');

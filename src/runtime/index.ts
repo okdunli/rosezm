@@ -604,6 +604,22 @@ export function applyHead(html: string): void {
     }
     if (seen.has(managed)) continue;
     seen.add(managed);
+    // AQ (R345): an entry the head ALREADY carries - the SSR render put it
+    // there and the state re-shipped the same string - must not be inserted
+    // twice (a 72 KB inline style arrived twice and doubled the page's CSS).
+    // Same id: identical content adopts the existing node in place; different
+    // content replaces it (the framework takes ownership either way, so the
+    // next clearHead finds it). Entries without an id cannot be matched.
+    if (el.id) {
+      const existing = document.getElementById(el.id);
+      if (existing && existing.parentElement === document.head) {
+        if (existing.isEqualNode(el)) {
+          existing.setAttribute(HEAD_ATTR, managed);
+          continue;
+        }
+        existing.remove();
+      }
+    }
     el.setAttribute(HEAD_ATTR, managed);
     document.head.appendChild(el);
   }

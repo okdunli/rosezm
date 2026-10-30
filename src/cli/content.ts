@@ -42,7 +42,7 @@ export function parseFrontmatter(raw: string): {
  *  links, paragraphs. Zero dependencies; ~100 lines cover the blog 90%. */
 function interpolate(md: string, vars: Record<string, unknown>): string {
   return md.replace(/{{(\w[\w.]*)}}/g, (_m, k) => {
-    const v = k.split(".").reduce((o: any, p) => (o == null ? o : o[p]), vars as any);
+    const v = k.split(".").reduce((o: any, p: string) => (o == null ? o : o[p]), vars as any);
     return v === undefined || v === null ? "" : String(v);
   });
 }
@@ -162,7 +162,7 @@ export function byTag(
   return out;
 }
 
-globalThis.__rosezmContentMk = renderMarkdown;
+(globalThis as { __rosezmContentMk?: unknown }).__rosezmContentMk = renderMarkdown;
 
 /** RSS 2.0 feed from a collection - wire to /feed.xml or /api/feed. */
 export function buildRss(

@@ -860,8 +860,6 @@ function substituteInNodes(nodes: Node[], map: Map<string, string>): Node[] {
         return { ...n, code: substituteParams(n.code, map) };
       case 'text':
         return n;
-      case 'mixed':
-        return { ...n, parts: n.parts.map((p) => (p.kind === 'expr' ? { kind: 'expr', value: substituteParams(p.value, map) } : p)) };
       case 'element':
         return {
           ...n,
@@ -1117,7 +1115,6 @@ export function rewriteCatchMessage(nodes: Node[], catchName: string): Node[] {
   const walk = (list: Node[]): Node[] => list.map((n): Node => {
     switch (n.kind) {
       case 'expr': return { ...n, code: fix(n.code) };
-      case 'mixed': return { ...n, parts: n.parts.map((p) => (p.kind === 'expr' ? { kind: 'expr', value: fix(p.value) } : p)) };
       case 'html': return { ...n, code: fix(n.code) };
       case 'const': return { ...n, code: fix(n.code) };
       case 'element': return { ...n, attrs: n.attrs.map((a) => (a.value.kind === 'expr' ? { ...a, value: { kind: 'expr', code: fix(a.value.code) } } : a.value.kind === 'mixed' ? { ...a, value: { kind: 'mixed', parts: a.value.parts.map((p) => (p.kind === 'expr' ? { kind: 'expr', value: fix(p.value) } : p)) } } : a)), children: walk(n.children) };

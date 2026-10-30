@@ -49,6 +49,12 @@
     getContext().user = session ? { name: session } : null;
   }
 
+  // The client-side gate only asks for the paths this middleware actually
+  // walls (plus /about, whose locale redirect is middleware work too): the
+  // declared list is baked into the bundle, so navigating anywhere else is
+  // the zero-request navigation again.
+  export const gated = ['/admin', '/vault', '/about'];
+
   // The feed's connection, opened once per process (the same lazy pattern
   // as the api routes): this module lives for the server's whole life.
   let feedConn = null;

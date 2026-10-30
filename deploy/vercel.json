@@ -1,13 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "functions": {
-    "api/rosezm.ts": {
-      "includeFiles": "dist/**"
-    }
-  },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/rosezm" }
-  ]
+  "outputDirectory": "dist"
 }

@@ -885,6 +885,9 @@ await tick();
   await tick();
   assert(app.textContent!.includes('This page speaks your language'), 'client-side navigation paints the en locale');
   const switched = (dom.window as any).__posts.slice(postsBefore);
+  // The middleware declares its walls (export const gated), so a locale
+  // switch to an ungated route costs ZERO requests - the pack dictionary is
+  // the only thing that may arrive, and only once.
   assert(switched.every((u: string) => u.includes('/locales/')), 'the preloaded locale switch costs zero requests (only a pack dictionary may arrive, and only once)');
   const packFetches = () => (dom.window as any).__posts.filter((u: string) => u.includes('/locales/ar.json')).length;
   dom.window.history.pushState(null, '', '/ar/about');
@@ -901,6 +904,9 @@ await tick();
   dom.window.dispatchEvent(new dom.window.PopStateEvent('popstate'));
   await tick();
   assert(app.textContent!.includes('هذه الصفحة تتحدث لغتك'), 'the packed locale repaints from memory');
+  // The gate rides only the paths the middleware declares - /en/about and
+  // /ar/about are outside every prefix, so the cached pack repaints from
+  // memory with literally zero requests.
   assert((dom.window as any).__postCount() === total, 'the cached pack costs zero further requests');
   assert(dom.window.document.documentElement.getAttribute('dir') === 'rtl', 'the RTL direction is applied on navigation');
   dom.window.history.pushState(null, '', '/');

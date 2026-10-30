@@ -30,9 +30,9 @@ function assert(cond, msg) {
 }
 
 /** Run the CLI with args, in cwd; resolve with { code, out, err }. */
-function run(args, cwd) {
+function run(args, cwd, env) {
   return new Promise((resolve) => {
-    const p = spawn(process.execPath, [...TSX, ...args], { cwd });
+    const p = spawn(process.execPath, [...TSX, ...args], { cwd, env: env ? { ...process.env, ...env } : undefined });
     let out = '';
     let err = '';
     p.stdout.on('data', (c) => { out += c; });
@@ -131,6 +131,10 @@ assert(fs.existsSync(path.join(REPO, 'dist', 'chunks')), 'split mode emits route
 
 const usage = await run([], REPO);
 assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), 'the usage line documents the dir argument and its default');
+// The export copy named the native targets "on the way" long after all 17
+// shipped - a first-time reader could conclude the exporter stops at mini
+// programs. The line now says what is real, and the old copy is dead.
+assert(usage.out.includes('17 targets, one source tree') && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
 
 const newUsage = await run(['new'], REPO);
 assert(newUsage.out.includes('rosezm new <name>'), 'rosezm new with no name prints its usage');
@@ -752,6 +756,7 @@ try {
     assert(answered !== null, `a preview whose port is taken hops to a free one, says which, and serves (squatter still owns ${occupied})`);
     assert(answered !== occupied, `the hopped port is not the one the squatter holds (${occupied})`);
     assert(hopOut.includes(String(answered)), `the banner names the port it actually bound (${answered})`);
+    assert(/compiler [0-9a-f]{8}/.test(hopOut), 'the banner names the compiler fingerprint (the "my fix did not ship" check)');
   } finally {
     hop.kill('SIGKILL');
   }
@@ -760,6 +765,36 @@ try {
   try {
     fs.rmSync(hopDir, { recursive: true, force: true });
   } catch {  }
+}
+
+// --strict-port: the same squatter, the opposite contract - a deploy script
+// that checks a fixed URL must find its server THERE or not at all, so the
+// bind dies with a message that names the port and the way out.
+{
+  const strictDir = path.join(tmp, 'strict-port');
+  fs.cpSync(path.join(REPO, 'example'), strictDir, { recursive: true });
+  const squatter2 = createServer(() => {});
+  await new Promise((r) => squatter2.listen(occupied, r));
+  try {
+    const strict = spawn(process.execPath, [...TSX, 'preview', '--strict-port'], {
+      cwd: strictDir,
+      env: { ...process.env, PORT: String(occupied) },
+    });
+    let strictOut = '';
+    strict.stdout.on('data', (c) => { strictOut += c; });
+    strict.stderr.on('data', (c) => { strictOut += c; });
+    const strictCode = await new Promise((resolve) => strict.on('exit', (code) => resolve(code)));
+    assert(strictCode !== 0, `--strict-port exits non-zero when the port is taken (${occupied})`);
+    assert(strictOut.includes(`port ${occupied} is in use`), 'the strict failure names the port');
+    assert(strictOut.includes('--strict-port'), 'the strict failure names the flag and the way out');
+    // No second listen to check: the process already EXITED with the strict
+    // error - a hop would have kept it alive and listening instead.
+  } finally {
+    squatter2.close();
+    try {
+      fs.rmSync(strictDir, { recursive: true, force: true });
+    } catch {  }
+  }
 }
 
 await badCase('node-import-in-page', {
@@ -1440,11 +1475,20 @@ assert(/if \(d === 'accept-language' \|\| carried\.includes\(d\)\) continue;/.te
 const vercel = JSON.parse(fs.readFileSync(path.join(REPO, 'deploy/vercel.json'), 'utf8'));
 assert(vercel.outputDirectory === 'dist', 'vercel.json builds into dist/');
 assert(vercel.buildCommand === 'npm run build', 'vercel.json builds the app the documented way');
-assert(Array.isArray(vercel.rewrites) && vercel.rewrites.some((r) => r.destination === '/api/rosezm'), 'every unmatched path is rewritten to the function');
-assert(vercel.functions?.['api/rosezm.ts']?.includeFiles === 'dist/**', 'the function bundle carries dist/ (its server.js is imported at runtime)');
+// BUG-009's open layer: the platform picks dist/server.js as the ROOT
+// entrypoint by filename and hands every request to it - vercel.json's
+// functions and rewrites never fire, and a rewrite would corrupt the path
+// before dispatch (the app saw /api/rosezm and 404'd everything). The
+// template is therefore just the build contract: the VERCEL build swaps the
+// artifact names so server.js IS the full prod server.
+assert(vercel.outputDirectory === 'dist' && vercel.buildCommand === 'npm run build', 'vercel.json builds the app the documented way');
+assert(!vercel.rewrites && !vercel.functions, 'the template carries no rewrites or functions (the root entrypoint handles every path; a rewrite corrupted it)');
 const fn = fs.readFileSync(path.join(REPO, 'deploy/api/rosezm.ts'), 'utf8');
 assert(fn.includes("from '../src/cli/edge.ts'"), 'the function imports the edge adapter that ships in this repo');
-assert(fn.includes('createEdgeHandler') && fn.includes('export default { fetch: handle }'), 'the function reuses createEdgeHandler behind Vercel\'s Web Standard handler');
+// The default export must be a FUNCTION: the Vercel Node runtime rejects the
+// { fetch } object shape at boot - every deploy of the old template answered
+// 500 FUNCTION_INVOCATION_FAILED before the first request (BUG.md BUG-009).
+assert(fn.includes('export default async function rosezm') && fn.includes('a instanceof Request'), 'the Vercel entry is a dual-mode function (the { fetch } object is rejected by the Node runtime)');
 assert(fs.existsSync(path.join(REPO, 'src/cli/edge.ts')), 'the imported adapter file exists');
 const nodeDocker = fs.readFileSync(path.join(REPO, 'deploy/Dockerfile.node'), 'utf8');
 assert(nodeDocker.includes('npm run build') && nodeDocker.includes('"serve"'), 'the Node container builds, then runs rosezm serve (the cluster runner)');
@@ -1497,10 +1541,15 @@ fs.copyFileSync(path.join(REPO, 'deploy/api/rosezm.ts'), path.join(apiDir, 'rose
 const scratch = fs.mkdtempSync(path.join(process.env.TEMP || '/tmp', 'rosezm-vercel-'));
 fs.writeFileSync(path.join(scratch, 'runner.mjs'), `
 import { pathToFileURL } from 'node:url';
+import http from 'node:http';
+const fs2 = await import('node:fs');
+const step = (s) => { try { fs2.appendFileSync('D:/BaiduSyncdisk/work/Rosezm/Rosezm/.runner-trace.log', s + String.fromCharCode(10)); } catch {} };
+setTimeout(() => { console.error('RUNNER-HUNG'); process.exit(3); }, 40000).unref();
 const mod = await import(pathToFileURL(${JSON.stringify(path.join(apiDir, 'rosezm.ts'))}).href);
 const out = [];
+// Mode 1 - a web-standard Request (edge runtimes call the entry this way).
 const call = async (p, init) => {
-  const r = await mod.default.fetch(new Request('http://localhost' + p, init));
+  const r = await mod.default(new Request('http://localhost' + p, init));
   const text = await r.text();
   return { status: r.status, text, cookie: r.headers.get('set-cookie') ?? '' };
 };
@@ -1511,7 +1560,26 @@ out.push(['/api/login', await call('/api/login', {
   method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({ user: 'ada', pass: 'lovelace' }).toString(),
 })]);
-console.log(JSON.stringify(out));
+// Mode 2 - the classic (req, res) pair, over real HTTP: exactly the shape the
+// Vercel Node runtime hands a function (BUG-009).
+const server = http.createServer((req, res) => { void mod.default(req, res); });
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const base = 'http://127.0.0.1:' + server.address().port;
+const nodeCall = async (p, init) => {
+  const r = await fetch(base + p, init);
+  const text = await r.text();
+  return { status: r.status, text, cookie: r.headers.get('set-cookie') ?? '' };
+};
+out.push(['n/', await nodeCall('/')]);
+out.push(['n/sign', await nodeCall('/sign')]);
+out.push(['n/api/posts', await nodeCall('/api/posts')]);
+out.push(['n/api/login', await nodeCall('/api/login', {
+  method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams({ user: 'ada', pass: 'lovelace' }).toString(),
+})]);
+// The undici keep-alive sockets from the fetch loop hold the runner's event
+// loop open after the work is done - write the answer, then exit.
+process.stdout.write(JSON.stringify(out) + '\\n', () => process.exit(0));
 `);
 const vercelRun = await new Promise((resolve) => {
   const p = spawn(process.execPath, [path.join(REPO, 'node_modules/tsx/dist/cli.mjs'), path.join(scratch, 'runner.mjs')], { cwd: scratch });
@@ -1522,15 +1590,72 @@ const vercelRun = await new Promise((resolve) => {
   p.on('close', (code) => resolve({ code, out, err }));
 });
 fs.rmSync(apiDir, { recursive: true, force: true });
-fs.rmSync(scratch, { recursive: true, force: true });
-assert(vercelRun.code === 0, `the function module loads and answers (stderr: ${vercelRun.err.slice(-300)})`);
-const calls = JSON.parse(vercelRun.out.trim());
+// The child's WORK is the contract. On Windows a process.exit over a closing
+// keep-alive handle can abort after the bytes are out (uv HANDLE_CLOSING -
+// the same teardown noise the e2e suite prints), so the parsed answer below
+// is the proof, not the exit code.
+let calls = [];
+try { calls = JSON.parse(vercelRun.out.trim()); } catch { }
+assert(calls.length === 8, `the function module loads and answers both conventions (8 calls, got ${calls.length})`);
 const byPath = new Map(calls.map(([p, r]) => [p, r]));
 assert(byPath.get('/')?.status === 200 && byPath.get('/')?.text.includes('Guestbook'), 'the function serves the built home document');
 assert(byPath.get('/sign')?.status === 200 && byPath.get('/sign')?.text.includes('Ada Lovelace'), 'the function renders a dynamic $store route (never a static file)');
 assert(byPath.get('/api/posts')?.status === 200 && byPath.get('/api/posts')?.text.includes('"posts"'), 'the function runs an unbaked /api route');
 const login = byPath.get('/api/login');
 assert(login?.status === 200 && /session=/.test(login.cookie) && /HttpOnly/i.test(login.cookie), `the function logs in and sets the session cookie (${login?.status} ${login?.cookie})`);
+// The (req, res) bridge answers identically - nothing is lost in the write-back.
+assert(byPath.get('n/')?.status === 200 && byPath.get('n/')?.text.includes('Guestbook'), 'the (req, res) bridge serves the same home document');
+assert(byPath.get('n/sign')?.status === 200 && byPath.get('n/sign')?.text.includes('Ada Lovelace'), 'the bridge renders the dynamic $store route');
+assert(byPath.get('n/api/posts')?.status === 200 && byPath.get('n/api/posts')?.text.includes('"posts"'), 'the bridge runs an unbaked /api route');
+const nodeLogin = byPath.get('n/api/login');
+assert(nodeLogin?.status === 200 && /session=/.test(nodeLogin.cookie) && /HttpOnly/i.test(nodeLogin.cookie), 'the bridge logs in and the session cookie survives the write-back');
+// The ENGINE bundle's own default export: the very file Vercel's scan named
+// in BUG-009 (/var/task/server.js). It must answer as a function - checked in
+// its own process, where the loader state is clean.
+fs.writeFileSync(path.join(scratch, 'engine-check.mjs'), `
+import http from 'node:http';
+const engine = await import(${JSON.stringify(pathToFileURL(path.join(REPO, 'dist', 'server.js')).href)});
+const server = http.createServer((req, res) => { void engine.default(req, res); });
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const base = 'http://127.0.0.1:' + server.address().port;
+const out = [];
+for (const p of ['/', '/garden']) {
+  const r = await fetch(base + p);
+  out.push([p, r.status, (await r.text()).includes('__rosezm_state')]);
+}
+server.close();
+process.stdout.write(JSON.stringify(out) + '\\n', () => process.exit(0));
+`);
+const engineRun = await new Promise((resolve) => {
+  const p = spawn(process.execPath, [path.join(REPO, 'node_modules/tsx/dist/cli.mjs'), path.join(scratch, 'engine-check.mjs')], { cwd: scratch });
+  let out = '';
+  let err = '';
+  p.stdout.on('data', (c) => { out += c; });
+  p.stderr.on('data', (c) => { err += c; });
+  p.on('close', (code) => resolve({ code, out, err }));
+});
+assert(engineRun.code === 0, `the engine bundle answers as the scanned default export (stderr: ${engineRun.err.slice(-300)})`);
+const engineCalls = JSON.parse(engineRun.out.trim());
+assert(engineCalls[0][1] === 200 && engineCalls[0][2] === true, 'the engine floor serves the home document with its resume state (the /var/task/server.js file)');
+assert(engineCalls[1][1] === 200, 'the engine floor renders a zero-JS route too');
+// BUG-009's open layer, framework-side: under VERCEL the artifact names swap -
+// the engine ships as engine.js and server.js is the two-line wrapper whose
+// default is the full prod server (the platform's root entrypoint). Without
+// VERCEL the build keeps the old shape byte for byte.
+{
+  const vDir = path.join(tmp, 'vercel-build');
+  fs.cpSync(path.join(REPO, 'example'), vDir, { recursive: true });
+  const vBuild = await run(['build', '.'], vDir, { VERCEL: '1' });
+  assert(vBuild.code === 0, 'a VERCEL=1 build succeeds');
+  assert(fs.existsSync(path.join(vDir, 'dist', 'engine.js')), 'VERCEL: the engine ships as engine.js');
+  const wrapper = fs.readFileSync(path.join(vDir, 'dist', 'server.js'), 'utf8');
+  assert(wrapper.includes("export * from './engine.js'") && wrapper.includes("export { default } from './prod.mjs'"), 'VERCEL: server.js is the wrapper (the engine named exports + the prod server as default)');
+  assert(fs.existsSync(path.join(vDir, 'dist', 'prod.mjs')), 'VERCEL: prod.mjs still ships (the wrapper default imports it)');
+  fs.rmSync(path.join(vDir, 'dist'), { recursive: true, force: true });
+  const plain = await run(['build', '.'], vDir);
+  assert(plain.code === 0 && fs.existsSync(path.join(vDir, 'dist', 'server.js')) && !fs.existsSync(path.join(vDir, 'dist', 'engine.js')), 'without VERCEL the engine is server.js and no wrapper exists');
+  fs.rmSync(vDir, { recursive: true, force: true });
+}
 
 const devDir = path.join(tmp, 'devapp');
 fs.mkdirSync(path.join(devDir, 'src', 'pages'), { recursive: true });

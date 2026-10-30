@@ -68,6 +68,7 @@ try {
   assert(Array.isArray(app.pages) && app.pages.length >= 20, `app.json lists the pages (${app.pages?.length})`);
   assert(app.pages.includes('pages/index/index'), 'the home route is in the page table');
   assert(app.pages.every((p: string) => p.startsWith('pages/') && !p.includes('[')), 'no route pattern leaked into the page table');
+  assert(!app.tabBar, 'no rosezm.mp.json - no tabBar in app.json');
   assert(has('pages/index/index.wxml') && has('pages/index/index.js') && has('pages/index/index.json'), 'a page is one .wxml + .js + .json trio');
   assert(has('utils/rosezm.js'), 'the runtime kit ships with the project');
   assert(has('app.js') && has('app.wxss'), 'app.js and app.wxss exist');
@@ -79,6 +80,56 @@ try {
   assert(read('components/FactCard/FactCard.json').includes('"component": true'), 'the component JSON declares itself a component');
   assert(read('components/FactCard/FactCard.js').includes("fact: { type: String, value: 'a fact about rosezm' }"), 'a component prop is declared with the type and default from its script');
   assert(read('pages/about/about.wxml').includes('fact-card fact="{{fact}}"'), 'the call site passes its prop expression into the custom component');
+
+  // The native tab bar: rosezm.mp.json's tabBar rides into app.json with
+  // pagePaths resolved from web routes, and a row naming an unexported page
+  // is dropped with a warning (the platform refuses the whole block with it).
+  {
+    const tProj = join(scratch, 'tabbar-proj');
+    mkdirSync(join(tProj, 'src/pages'), { recursive: true });
+    mkdirSync(join(tProj, 'public/tabbar'), { recursive: true });
+    writeFileSync(join(tProj, 'src/pages/home.rose'), '<p>home</p>');
+    writeFileSync(join(tProj, 'src/pages/mine.rose'), '<p>mine</p>');
+    writeFileSync(join(tProj, 'public/tabbar/home.png'), 'png');
+    writeFileSync(join(tProj, 'rosezm.mp.json'), JSON.stringify({
+      tabBar: {
+        color: '#999999',
+        selectedColor: '#e91e63',
+        list: [
+          { pagePath: '/home', text: 'Home', iconPath: 'tabbar/home.png', selectedIconPath: 'tabbar/home.png' },
+          { pagePath: '/mine', text: 'Mine' },
+          { pagePath: '/nope/missing', text: 'Ghost' },
+        ],
+      },
+    }));
+    const tExp = await exportProject('weapp', tProj, { apiBase: 'x', outRoot: join(scratch, 'tabbar-out') });
+    const tApp = JSON.parse(readFileSync(join(tExp.outDir, 'app.json'), 'utf8'));
+    assert(Array.isArray(tApp.tabBar?.list) && tApp.tabBar.list.length === 2, 'mp.json tabBar rides into app.json (the ghost row dropped)');
+    assert(tApp.tabBar.list[0].pagePath === 'pages/home/home' && tApp.tabBar.selectedColor === '#e91e63', 'the tabBar pagePath resolves from the web route to the package path');
+    assert(tApp.pages.includes('pages/home/home') && tApp.pages.includes('pages/mine/mine'), 'the tab pages are declared in the page table (switchTab works)');
+    assert(has('tabbar/home.png') === false && existsSync(join(tExp.outDir, 'tabbar/home.png')), 'the tab icon rides the public copy of its own export');
+    const warns = (tExp.warnings ?? []).join('\n');
+    assert(warns.includes('/nope/missing'), 'a tabBar row naming an unexported page is warned');
+
+    // Subpackages: declared pages move out of the main package into <root>/,
+    // app.json carries them in the subPackages block (paths relative to the
+    // root), and the routes file maps the web route to the subpackaged path.
+    writeFileSync(join(tProj, 'src/pages/extra.rose'), '<p>extra</p>');
+    const mp2 = JSON.parse(readFileSync(join(tProj, 'rosezm.mp.json'), 'utf8'));
+    mp2.subPackages = [{ root: 'pkg', pages: ['/extra'] }, { root: 'bad/../root', pages: [] }, { root: 'pkg', pages: [] }];
+    writeFileSync(join(tProj, 'rosezm.mp.json'), JSON.stringify(mp2));
+    const sExp = await exportProject('weapp', tProj, { apiBase: 'x', outRoot: join(scratch, 'sub-out') });
+    const sApp = JSON.parse(readFileSync(join(sExp.outDir, 'app.json'), 'utf8'));
+    assert(sApp.pages.length === 2 && !sApp.pages.includes('pages/extra/extra'), 'subPackages: the subpackaged page leaves the main page list');
+    assert(Array.isArray(sApp.subPackages) && sApp.subPackages[0].root === 'pkg' && sApp.subPackages[0].pages.includes('pages/extra/extra'), 'subPackages: the block carries the root and its pages');
+    assert(!sApp.subPackages.some((s: any) => s.root.includes('..')), 'subPackages: a traversal root is refused');
+    assert(existsSync(join(sExp.outDir, 'pkg', 'pages', 'extra', 'extra.js')), 'subPackages: the page lands under <root>/pages/');
+    const sRoutesText = readFileSync(join(sExp.outDir, 'utils/rosezm-routes.js'), 'utf8');
+    const routeStart = sRoutesText.indexOf('module.exports = ') + 'module.exports = '.length;
+    const routeEnd = sRoutesText.indexOf(';' + String.fromCharCode(10) + 'module.exports.__tabs');
+    const sRoutes = JSON.parse(sRoutesText.slice(routeStart, routeEnd));
+    assert(sRoutes['/extra'] === 'pkg/pages/extra/extra', 'subPackages: the routes file maps the web route to the subpackaged path');
+  }
 
   // 2. the template translation
   const wxml = read('pages/index/index.wxml');
@@ -299,6 +350,21 @@ try {
     page.__loadData();
     assert(opened.length === 1 && opened[0] === '/pages/sign/sign', `a walled data channel navigates to the exported sign page (got ${opened.join(',') || 'nothing'})`);
     assert(!patches.some((p) => 'posts' in p), 'a walled data channel does not patch the page with the wall body');
+    // The ACTION channel carries the same wall - a form submit is how a walled
+    // page mutates, and the kit used to apply the sign-in page's body as the
+    // patch. A walled action must not patch, and must say so.
+    {
+      const act: Array<unknown> = [];
+      (sandbox.wx as Record<string, unknown>).request = (opts: { success: (res: unknown) => void }) =>
+        opts.success({ statusCode: 302, header: { location: '/sign' }, data: { state: { shot: 'x' } } });
+      const p3 = vm.runInContext('rosePage', sandbox)(() => ({}), { data: { shot: null }, route: '/feed', actions: ['grab'] });
+      const patched: Array<Record<string, unknown>> = [];
+      p3.setData = (patch: Record<string, unknown>) => { patched.push(patch); };
+      p3.__runAction('grab');
+      assert(!patched.some((x) => 'shot' in x), 'a walled ACTION does not patch the page with the wall body');
+      assert(act.length === 0, 'the walled action reports, not throws');
+    }
+
     // ...and the same channel still works when there is no wall, so the check
     // above proves the wall was honoured rather than the request never made.
     (sandbox.wx as { request: unknown }).request = (opts: { success: (res: unknown) => void }) =>
@@ -583,6 +649,15 @@ try {
   // page shows a real value rather than a permanent null.
   assert(/T rosezmKv<T>\(String name, T Function\(\) compute, int ttlSeconds\)/.test(fread('lib/rosezm.dart')), 'the Flutter kit ships a TTL memo helper');
   assert(/rosezmKv\("stamp", \(\) => \(\(\(\) => Date\.now\(\)\)\(\)\), 60\)/.test(fread('lib/pages/kvdemo.dart')), 'a Flutter $kv field is seeded from its compute expression at load');
+  // The api base is a --dart-define overridable at build time: the kit reads
+  // ROSEZM_API with the exported base as the compile-time default.
+  assert(fread('lib/rosezm.dart').includes("String.fromEnvironment('ROSEZM_API', defaultValue: \"https://api.example.com\")"), 'the Flutter kit reads ROSEZM_API with the baked base as default');
+  assert(fread('README.md').includes('--dart-define=ROSEZM_API'), 'the Flutter README names the per-build override');
+  // Deep links: the engine hands the cold-start link to defaultRouteName as
+  // the RAW uri; the kit normalizes it to a route with the same host+path
+  // rule the android and ios shells follow.
+  assert(fread('lib/rosezm.dart').includes('String roseDeepLinkRoute(String name)') && fread('lib/rosezm.dart').includes("final host = uri.host.isEmpty ? '' : '/' + uri.host;"), 'the Flutter kit normalizes a deep-link uri to a route (host joined onto path)');
+  assert(fread('lib/main.dart').includes('initialRoute: roseDeepLinkRoute(WidgetsBinding.instance.platformDispatcher.defaultRouteName)'), 'main.dart seeds the initial route from the cold-start link');
   assert(indexDart.includes('onPressed: increment'), 'an event handler is bound as a method reference');
   // R123: `[...items(), x]` used to be refused as "spread" (a no-op button) and the
   // `'Item ' + n + 1` concat would not compile (Dart has no String + int). Both are
@@ -824,6 +899,12 @@ try {
     assert(existsSync(join(kdir, rel)), `android emits ${rel.split('/').pop()}`);
   }
   assert(kread('app/build.gradle.kts').includes('compose = true') && kread('app/build.gradle.kts').includes('androidx.compose.material3:material3'), 'the Gradle module enables Compose and its dependencies');
+  // The api base is a buildConfigField the gradle fills from ROSEZM_API at
+  // build time (the exported base is the fallback), and the kit reads it -
+  // ROSEZM_API=https://... ./gradlew assembleRelease re-points the app.
+  assert(kread('app/build.gradle.kts').includes('buildConfigField("String", "ROSEZM_API"') && kread('app/build.gradle.kts').includes('System.getenv("ROSEZM_API")') && kread('app/build.gradle.kts').includes('buildConfig = true'), 'the gradle fills ROSEZM_API from the environment with the baked base as fallback');
+  assert(kread('app/src/main/java/dev/rosezm/app/kit/RoseKit.kt').includes('val ROSE_API_BASE: String = BuildConfig.ROSEZM_API'), 'the kit reads the base through BuildConfig');
+  assert(kread('README.md').includes('ROSEZM_API=https://staging.example.com'), 'the Android README names the per-build override');
   const manifest = kread('app/src/main/AndroidManifest.xml');
   assert(manifest.includes('<manifest') && manifest.includes('android:name=".MainActivity"') && manifest.includes('android.permission.INTERNET'), 'the manifest launches MainActivity and allows the data channel');
   const kpages = walk(join(kdir, 'app/src/main/java/dev/rosezm/app/pages')).filter((f) => f.endsWith('.kt'));
@@ -883,6 +964,13 @@ try {
   assert((pbx.match(/isa = PBXBuildFile/g) ?? []).length >= swiftFiles.length, `every Swift file is in the build phase (${swiftFiles.length} files)`);
   assert((pbx.match(/sourcecode\.swift/g) ?? []).length === swiftFiles.length, 'every Swift file has a PBXFileReference');
   assert(pbx.includes('productType = "com.apple.product-type.application"') && pbx.includes('INFOPLIST_FILE = rosezmApp/Info.plist'), 'the target is an app with an Info.plist');
+  // The api base is the ROSE_API_BASE build setting (baked by the export,
+  // overridable per build on the xcodebuild command line), and the kit reads
+  // it through the Info.plist entry that references the setting.
+  assert((pbx.match(/ROSE_API_BASE = "https:\/\/api\.example\.com";/g) ?? []).length === 2, 'both target configurations bake ROSE_API_BASE');
+  assert(xread('rosezmApp/Info.plist').includes('<key>RoseAPIBase</key>') && xread('rosezmApp/Info.plist').includes('$(ROSE_API_BASE)'), 'the Info.plist publishes the build setting to the bundle');
+  assert(xread('rosezmApp/Kit/RoseKit.swift').includes('Bundle.main.object(forInfoDictionaryKey: "RoseAPIBase")') && xread('rosezmApp/Kit/RoseKit.swift').includes('?? "https://api.example.com"'), 'the kit reads the base from the bundle with the baked value as fallback');
+  assert(xread('README.md').includes('ROSE_API_BASE=https://staging.example.com'), 'the Xcode README names the per-build override');
   const xswift = walk(join(xdir, 'rosezmApp', 'Pages')).filter((f) => f.endsWith('.swift'));
   assert(xswift.length === result.pages.length && xswift.length >= 30, `one SwiftUI View per route (${xswift.length})`);
   const xIndex = xread('rosezmApp/Pages/IndexView.swift');
@@ -5728,6 +5816,64 @@ h2 { font-size: 40px; }
     // observable difference is the version.
     const verOf = (dir: string) => JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version;
     assert(verOf(before.outDir) === '1.0.0' && verOf(after.outDir) === '2.0.0', 'an identity edited between two exports is re-read - the cache follows the file mtime');
+
+    // Deep links: the optional "scheme" key registers a VIEW filter on the
+    // manifest, and the activity opens the linked route instead of home.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme', scheme: 'acme' }));
+    forgetAppIdentity();
+    const linked = await exportProject('android', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-deeplink') });
+    const linkedManifest = readFileSync(join(linked.outDir, 'app/src/main/AndroidManifest.xml'), 'utf8');
+    assert(linkedManifest.includes('<data android:scheme="acme" />') && linkedManifest.includes('android.intent.category.BROWSABLE'), 'a declared scheme registers a browsable VIEW filter on the manifest');
+    assert(readFileSync(join(linked.outDir, 'app/src/main/java/dev/rosezm/app/MainActivity.kt'), 'utf8').includes('data?.host?.let { "/" + it }'), 'the activity rebuilds the route from the url host and path (acme://blog/7 -> /blog/7)');
+    // The same scheme on iOS: CFBundleURLTypes registers it, and the root view
+    // routes the rebuilt path. No scheme - no URL types, and onOpenURL never fires.
+    const linkedIos = await exportProject('xcode', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-deeplink-ios') });
+    const linkedPlist = readFileSync(join(linkedIos.outDir, 'rosezmApp/Info.plist'), 'utf8');
+    assert(linkedPlist.includes('<string>acme</string>') && linkedPlist.includes('CFBundleURLSchemes'), 'a declared scheme registers CFBundleURLTypes on iOS');
+    const root = readFileSync(join(linkedIos.outDir, 'rosezmApp/RoseRootView.swift'), 'utf8');
+    assert(root.includes('.onOpenURL') && root.includes('url.host.map { "/" + $0 }'), 'the root view rebuilds the route from the url host and path');
+    assert(readFileSync(join(linked.outDir, 'README.md'), 'utf8').includes('acme://blog/7'), 'the Android README documents the scheme');
+    // No scheme - the manifest keeps no VIEW filter, byte-identically.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme' }));
+    forgetAppIdentity();
+    const plainManifest = readFileSync(join((await exportProject('android', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-noscheme') })).outDir, 'app/src/main/AndroidManifest.xml'), 'utf8');
+    assert(!plainManifest.includes('android.intent.action.VIEW') && !plainManifest.includes('android:scheme'), 'no declared scheme - the manifest carries no VIEW filter');
+    assert(!readFileSync(join((await exportProject('xcode', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-noscheme-ios') })).outDir, 'rosezmApp/Info.plist'), 'utf8').includes('CFBundleURLTypes'), 'no declared scheme - no URL types on iOS');
+    // The same scheme on HarmonyOS: a view-data skill with the uri scheme,
+    // the ability parks the rebuilt path, and the entry page routes itself.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme', scheme: 'acme' }));
+    forgetAppIdentity();
+    const linkedArkts = await exportProject('arkts', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-deeplink-arkts') });
+    const linkedMod = readFileSync(join(linkedArkts.outDir, 'entry/src/main/module.json5'), 'utf8');
+    assert(linkedMod.includes('ohos.want.action.viewData') && linkedMod.includes('acme'), 'arkts: a declared scheme registers a view-data skill with the uri scheme');
+    const ability = readFileSync(join(linkedArkts.outDir, 'entry/src/main/ets/entryability/EntryAbility.ets'), 'utf8');
+    assert(ability.includes('startsWith("acme://")') && ability.includes('rosezmDeepLink'), 'arkts: the ability parks the rebuilt deep-link path in AppStorage');
+    const indexEts = readFileSync(join(linkedArkts.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
+    assert(indexEts.includes('roseDeepLinkPage') && indexEts.includes('rosezmDeepLink'), 'arkts: the entry page resolves the parked link and routes itself');
+    assert(readFileSync(join(linkedArkts.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8').includes('export function roseDeepLinkPage'), 'arkts: the kit resolves the parked path against the route table (exact + :param)');
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme' }));
+    forgetAppIdentity();
+    const plainArkts = await exportProject('arkts', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-noscheme-arkts') });
+    assert(!readFileSync(join(plainArkts.outDir, 'entry/src/main/module.json5'), 'utf8').includes('viewData'), 'arkts: no declared scheme - no view-data skill');
+    // The same scheme on Electron: the protocol registers, the single-instance
+    // lock forwards a link's argv, and open-url queues the macOS cold start.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme', scheme: 'acme' }));
+    forgetAppIdentity();
+    const linkedElectron = await exportProject('electron', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-deeplink-electron') });
+    const linkedMain = readFileSync(join(linkedElectron.outDir, 'main.cjs'), 'utf8');
+    assert(linkedMain.includes('setAsDefaultProtocolClient') && linkedMain.includes('"acme"'), 'electron: the scheme registers as the default protocol client');
+    assert(linkedMain.includes('open-url') && linkedMain.includes('second-instance') && linkedMain.includes('openDeepLink'), 'electron: the link rides open-url (macOS) and second-instance argv (win/linux)');
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme' }));
+    forgetAppIdentity();
+    const plainElectron = await exportProject('electron', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-noscheme-electron') });
+    const plainMain = readFileSync(join(plainElectron.outDir, 'main.cjs'), 'utf8');
+    assert(!plainMain.includes('setAsDefaultProtocolClient') && !plainMain.includes('openDeepLink') && plainMain.includes('queuedRoute = null'), 'electron: no declared scheme - no link handlers, the port vars stay (harmless)');
+    // A bad scheme is refused at the boundary, like the id.
+    writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme', version: '1.0.0', slug: 'acme', scheme: 'my app!' }));
+    forgetAppIdentity();
+    refused = '';
+    try { await exportProject('android', idProj, { apiBase: 'x', outRoot: join(scratch, 'id-badscheme') }); } catch (err) { refused = String(err); }
+    assert(/rosezm\.app\.json: "scheme" must look like a URL scheme/.test(refused), 'a malformed scheme is refused at the boundary');
   }
 
   // Two P0 desktop reports, both about a window that exists but is not on

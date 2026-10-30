@@ -27,8 +27,8 @@ import { spawnSync } from 'node:child_process';
 import { transformSync } from 'esbuild';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , pageTitle} from './ir.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell } from './state-ops.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
+import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
@@ -222,7 +222,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDependencies('flutter', native), app), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme), 'utf8');
 
   for (const comp of components) {
     await fs.promises.writeFile(
@@ -1053,7 +1053,27 @@ Widget roseHtml(String html) {
 import 'dart:io';
 
 /// Base URL of the deployed rosezm server (rosezm export --api).
-const String rosezmApiBase = ${q};
+/// Base URL of the deployed rosezm server. A --dart-define re-points the app
+/// at build time without re-exporting:
+///   flutter run --dart-define=ROSEZM_API=https://staging.example.com
+const String rosezmApiBase = String.fromEnvironment('ROSEZM_API', defaultValue: ${q});
+
+/// A cold-start deep link surfaces as the platform dispatcher's default route
+/// name - the RAW uri ("acme://blog/7"). The engine parses that as scheme +
+/// host + path, so the route is the host joined onto the path - the same rule
+/// the Android and iOS shells follow. A plain route ("/blog/7") passes
+/// through; a bare scheme tap lands on home.
+String roseDeepLinkRoute(String name) {
+  if (name.startsWith('/')) return name;
+  try {
+    final uri = Uri.parse(name);
+    final host = uri.host.isEmpty ? '' : '/' + uri.host;
+    final rebuilt = host + uri.path;
+    return rebuilt.startsWith('/') && rebuilt.length > 1 ? rebuilt : '/';
+  } catch (_) {
+    return '/';
+  }
+}
 
 /// The raw Set-Cookie of the most recent response, relayed back as Cookie on
 /// the next request - the middleware's session survives across requests
@@ -1371,7 +1391,7 @@ function dartOrg(app: AppIdentity): string {
   return labels.slice(0, -1).join('.') || 'dev.rosezm';
 }
 
-function renderPubspec(pages: Array<{ className: string }>, assets: string[] = [], fonts: Array<{ family: string; file: string }> = [], nativeDeps: string[] = [], app: AppIdentity = { id: 'dev.rosezm.app', name: 'rosezm', slug: 'rosezm-app', version: '1.0.0' }): string {
+function renderPubspec(pages: Array<{ className: string }>, assets: string[] = [], fonts: Array<{ family: string; file: string }> = [], nativeDeps: string[] = [], app: AppIdentity = { id: 'dev.rosezm.app', name: 'rosezm', slug: 'rosezm-app', version: '1.0.0', scheme: '' }): string {
   const name = dartPackageName(app);
   const fontBlock = fonts.length
     ? '  fonts:\n' + fonts.map((f) => `    - family: ${f.family}\n      fonts:\n        - asset: assets/fonts/${f.file.split('/').pop()}`).join('\n') + '\n'
@@ -1403,7 +1423,7 @@ const NATIVE_PLUGIN_FLOORS: Record<string, string> = {
   share_plus: '>=10.0.0 <12.0.0',
 };
 
-function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[]): string {
+function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[], scheme: string): string {
   return `# rosezm -> Flutter
 
 Generated by \`rosezm export flutter\` from the project's \`.rose\` pages.
@@ -1412,6 +1432,15 @@ Generated by \`rosezm export flutter\` from the project's \`.rose\` pages.
 - Run: \`flutter pub get && flutter run\`
 - Server: \`rosezm export flutter --api <base>\` writes the base URL into
   \`lib/rosezm.dart\` (data channel + server actions). Current: \`${apiBase || '(unset)'}\`
+- Override the base per build without re-exporting:
+  \`flutter run --dart-define=ROSEZM_API=https://staging.example.com\`
+${scheme ? `- Deep links: declare \`"scheme": "${scheme}"\` in rosezm.app.json and, after
+  \`flutter create . --platforms android,ios\`, register it in the runners -
+  AndroidManifest.xml: an intent-filter with \`<data android:scheme="${scheme}" />\`
+  (action VIEW, categories DEFAULT + BROWSABLE); Info.plist: \`CFBundleURLTypes\`
+  with \`${scheme}\` in CFBundleURLSchemes. The kit routes the cold-start link
+  (\`${scheme}://blog/7\` -> /blog/7) automatically.
+` : ''}
 
 The output has no third-party dependencies: \`dart:io\` HTTP for the data
 channel and the action POST, Material widgets for the view tree. A construct
@@ -1497,7 +1526,7 @@ class RoseApp extends StatelessWidget {
     return MaterialApp(
       title: 'rosezm',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: const Color(0xFFE91E63)),
-      initialRoute: '/',
+      initialRoute: roseDeepLinkRoute(WidgetsBinding.instance.platformDispatcher.defaultRouteName),
       routes: {
 ${routes}
       },
@@ -1514,7 +1543,7 @@ ${dynamicCases || '        // no dynamic routes in this app'}
 
 function renderPage(
   page: { route: string; className: string; fileName: string; nodes: IrNode[]; script: string; style: string; params: string[] },
-  components: Array<{ name: string; className: string; slots: SlotUsage }>,
+  components: Array<{ name: string; className: string; nodes: IrNode[]; slots: SlotUsage }>,
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
   hoverKeys: Set<string> = new Set(),
@@ -1758,7 +1787,7 @@ ${methods}
 function renderComponent(comp: { name: string; className: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, warnings: string[], globalCss: string = ''): string {
   const styleClasses = new Set<string>();
   const propNames = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-  const body = emitChildren(comp.nodes, { warnings, file: comp.name, components: [], styleClasses, inText: false, stateNames: new Set(propNames), mapBinds: new Set(), inline: new Map<string, string>(), awaits: [], scriptConsts: new Map(), componentProps: new Set(propNames), sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')), scope: comp.name, ancestors: [], hoverKeys: new Set<string>() });
+  const body = emitChildren(comp.nodes, { warnings, file: comp.name, components: [], styleClasses, inText: false, stateNames: new Set(propNames), mapBinds: new Set(), inline: new Map<string, string>(), awaits: [], deferred: [], scriptConsts: new Map(), componentProps: new Set(propNames), forms: [], formSubmit: null, pageAction: null, sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')), scope: comp.name, ancestors: [], hoverKeys: new Set<string>() });
   const defaults = new Map<string, string>();
   for (const m of (comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^;\n]+)/g)) {
     defaults.set(m[1], dartLiteral(m[2].trim()));
@@ -1794,7 +1823,7 @@ ${props.join('\n')}
 interface EmitCtx {
   warnings: string[];
   file: string;
-  components: Array<{ name: string; className: string; slots: SlotUsage }>;
+  components: Array<{ name: string; className: string; nodes: IrNode[]; slots: SlotUsage }>;
   styleClasses: Set<string>;
   inText: boolean;
   /** Names declared by `$state`/`$derived` (or component props): only these unwrap `name()` to `name`. */
@@ -1827,7 +1856,7 @@ interface EmitCtx {
   /** Inside a component: its declared props, whose edits ride the change callbacks. */
   componentProps: Set<string>;
   /** The forms this page declares and the page's exported action. */
-  forms: Array<Record<string, any>>;
+  forms: FormInfo[];
   formSubmit: string | null;
   pageAction: string | null;
   /** This file's own stylesheet, resolved per element by the shared engine. */
@@ -2091,7 +2120,7 @@ function emitElementStyled(
     const name = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text : '';
     if (!name || name === 'default') return 'slotDefault';
     const propArgs = node.attrs
-      .filter((a) => a.name !== 'name' && a.value.kind === 'expr')
+      .filter((a): a is Attr & { value: { kind: 'expr'; code: string } } => a.name !== 'name' && a.value.kind === 'expr')
       .map((a) => `'${a.name}': ${dartExpr(a.value.code, ctx.stateNames, ctx.mapBinds)}`)
       .join(', ');
     const fallback = emitChildren(node.children, ctx);
@@ -2424,7 +2453,7 @@ function handlerName(code: string, ctx: EmitCtx): string {
   return name;
 }
 
-function attrExpr(attr: { value: { kind: string; text?: string; code?: string } }, ctx: EmitCtx): string {
+function attrExpr(attr: Attr, ctx: EmitCtx): string {
   if (attr.value.kind === 'expr') return dartExpr(attr.value.code ?? '', ctx.stateNames, ctx.mapBinds);
   if (attr.value.kind === 'text') return JSON.stringify(attr.value.text ?? '');
   ctx.warnings.push(`flutter: a mixed attribute value is read as an empty string`);
