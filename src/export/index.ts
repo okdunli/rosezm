@@ -168,6 +168,42 @@ async function auditMissingApiBase(target: TargetName, projectRoot: string, apiB
   warnings.push(`${target}: ${calls} server call(s) in ${where} - no --api <base> was given, so they have no endpoint in the exported app (re-export with --api https://your-server)`);
 }
 
+/** JS number spellings that have no spelling on a target: a page using one
+ *  exports source that cannot compile there. A faithful fix needs JS number
+ *  semantics (doubles) these targets do not share, so the export warns instead
+ *  of pretending - the same rule as every other gap. ArkTS is absent because
+ *  Math.* / toFixed / Number() are TypeScript and compile as-is. */
+const NUMBER_SPELLINGS: Partial<Record<TargetName, Array<[RegExp, string]>>> = {
+  // Math.* and toFixed are translated by the mobile emitters now; number
+  // PARSING from a string still has no faithful spelling there.
+  xcode: [[/\b(?:parseFloat|parseInt|Number)\s*\(/, 'parseInt/Number']],
+  flutter: [[/\b(?:parseFloat|parseInt|Number)\s*\(/, 'parseInt/Number']],
+  android: [[/\b(?:parseInt|parseFloat)\s*\(/, 'parseInt/parseFloat'], [/(?<![.\w])Number\s*\(/, 'Number()']],
+  python: [[/\bparseInt\s*\(/, 'parseInt()']],
+  dotnet: [[/\bparseInt\s*\(/, 'parseInt()']],
+  java: [[/\bparseInt\s*\(/, 'parseInt()']],
+  cpp: [[/\bMath\.[a-z]+/, 'Math.*'], [/\.toFixed\s*\(/, '.toFixed()'], [/\bparseInt\s*\(/, 'parseInt()']],
+};
+
+async function auditNumberSpellings(target: TargetName, projectRoot: string, warnings: string[]): Promise<void> {
+  const spellings = NUMBER_SPELLINGS[target];
+  if (!spellings) return;
+  for (const file of [...(await scanRoseFiles(projectRoot)), ...(await scanComponentFiles(projectRoot))]) {
+    // API routes and the middleware never render in an app; warning about a
+    // server-only file would bury the warning that matters.
+    if (/[\\/]pages[\\/]api[\\/]/.test(file) || /[\\/]_middleware\.rose$/.test(file)) continue;
+    let src = '';
+    try {
+      src = await fs.promises.readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const hits = spellings.filter(([re]) => re.test(src)).map(([, name]) => name);
+    if (!hits.length) continue;
+    warnings.push(`${target}: ${path.relative(projectRoot, file).replace(/\\/g, '/')} uses ${hits.join(', ')} - this target has no faithful spelling, so the exported page may not compile; compute the value in the script instead`);
+  }
+}
+
 async function auditDroppedEffects(target: TargetName, projectRoot: string, warnings: string[]): Promise<void> {
   const label = EFFECTLESS[target];
   if (!label) return;
@@ -248,6 +284,7 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
   }
   const globalCss = opts.globalCss ?? (await discoverGlobalCss(projectRoot));
   await auditDroppedEffects(target, projectRoot, warnings);
+  await auditNumberSpellings(target, projectRoot, warnings);
   await auditMissingApiBase(target, projectRoot, opts.apiBase, warnings);
   if (info.family === 'mini-program') {
 

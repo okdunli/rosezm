@@ -32,7 +32,7 @@ import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/i
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
-import { translateExpr, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { nativeDependencies, nativeUsage, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -1314,6 +1314,21 @@ dynamic roseIndex(dynamic value, dynamic index) {
   return items[i];
 }
 
+/// A $data field is a JSON map: one null-safe key read.
+dynamic roseGet(dynamic container, String key) => container is Map ? container[key] : null;
+
+/// JS Math.round/floor/ceil answer a number; these answer int (the type pages
+/// declare) and accept any numeric value.
+dynamic roseRound(dynamic value) => ((value as num?) ?? 0).round();
+dynamic roseFloor(dynamic value) => ((value as num?) ?? 0).floor();
+dynamic roseCeil(dynamic value) => ((value as num?) ?? 0).ceil();
+dynamic roseAbs(dynamic value) => ((value as num?) ?? 0).abs();
+dynamic roseMax(dynamic a, dynamic b) => ((a as num?) ?? 0) >= ((b as num?) ?? 0) ? a : b;
+dynamic roseMin(dynamic a, dynamic b) => ((a as num?) ?? 0) <= ((b as num?) ?? 0) ? a : b;
+
+/// JS Number.prototype.toFixed(digits).
+String roseFixed(dynamic value, int digits) => ((value as num?) ?? 0).toStringAsFixed(digits);
+
 /// A kv memo: the value is computed at most once per TTL window, and the window
 /// survives a restart - the client-side stand-in for the server-side memo the
 /// web build uses (where the server computes and ships the value in the state).
@@ -1839,6 +1854,7 @@ function renderPage(
     styleClasses,
     inText: false,
     stateNames: new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name)]),
+    dataNames: new Set(facts.data.map((d) => d.name)),
     mapBinds: new Set(binds.map((b) => b.name)),
     inline: new Map<string, string>(),
     awaits: [],
@@ -1906,8 +1922,10 @@ function renderPage(
     if (b.init.startsWith('roseContentGet(')) return `  dynamic ${b.name} = ${b.init};`;
     return `  dynamic ${b.name} = ${dartLiteral(b.init)};`;
   }).join('\n');
-  const derivedGetters = facts.derived.map((d) => `  dynamic get ${d.name} => ${dartExpr(d.expr, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((x) => x.name)]), ctx.mapBinds)};`).join('\n');
-  const loadFields = facts.data.map((d) => `    ${d.name} = __data['${d.name}'];`).join('\n');
+  const derivedGetters = facts.derived.map((d) => `  dynamic get ${d.name} => ${dartExpr(d.expr, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((x) => x.name)]), ctx.mapBinds, ctx.dataNames)};`).join('\n');
+  // A $data field is a JSON map the data channel fills: the accessor reads the
+  // latest patch, so a template call post() and a member chain both see it.
+  const dataAccessors = facts.data.map((d) => `  dynamic ${d.name}() => __data[${JSON.stringify(d.name)}];`).join('\n');
 
   return `${imports}
 
@@ -1919,6 +1937,7 @@ ${paramsField}  @override
 
 class _${page.className}State extends State<${page.className}> {
 ${stateFields}
+${dataAccessors}
 ${bindFields}
 ${derivedGetters}
 ${ctx.awaits.map((a) => `  bool ${a.done} = false;
@@ -1972,7 +1991,6 @@ ${kvSeedLines}
     if (!mounted || patch.isEmpty) return;
     setState(() {
       __data = patch;
-${loadFields}
     });
   }
 ${ctx.deferred.map((d, i) => `
@@ -2078,6 +2096,8 @@ interface EmitCtx {
   inText: boolean;
   /** Names declared by `$state`/`$derived` (or component props): only these unwrap `name()` to `name`. */
   stateNames: Set<string>;
+  /** `$data` field names: their accessor returns the JSON map (see dartExpr). */
+  dataNames?: Set<string>;
   /** Module-level literal binds (`export const store = {...}`): reads become map lookups. */
   mapBinds: Set<string>;
   /** R251: `{@const x = expr}` bindings visible at this point, expanded at the
@@ -2153,11 +2173,11 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
       continue;
     }
     if (node.kind === 'expr') {
-      out.push(`Text('\${${dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds)}}')`);
+      out.push(`Text('\${${dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames)}}')`);
       continue;
     }
     if (node.kind === 'html') {
-      out.push(`roseHtml(${dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds)})`);
+      out.push(`roseHtml(${dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames)})`);
       continue;
     }
     if (node.kind === 'const') {
@@ -2166,7 +2186,7 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
       // warning, so every later read of the name was an undeclared identifier.
       const scoped = ctx.constExprs ?? new Map<string, string>();
       if (!ctx.constExprs) ctx.constExprs = scoped;
-      scoped.set(node.name, dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds));
+      scoped.set(node.name, dartExpr(withConsts(node.code, ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames));
       continue;
     }
     if (node.kind === 'render') {
@@ -2181,7 +2201,7 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
     if (node.kind === 'if') {
       const first = node.branches[0];
       const elseNode = node.branches.find((b) => b.cond === null);
-      const cond = dartExpr(withConsts(first.cond ?? 'false', ctx), ctx.stateNames, ctx.mapBinds);
+      const cond = dartExpr(withConsts(first.cond ?? 'false', ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames);
       const thenWidget = emitChildren(first.children, ctx);
       const elseWidget = elseNode ? emitChildren(elseNode.children, ctx) : 'const SizedBox.shrink()';
       out.push(`(${cond}) ? ${thenWidget} : ${elseWidget}`);
@@ -2189,7 +2209,7 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
     }
     if (node.kind === 'each') {
       const itemVar = /^[A-Za-z_$][\w$]*$/.test(node.binding) ? node.binding : 'item';
-      const list = dartExpr(withConsts(node.items, ctx), ctx.stateNames, ctx.mapBinds);
+      const list = dartExpr(withConsts(node.items, ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames);
       // The loop variable is decoded JSON (a Map), so `item.field` in the body
       // must read as a map lookup - the same rule module binds follow.
       const scoped: EmitCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, itemVar]) };
@@ -2205,7 +2225,7 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
       const done = `__await${id}Done`;
       const value = `__await${id}Value`;
       const err = `__await${id}Err`;
-      const expr = dartExpr(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts), ctx.stateNames, ctx.mapBinds);
+      const expr = dartExpr(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts), ctx.stateNames, ctx.mapBinds, ctx.dataNames);
       // A head that is still a promise at runtime (a call, not a literal) cannot
       // be awaited where this target evaluates the block: it would land in the
       // state field as a promise object. Say so instead of rendering garbage.
@@ -2331,7 +2351,7 @@ function styleExprOf(
   }
   const classParts = [
     ...classes.map((c) => `'${c}'`),
-    ...binding.dynamicClassExprs.map((e) => dartExpr(e, ctx.stateNames, ctx.mapBinds)),
+    ...binding.dynamicClassExprs.map((e) => dartExpr(e, ctx.stateNames, ctx.mapBinds, ctx.dataNames)),
   ];
   // A `const` list may only hold literals, and a `class={tone}` read is a field
   // of the widget: keeping the keyword there is a Dart compile error
@@ -2343,7 +2363,7 @@ function styleExprOf(
   const args = [`${literalOnly ? 'const ' : ''}<String>[${classParts.join(', ')}]`, `'${ctx.scope}'`];
   if (binding.inlineStyle) args.push(`inline: RoseStyle(${styleArgsOf(binding.inlineStyle).join(', ')})`);
   if (binding.dynamicStyle.length) {
-    const entries = binding.dynamicStyle.map((s) => `'${s.prop}': ${dartExpr(s.code, ctx.stateNames, ctx.mapBinds)}`).join(', ');
+    const entries = binding.dynamicStyle.map((s) => `'${s.prop}': ${dartExpr(s.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames)}`).join(', ');
     args.push(`props: <String, dynamic>{${entries}}`);
   }
   return { expr: `roseResolve(${args.join(', ')}, '${node.tag.toLowerCase()}')`, model, hoverKey, focusKey, activeKey };
@@ -2371,7 +2391,7 @@ function emitElementStyled(
     if (!name || name === 'default') return 'slotDefault';
     const propArgs = node.attrs
       .filter((a): a is Attr & { value: { kind: 'expr'; code: string } } => a.name !== 'name' && a.value.kind === 'expr')
-      .map((a) => `'${a.name}': ${dartExpr(a.value.code, ctx.stateNames, ctx.mapBinds)}`)
+      .map((a) => `'${a.name}': ${dartExpr(a.value.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames)}`)
       .join(', ');
     const fallback = emitChildren(node.children, ctx);
     return `slot${upperCamel(name)} != null ? slot${upperCamel(name)}!({${propArgs}}) : ${fallback}`;
@@ -2408,7 +2428,7 @@ function emitElementStyled(
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
-    const vExpr = value && value.value.kind === 'expr' ? dartExpr(value.value.code, ctx.stateNames, ctx.mapBinds) : (value && value.value.kind === 'text' ? value.value.text : '0');
+    const vExpr = value && value.value.kind === 'expr' ? dartExpr(value.value.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames) : (value && value.value.kind === 'text' ? value.value.text : '0');
     const mExpr = max && max.value.kind === 'text' ? max.value.text : '100';
     const bar = `LinearProgressIndicator(value: (${vExpr}).toDouble() / (${mExpr}).toDouble())`;
     return styleExpr ? `roseBox(${styleExpr}, ${bar})` : bar;
@@ -2469,7 +2489,7 @@ function emitElementStyled(
   if (tag === 'a') {
     const href = node.attrs.find((a) => a.name === 'href');
     const target = href ? attrExpr(href, ctx) : "''";
-    const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `\${${dartExpr(c.code, ctx.stateNames, ctx.mapBinds)}}` : '')).join('').trim();
+    const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `\${${dartExpr(c.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames)}}` : '')).join('').trim();
     // A styled link keeps its colour/padding: the box half wraps the tappable
     // area and the text half paints the label, so an `a {}`/`nav a {}` rule or a
     // class on the link actually shows instead of a bare InkWell.
@@ -2557,7 +2577,7 @@ function emitElementStyled(
     let handler = click && click.value.kind === 'expr' ? handlerName(click.value.code.trim(), ctx) : 'null';
     // A submit button in a form with no handler posts to the page's action.
     if (!click && isSubmitButton(node) && ctx.pageAction) handler = `() => __runAction('${ctx.pageAction}')`;
-    const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `\${${dartExpr(c.code, ctx.stateNames, ctx.mapBinds)}}` : '')).join('').trim();
+    const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `\${${dartExpr(c.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames)}}` : '')).join('').trim();
     // R245/R257: the hover and focus halves the generic element tail applies,
     // here because a button returns before it. Focus wraps innermost (it is
     // about this widget's keyboard state), MouseRegion outside it.
@@ -2693,7 +2713,7 @@ function dartTextOf(children: IrNode[], ctx: EmitCtx): string {
     } else if (c.kind === 'expr') {
       // R251: a `{@const}` read expands to its expression here too - this is the
       // text template path, and it was the one still emitting a bare name.
-      out += '${' + dartExpr(withConsts(c.code, ctx), ctx.stateNames, ctx.mapBinds) + '}';
+      out += '${' + dartExpr(withConsts(c.code, ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames) + '}';
     }
   }
   return "'" + out + "'";
@@ -2711,17 +2731,43 @@ function handlerName(code: string, ctx: EmitCtx): string {
 }
 
 function attrExpr(attr: Attr, ctx: EmitCtx): string {
-  if (attr.value.kind === 'expr') return dartExpr(attr.value.code ?? '', ctx.stateNames, ctx.mapBinds);
+  if (attr.value.kind === 'expr') return dartExpr(attr.value.code ?? '', ctx.stateNames, ctx.mapBinds, ctx.dataNames);
   if (attr.value.kind === 'text') return JSON.stringify(attr.value.text ?? '');
   ctx.warnings.push(`flutter: a mixed attribute value is read as an empty string`);
   return "''";
 }
 
 /** Translate a Rose expression into Dart source (the reactive subset). */
-function dartExpr(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set()): string {
+/** JS scalar calls (String / Math.* / toFixed) in one place: the template path
+ *  and the handler path must spell them the same way. Dart has no Math
+ *  namespace and no toFixed; the kit spells both over num. */
+function dartScalarCalls(code: string): string {
+  return rewriteToFixedCalls(
+    rewriteStringCalls(code, (arg) => `(${arg}).toString()`)
+      .replace(/\bMath\.(round|floor|ceil|abs)\s*\(/g, (_m, name: string) => 'rose' + name.charAt(0).toUpperCase() + name.slice(1) + '(')
+      .replace(/\bMath\.(max|min)\s*\(/g, (_m, name: string) => (name === 'max' ? 'roseMax(' : 'roseMin(')),
+    (recv, d) => `roseFixed(${recv}, ${d})`,
+  );
+}
+
+function dartExpr(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '[]');
+  // `{post().title}` reads the JSON map the data channel delivers: the field
+  // accessor returns dynamic, so the member chain becomes a null-safe roseGet
+  // read (a raw `post().title` throws NoSuchMethod the first frame).
+  if (dataNames.size) {
+    const names = [...dataNames].map(escapeRe).join('|');
+    out = out.replace(new RegExp(`\\b(${names})\\s*\\(\\s*\\)((?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*)+)`, 'g'), (_m, name: string, chain: string) => {
+      let expr = `${name}()`;
+      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) expr = `roseGet(${expr}, "${key.replace(/^\?/, '')}")`;
+      return expr;
+    });
+  }
+  // JS String(x) is a global function; Dart has no general String constructor,
+  // so stringify through toString() (null answers "null", like JS).
+  out = dartScalarCalls(out);
   // `$query()` is the launch parameters: the page state's __params map. This
   // must run BEFORE the translateExpr fast path below - a `$query().q ?? ''`
   // initializer takes that path, and a raw `$query['q']` reached the generated
@@ -3012,7 +3058,7 @@ function translateScript(script: string, facts: StateFacts, file: string, route:
  *  shared handler IR. */
 function dartHandlerDialect(ctx: EmitCtx): HandlerDialect {
   return {
-    expr: (code) => dartExpr(code, ctx.stateNames, ctx.mapBinds),
+    expr: (code) => dartExpr(code, ctx.stateNames, ctx.mapBinds, ctx.dataNames),
     set: (name, expr) => `__set('${name}', ${expr})`,
     update: (name, fn) => `__set('${name}', (${fn})(${name}))`,
     action: (name) => `__runAction('${name}')`,
@@ -3149,7 +3195,8 @@ function translateBody(body: string, file: string, warnings: string[], mapBinds:
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   out = out.replace(/\bnull\b/g, 'null').replace(/\bundefined\b/g, 'null');
   out = out.replace(/\bString\(/g, '(');
-  out = out.replace(/\bMath\./g, 'math.');
+  // JS Math.* and toFixed in a handler body, same spelling as the template path.
+  out = dartScalarCalls(out);
   // A `$formRead('name')` is the state key the input widget binds to - the bare
   // state variable, the same read every other handler uses.
   out = out.replace(/\$formRead\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => name);

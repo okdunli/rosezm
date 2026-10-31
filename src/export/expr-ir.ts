@@ -719,3 +719,102 @@ function topColon(src: string): number {
   }
   return -1;
 }
+
+/** The start index of the expression ending right before `dot`, skipping
+ *  whitespace: a balanced parenthesized group, or an identifier chain. */
+function receiverStart(code: string, dot: number): number {
+  let i = dot - 1;
+  while (i >= 0 && /\s/.test(code[i])) i--;
+  if (i < 0) return -1;
+  if (code[i] === ')') {
+    let depth = 0;
+    let quote = '';
+    for (let j = i; j >= 0; j--) {
+      const ch = code[j];
+      if (quote) {
+        if (ch === quote && code[j - 1] !== '\\') quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === ')') depth++;
+      else if (ch === '(') {
+        depth--;
+        if (depth === 0) return j;
+      }
+    }
+    return -1;
+  }
+  const m = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.exec(code.slice(0, i + 1));
+  return m ? i + 1 - m[0].length : -1;
+}
+
+/** `EXPR.toFixed(n)` -> spell(EXPR, n), where EXPR may be any expression
+ *  ending right before the call (a nested call, a binary expression in parens,
+ *  or a dotted name). A target without toFixed supplies the spelling. */
+export function rewriteToFixedCalls(code: string, spell: (recv: string, digits: string) => string): string {
+  const re = /\.toFixed\s*\(\s*(\d+)\s*\)/g;
+  let out = '';
+  let last = 0;
+  for (const m of code.matchAll(re)) {
+    const dot = m.index ?? 0;
+    const start = receiverStart(code, dot);
+    if (start < 0 || start < last) continue;
+    out += code.slice(last, start) + spell(code.slice(start, dot).trim(), m[1]);
+    last = dot + m[0].length;
+  }
+  return out + code.slice(last);
+}
+
+/**
+ * `String(expr)` -> `spell(expr)`. JS's String() is a global function; Swift and
+ * Kotlin only have constructors with specific parameter shapes, and Dart has no
+ * general constructor at all, so a template that stringifies a value does not
+ * compile there. The scanner respects nested parens and string literals, and
+ * leaves labelled calls (String(describing:), String(format:)) alone.
+ */
+export function rewriteStringCalls(code: string, spell: (arg: string) => string): string {
+  const out: string[] = [];
+  let i = 0;
+  for (;;) {
+    const rest = code.slice(i);
+    const m = /\bString\s*\(/.exec(rest);
+    if (!m) { out.push(rest); break; }
+    const at = i + (m.index ?? 0);
+    out.push(code.slice(i, at));
+    const open = at + m[0].length - 1;
+    let depth = 0;
+    let quote = '';
+    let j = open;
+    for (; j < code.length; j++) {
+      const ch = code[j];
+      if (quote) {
+        if (ch === '\\') j++;
+        else if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === '(') depth++;
+      else if (ch === ')') { depth--; if (depth === 0) break; }
+    }
+    if (j >= code.length) { out.push(code.slice(at)); break; }
+    const arg = code.slice(open + 1, j);
+    const labelled = /^\s*[A-Za-z_$][\w$]*\s*:/.test(arg);
+    // A COMMA AT THE TOP LEVEL means a multi-argument call (String.fromCharCode
+    // style is not JS String, but String(a, b) is not a stringifier either);
+    // commas nested inside a call are part of the one argument.
+    let topComma = false;
+    let nest = 0;
+    let q = '';
+    for (let k = 0; k < arg.length; k++) {
+      const ch = arg[k];
+      if (q) { if (ch === '\\') k++; else if (ch === q) q = ''; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') nest++;
+      else if (ch === ')' || ch === ']' || ch === '}') nest--;
+      else if (ch === ',' && nest === 0) { topComma = true; break; }
+    }
+    out.push(labelled || topComma ? code.slice(at, j + 1) : spell(arg.trim()));
+    i = j + 1;
+  }
+  return out.join('');
+}

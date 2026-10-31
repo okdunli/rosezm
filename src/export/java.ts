@@ -29,7 +29,7 @@ import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStyl
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods, type StringMethodSpell } from './state-ops.js';
-import { translateExpr, matchArrow, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteToFixedCalls, matchArrow, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
 
@@ -1468,6 +1468,12 @@ ${rows || '        // no style rules'}
 
     public static String text(Object value) {
         return value == null ? "" : String.valueOf(value);
+    }
+
+    /** JS Number.prototype.toFixed(digits). */
+    public static String fixed(Object value, int digits) {
+        double d = value instanceof Number ? ((Number) value).doubleValue() : 0.0;
+        return String.format(java.util.Locale.US, "%." + digits + "f", d);
     }
 
     /**
@@ -3346,10 +3352,22 @@ function javaRoseify(code: string): string {
   return out;
 }
 
+function javaScalarCalls(code: string): string {
+  return rewriteToFixedCalls(
+    code
+      .replace(/\bMath\.round\s*\(/g, '(int)Math.round(')
+      .replace(/\bMath\.floor\s*\(/g, '(int)Math.floor(')
+      .replace(/\bMath\.ceil\s*\(/g, '(int)Math.ceil('),
+    (recv, d) => `RoseTheme.fixed(${recv}, ${d})`,
+  );
+}
+
 function javaExpr(code: string, ctx: JavaCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', 'new ArrayList<>()');
+  // JS Math.* / toFixed have Java spellings; one pass serves templates and bodies.
+  out = javaScalarCalls(out);
   // R296: a `{@const}` binding is a Java LOCAL, not a state read, and one that
   // had to be renamed (see the `const` case) is spelled with the name it got.
   // Runs before every pass below, so a renamed binding never reaches the
@@ -3929,6 +3947,8 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
     const cap = name.charAt(0).toUpperCase() + name.slice(1);
     out = out.replace(new RegExp(`\\bset${cap}\\s*\\(`, 'g'), `app.set("${name}", `);
   }
+  // Math.* and toFixed in a handler body, same spelling as the template path.
+  out = javaScalarCalls(out);
   out = out.replace(/\.length\b/g, '.size()');
   // `known` is consumed above: it carries the module-bind names the member-read
   // rewrite is gated on.

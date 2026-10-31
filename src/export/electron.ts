@@ -55,6 +55,10 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
     try {
       await buildProject(opts.projectRoot, staging, {});
       await copyTree(staging, distDest);
+      // `rosezm build` writes this next to the ESM bundles; the copy must carry
+      // it too, or `import(dist/server.js)` parses the module as CommonJS
+      // ("Unexpected token 'export'"). BUG BG, 2026-10-31.
+      await fs.promises.writeFile(path.join(distDest, 'package.json'), '{"type":"module"}\n', 'utf8');
       opts.warnings.push('electron: built the project from source into the export (the shell serves the static half; --api proxies the dynamic half)');
     } catch (err) {
       opts.warnings.push(`electron: the project did not build (${String((err as Error)?.message ?? err).slice(0, 120)}) - run \`rosezm build\` and re-export`);
@@ -82,7 +86,11 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
     author: app.id,
     main: 'main.cjs',
     scripts: { start: 'electron .', dev: 'electron .' },
-    devDependencies: { electron: '^31.0.0' },
+    // Electron ships Chromium; an old major means an unpatched browser inside
+    // a shipped desktop app. ^45 is the current line (checked against the npm
+    // registry), and every main/preload API this export uses is stable across
+    // majors - bump this when the line goes EOL.
+    devDependencies: { electron: '^45.0.0' },
   }, null, 2) + '\n', 'utf8');
   const pageFiles = await scanRoseFiles(opts.projectRoot);
   const compFiles = await scanComponentFiles(opts.projectRoot);
@@ -325,9 +333,45 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const url = require('node:url');
+const net = require('node:net');
 
 // R238: filled in lazily from dist/server.js when dist/index.html is absent.
 let renderPage = null;
+
+// A build that prerendered nothing still ships dist/prod.mjs - the framework's
+// own production server (styles, inlined bundle, actions, /api). Running it and
+// pointing the window at it is the whole app; the static server below serves
+// the prerendered case, and renderViaSsr is the last resort.
+function freePort() {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const port = probe.address().port;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+async function waitForProd(port) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      await fetch('http://127.0.0.1:' + port + '/');
+      return true;
+    } catch (_err) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  return false;
+}
+
+async function startProdServer() {
+  const prod = path.join(DIST, 'prod.mjs');
+  if (fs.existsSync(path.join(DIST, 'index.html')) || !fs.existsSync(prod)) return null;
+  const port = Number(process.env.ROSEZM_DESKTOP_PORT || 0) || (await freePort());
+  process.env.PORT = String(port);
+  await import(url.pathToFileURL(prod).href);
+  return (await waitForProd(port)) ? port : null;
+}
 
 // ROSEZM_API overrides the baked base without a re-export; unset, the baked value applies.
 const API_BASE = process.env.ROSEZM_API || ${JSON.stringify(apiBase)};
@@ -455,7 +499,7 @@ function proxy(req, res) {
 }
 
 function startServer(done) {
-  const server = http.createServer((req, res) => {
+  const srv = http.createServer((req, res) => {
     if (!req.url || req.method === 'OPTIONS') { res.writeHead(204).end(); return; }
     const dynamic = req.method !== 'GET' || req.url.startsWith('/api/') || req.url.startsWith('/__rosezm/');
     if (dynamic && API_BASE) { proxy(req, res); return; }
@@ -468,7 +512,7 @@ function startServer(done) {
     if (file && fs.existsSync(file) && fs.statSync(file).isFile()) { sendFile(req, res, file); return; }
     sendIndex(req, res);
   });
-  server.listen(0, '127.0.0.1', () => done(server.address().port));
+  srv.listen(0, '127.0.0.1', () => { server = srv; done(srv.address().port); });
 }
 
 let server = null;
@@ -562,21 +606,27 @@ function createWindow(port) {
   return window;
 }
 
-app.whenReady().then(() => {
-  startServer((port) => {
-    currentPort = port;
-    createWindow(port);
-    // A deep link that arrived before the server was up (open-url fires before
-    // ready on macOS) navigates now.
-    if (queuedRoute) {
-      const w = BrowserWindow.getAllWindows()[0];
-      if (w) w.loadURL('http://127.0.0.1:' + port + queuedRoute);
-      queuedRoute = null;
-    }
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow(port);
-    });
+function openWindow(port) {
+  currentPort = port;
+  createWindow(port);
+  // A deep link that arrived before the server was up (open-url fires before
+  // ready on macOS) navigates now.
+  if (queuedRoute) {
+    const w = BrowserWindow.getAllWindows()[0];
+    if (w) w.loadURL('http://127.0.0.1:' + port + queuedRoute);
+    queuedRoute = null;
+  }
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(port);
   });
+}
+
+app.whenReady().then(async () => {
+  // No prerendered document? Run the framework's own server (styles, bundle,
+  // actions all live there) instead of rendering a bare body fragment.
+  const prodPort = await startProdServer();
+  if (prodPort) openWindow(prodPort);
+  else startServer((port) => openWindow(port));
 });
 
 app.on('window-all-closed', () => {

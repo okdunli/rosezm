@@ -6,7 +6,8 @@
  * (a dependency this framework does not take) or the shape redrawn in its own
  * drawing API. This module parses the subset of SVG that logos and icons
  * actually use - `<path d>` with M/L/H/V/C/S/Q/T/Z (absolute and relative),
- * fills from inline attributes or `<style>` classes, and a `viewBox` - into
+ * `<rect>` (plain or rounded), `<circle>`, `<ellipse>` and `<polygon>`, fills
+ * from inline attributes or `<style>` classes, and a `viewBox` - into
  * ABSOLUTE drawing ops, so every emitter handles one command set.
  *
  * What it refuses: strokes, masks, filters, `<text>`, transforms on paths,
@@ -150,30 +151,96 @@ export function parseSvg(src: string): SvgParseResult {
   };
   const pathD = (attrs: string): string | null =>
     /\bd\s*=\s*"([^"]*)"/.exec(attrs)?.[1] ?? /\bd\s*=\s*'([^']*)'/.exec(attrs)?.[1] ?? null;
+  // Basic shapes become the same absolute ops a path produces: logos are full
+  // of <rect> and <circle>, and refusing them meant every native export showed
+  // a placeholder instead of the mark. Strokes stay unsupported (a fill is what
+  // the painters draw), so only closed, filled shapes are converted.
+  const attrNum = (attrs: string, name: string): number => {
+    const m = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`).exec(attrs) ?? new RegExp(`\\b${name}\\s*=\\s*'([^']*)'`).exec(attrs);
+    const v = m ? Number(m[1]) : NaN;
+    return Number.isFinite(v) ? v : 0;
+  };
+  const KAPPA = 0.5522847498307936;
+  const shapeOps = (tag: string, attrs: string): SvgOp[] | null => {
+    if (tag === 'rect') {
+      const x = attrNum(attrs, 'x'); const y = attrNum(attrs, 'y');
+      const w = attrNum(attrs, 'width'); const h = attrNum(attrs, 'height');
+      if (!w || !h) return null;
+      const rx = Math.min(attrNum(attrs, 'rx') || attrNum(attrs, 'ry') || 0, w / 2, h / 2);
+      if (!rx) return [{ op: 'move', x, y }, { op: 'line', x: x + w, y }, { op: 'line', x: x + w, y: y + h }, { op: 'line', x, y: y + h }, { op: 'close' }];
+      const k = rx * KAPPA;
+      return [
+        { op: 'move', x: x + rx, y },
+        { op: 'line', x: x + w - rx, y },
+        { op: 'curve', c1x: x + w - rx + k, c1y: y, c2x: x + w, c2y: y + rx - k, x: x + w, y: y + rx },
+        { op: 'line', x: x + w, y: y + h - rx },
+        { op: 'curve', c1x: x + w, c1y: y + h - rx + k, c2x: x + w - rx + k, c2y: y + h, x: x + w - rx, y: y + h },
+        { op: 'line', x: x + rx, y: y + h },
+        { op: 'curve', c1x: x + rx - k, c1y: y + h, c2x: x, c2y: y + h - rx + k, x, y: y + h - rx },
+        { op: 'line', x, y: y + rx },
+        { op: 'curve', c1x: x, c1y: y + rx - k, c2x: x + rx - k, c2y: y, x: x + rx, y },
+        { op: 'close' },
+      ];
+    }
+    if (tag === 'circle' || tag === 'ellipse') {
+      const cx = attrNum(attrs, 'cx'); const cy = attrNum(attrs, 'cy');
+      const rx = tag === 'circle' ? attrNum(attrs, 'r') : attrNum(attrs, 'rx');
+      const ry = tag === 'circle' ? rx : attrNum(attrs, 'ry');
+      if (!rx || !ry) return null;
+      const kx = rx * KAPPA; const ky = ry * KAPPA;
+      return [
+        { op: 'move', x: cx + rx, y: cy },
+        { op: 'curve', c1x: cx + rx, c1y: cy + ky, c2x: cx + kx, c2y: cy + ry, x: cx, y: cy + ry },
+        { op: 'curve', c1x: cx - kx, c1y: cy + ry, c2x: cx - rx, c2y: cy + ky, x: cx - rx, y: cy },
+        { op: 'curve', c1x: cx - rx, c1y: cy - ky, c2x: cx - kx, c2y: cy - ry, x: cx, y: cy - ry },
+        { op: 'curve', c1x: cx + kx, c1y: cy - ry, c2x: cx + rx, c2y: cy - ky, x: cx + rx, y: cy },
+        { op: 'close' },
+      ];
+    }
+    if (tag === 'polygon') {
+      const pts = (/\bpoints\s*=\s*"([^"]*)"/.exec(attrs)?.[1] ?? '').trim().split(/[\s,]+/).map(Number).filter((n) => Number.isFinite(n));
+      if (pts.length < 6) return null;
+      const ops: SvgOp[] = [{ op: 'move', x: pts[0], y: pts[1] }];
+      for (let i = 2; i + 1 < pts.length; i += 2) ops.push({ op: 'line', x: pts[i], y: pts[i + 1] });
+      ops.push({ op: 'close' });
+      return ops;
+    }
+    return null;
+  };
+  const shapeOf = (tag: string, attrs: string): SvgOp[] | null =>
+    tag === 'path' ? (() => { const d = pathD(attrs); return d && d.trim() ? parsePathData(d) : null; })() : shapeOps(tag, attrs);
+  const SHAPES = /<(path|rect|circle|ellipse|polygon)\b([^>]*)\/?>/g;
   let body = src;
   for (const dm of src.matchAll(/<defs[^>]*>([\s\S]*?)<\/defs>/g)) {
-    for (const pm of dm[1].matchAll(/<path\b([^>]*)\/?>/g)) {
-      const id = /\bid\s*=\s*"([^"]*)"/.exec(pm[1])?.[1];
-      const d = pathD(pm[1]);
-      if (id && d && d.trim()) {
-        const ops = parsePathData(d);
-        if (ops) {
-          const pf = pathFill(pm[1]);
-          defs.set(id, { ops, fill: pf?.fill ?? '#000000', gradient: pf?.gradient });
-        }
+    for (const pm of dm[1].matchAll(SHAPES)) {
+      const id = /\bid\s*=\s*"([^"]*)"/.exec(pm[2])?.[1];
+      if (!id) continue;
+      const ops = shapeOf(pm[1], pm[2]);
+      if (ops && ops.length) {
+        const pf = pathFill(pm[2]);
+        defs.set(id, { ops, fill: pf?.fill ?? '#000000', gradient: pf?.gradient });
       }
     }
     body = body.replace(dm[0], '');
   }
 
   const subPaths: SvgSubPath[] = [];
-  for (const m of body.matchAll(/<path\b([^>]*)\/?>/g)) {
-    const attrs = m[1];
-    const d = pathD(attrs);
-    if (!d || !d.trim()) continue;
-    const ops = parsePathData(d);
-    if (!ops) return { shape: null, reason: `a path with an unreadable "d" (${d.slice(0, 24)}...)` };
-    if (ops.length) {
+  for (const m of body.matchAll(SHAPES)) {
+    const tag = m[1];
+    const attrs = m[2];
+    if (tag === 'path') {
+      const d = pathD(attrs);
+      if (!d || !d.trim()) continue;
+      const ops = parsePathData(d);
+      if (!ops) return { shape: null, reason: `a path with an unreadable "d" (${d.slice(0, 24)}...)` };
+      if (ops.length) {
+        const pf = pathFill(attrs);
+        subPaths.push({ fill: pf?.fill ?? '#000000', gradient: pf?.gradient, ops });
+      }
+      continue;
+    }
+    const ops = shapeOps(tag, attrs);
+    if (ops && ops.length) {
       const pf = pathFill(attrs);
       subPaths.push({ fill: pf?.fill ?? '#000000', gradient: pf?.gradient, ops });
     }
@@ -193,7 +260,7 @@ export function parseSvg(src: string): SvgParseResult {
     const gradient = useFill?.gradient ?? def.gradient;
     if (ops.length) subPaths.push({ fill, gradient, ops });
   }
-  if (!subPaths.length) return { shape: null, reason: 'no drawable <path> elements' };
+  if (!subPaths.length) return { shape: null, reason: 'no drawable shapes' };
   return { shape: { viewBox: [vb[0], vb[1], vb[2], vb[3]], subPaths }, reason: null };
 }
 

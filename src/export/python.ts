@@ -747,6 +747,22 @@ def rose_text(fn):
         return str(fn())
     except Exception:
         return 'This section failed to render.'
+
+
+def rose_floor(value):
+    v = float(value or 0)
+    i = int(v)
+    return i - 1 if v < i else i
+
+
+def rose_ceil(value):
+    v = float(value or 0)
+    i = int(v)
+    return i + 1 if v > i else i
+
+
+def rose_fixed(value, digits):
+    return f'{float(value or 0):.{int(digits)}f}'
 import os
 import sys
 import urllib.error
@@ -2487,10 +2503,27 @@ function rewriteContentCallMembers(src: string): string {
   }
 }
 
+/** JS scalar calls (Math.* / toFixed) in one place: the template path and the
+ *  handler path must spell them the same way, and Python has neither a Math
+ *  namespace (max/min/abs/round are builtins, floor/ceil are kit helpers) nor
+ *  toFixed. */
+function pyMathCalls(code: string): string {
+  return code
+    .replace(/\bMath\.round\s*\(/g, 'round(')
+    .replace(/\bMath\.floor\s*\(/g, 'rose_floor(')
+    .replace(/\bMath\.ceil\s*\(/g, 'rose_ceil(')
+    .replace(/\bMath\.(max|min|abs)\s*\(/g, '$1(')
+    .replace(/\(([^()]*)\)\.toFixed\(\s*(\d+)\s*\)/g, (_m, recv: string, d: string) => `rose_fixed((${recv}), ${d})`)
+    .replace(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.toFixed\(\s*(\d+)\s*\)/g, (_m, recv: string, d: string) => `rose_fixed(${recv}, ${d})`);
+}
+
 function pyExpr(code: string, ctx: PyCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'rose_content_list', 'rose_content_get', "''");
+  // JS Math.* / toFixed have Python spellings; one pass serves templates and
+  // handler bodies alike.
+  out = pyMathCalls(out);
   // R253: `rose_content_get("docs", "getting-started").html` - the content
   // read returns a dict, and the JS property read that followed the call stayed a
   // Python attribute (AttributeError: 'dict' object has no attribute 'html').
@@ -3417,6 +3450,8 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   out = rewriteStateSetters(out, stateNames);
   // `.length` is a real Python len() now that the state reads above are dicts.
   out = rewriteLength(out, (e) => `len(${e})`);
+  // Math.* and toFixed in a handler body, same spelling as the template path.
+  out = pyMathCalls(out);
   out = out.replace(/\b(?:const|let|var)\s+/g, '');
   // JS spread has a Python spelling: [*xs] for a list, {**m} for a map.
   out = out.replace(/\{\s*\.\.\./g, '{**');

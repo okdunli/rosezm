@@ -33,7 +33,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, swiftFill, type SvgOp, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, deferBlocks, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
-import { translateExpr, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import {
@@ -1288,6 +1288,44 @@ func roseInt(_ patch: [String: Any], _ key: String, _ fallback: Int) -> Int {   
 func roseString(_ patch: [String: Any], _ key: String, _ fallback: String) -> String {
     patch[key] as? String ?? fallback
 }
+
+/// JS's String(x) has no Swift constructor: this kit helper stringifies any
+/// value (nil answers "") so a template that calls String(...) still compiles.
+func roseText(_ value: Any?) -> String {
+    if value == nil { return "" }
+    if let s = value as? String { return s }
+    return String(describing: value!)
+}
+
+/// JS Math.round/floor/ceil answer a number; these answer Int, the type most
+/// native pages declare, and accept any numeric value.
+func roseRound(_ value: Any?) -> Int {
+    if let d = value as? Double { return Int(d.rounded()) }
+    if let i = value as? Int { return i }
+    if let n = value as? NSNumber { return Int(n.doubleValue.rounded()) }
+    return 0
+}
+func roseFloor(_ value: Any?) -> Int {
+    if let d = value as? Double { return Int(d.rounded(.down)) }
+    if let i = value as? Int { return i }
+    if let n = value as? NSNumber { return Int(n.doubleValue.rounded(.down)) }
+    return 0
+}
+func roseCeil(_ value: Any?) -> Int {
+    if let d = value as? Double { return Int(d.rounded(.up)) }
+    if let i = value as? Int { return i }
+    if let n = value as? NSNumber { return Int(n.doubleValue.rounded(.up)) }
+    return 0
+}
+/// JS Number.prototype.toFixed(digits).
+func roseFixed(_ value: Any?, _ digits: Int) -> String {
+    let d: Double
+    if let v = value as? Double { d = v }
+    else if let i = value as? Int { d = Double(i) }
+    else if let n = value as? NSNumber { d = n.doubleValue }
+    else { d = 0 }
+    return String(format: "%.\(digits)f", d)
+}
 func roseBool(_ patch: [String: Any], _ key: String, _ fallback: Bool) -> Bool {
     patch[key] as? Bool ?? fallback
 }
@@ -1695,6 +1733,11 @@ struct RoseRootView: View {
 }
 
 function renderInfoPlist(app: AppIdentity, native: NativeCapability[], fonts: Array<{ family: string; file: string }> = []): string {
+  // App Store Connect refuses a second upload of one version with the same
+  // build number, and a literal "1" never moves. Derive it from the version the
+  // way Android's versionCode and HarmonyOS's versionCode already are, so one
+  // bump moves every store.
+  const buildNumber = app.version.split(/[.-]/).slice(0, 3).map((p) => Number(p) || 0).reduce((acc, n) => acc * 1000 + n, 0);
   // iOS does not deny a capability whose usage description is missing - it
   // terminates the process. The sentence is written here so the app asks, and
   // a project can still override it by writing its own Info.plist.
@@ -1744,7 +1787,7 @@ ${app.scheme ? `    <key>CFBundleURLTypes</key>
     <key>CFBundleShortVersionString</key>
     <string>${app.version}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${buildNumber}</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UILaunchScreen</key>
@@ -1762,6 +1805,8 @@ interface SwiftCtx {
   warnings: string[];
   file: string;
   stateNames: Set<string>;
+  /** `$data` field names: their member reads are JSON map reads (see swiftExpr). */
+  dataNames?: Set<string>;
   /** R191: `$derived` name -> its source expression, re-evaluated per read. */
   derivedExprs?: Map<string, string>;
   mapBinds: Set<string>;
@@ -1872,6 +1917,7 @@ function renderPage(
     warnings,
     file: page.view,
     stateNames: new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data]),
+    dataNames: new Set(facts.data),
     derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
     mapBinds: new Set(knownBinds),
     components,
@@ -2928,10 +2974,38 @@ function swiftVectorExpr(shape: SvgShape): string {
 }
 
 /** A Rose expression in SwiftUI: state reads are the local @State fields. */
+/** JS scalar calls (String / Math.* / toFixed) in one place: the template path
+ *  and the handler path must spell them the same way, and Swift has neither a
+ *  Math namespace nor a general String constructor. Math.max/min/abs map to the
+ *  Swift global functions; rounding answers Int (the type pages declare). */
+function swiftScalarCalls(code: string): string {
+  return rewriteToFixedCalls(
+    rewriteStringCalls(code, (arg) => `roseText(${arg})`)
+      .replace(/\bMath\.(round|floor|ceil)\s*\(/g, (_m, name: string) => `${name === 'round' ? 'roseRound' : name === 'floor' ? 'roseFloor' : 'roseCeil'}(`)
+      .replace(/\bMath\.(max|min|abs)\s*\(/g, (_m, name: string) => `Swift.${name}(`),
+    (recv, d) => `roseFixed(${recv}, ${d})`,
+  );
+}
+
 function swiftExpr(code: string, ctx: SwiftCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '""');
+  // `{post().title}` reads the JSON map the data channel delivers: Swift has no
+  // typed object for it, so the member chain becomes nested roseGet calls. The
+  // field itself is Any? (nil until the patch lands) and roseGet is null-safe,
+  // where a raw `post.title` on Any? does not even compile.
+  if (ctx.dataNames?.size) {
+    const names = [...ctx.dataNames].map(escapeRe).join('|');
+    out = out.replace(new RegExp(`\\b(${names})\\s*\\(\\s*\\)((?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*)+)`, 'g'), (_m, name: string, chain: string) => {
+      let expr = name;
+      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) expr = `roseGet(${expr}, "${key.replace(/^\?/, '')}")`;
+      return expr;
+    });
+  }
+  // JS String(x), Math.* and toFixed have no Swift spelling: one shared pass,
+  // so a template and a handler body can never disagree.
+  out = swiftScalarCalls(out);
   // R295: a `{@const}` renamed onto a name already in scope (see emitConst) is
   // read back through the local it was declared as. Runs first, so the pass
   // below - which only unwraps a `name()` call - never sees a stale spelling.
@@ -3028,8 +3102,10 @@ function swiftExpr(code: string, ctx: SwiftCtx): string {
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   out = out.replace(/\bundefined\b/g, 'nil');
   // Swift has no `String + int`: coerce every string-bearing `+` chain in
-  // templates so `'Item ' + name + count` runs at runtime instead of failing to compile.
-  out = coerceStringConcat(out, (e) => `String(${e})`);
+  // templates so `'Item ' + name + count` runs at runtime instead of failing to
+  // compile. String(e) is not a Swift constructor for an untyped operand -
+  // roseText accepts any value (nil answers "", like JS).
+  out = coerceStringConcat(out, (e) => `roseText(${e})`);
   return out;
 }
 
@@ -3517,7 +3593,10 @@ function translateBody(body: string, file: string, stateNames: string[], knownBi
   out = out.replace(/\brefresh\s*\(\s*\)/g, '/* refresh: the data channel reloads on navigation */');
   out = out.replace(/\bconsole\.(?:log|warn|error)\(/g, 'print(');
   out = out.replace(/\.length\b/g, '.count');
-  out = out.replace(/\bString\(/g, 'String(');
+  // JS scalar calls (String/Math/toFixed) share one spelling with the template
+  // path: a handler body with `Math.round` or `String(anyValue)` compiled to
+  // nothing but errors before this pass existed.
+  out = swiftScalarCalls(out);
   out = out.replace(/\bnull\b/g, 'nil').replace(/\bundefined\b/g, 'nil');
   out = out.replace(/'((?:[^'\\\\]|\\\\.)*)'/g, '"$1"');
   const known = new Set(stateNames);

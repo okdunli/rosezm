@@ -30,7 +30,7 @@ import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyM
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, wpfFill, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, type StringMethodSpell, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
-import { translateExpr, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
 
@@ -972,6 +972,11 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         double number => number == Math.Floor(number) ? ((long)number).ToString(CultureInfo.InvariantCulture) : number.ToString(CultureInfo.InvariantCulture),
         _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "",
     };
+
+    /// JS Number.prototype.toFixed(digits): a fixed number of decimals, the
+    /// invariant-culture spelling every locale prints the same way.
+    public static string Fixed(object? value, int digits) =>
+        Convert.ToDouble(value ?? 0, CultureInfo.InvariantCulture).ToString("F" + digits.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
 
     /**
      * JS list.join(sep) over whatever the state dictionary actually holds. WPF
@@ -3332,10 +3337,28 @@ function csRead(name: string, type: string | undefined, app: string): string {
   return `${app}.V("${name}")`;
 }
 
+/** JS scalar calls (Math.* / toFixed) in one place: the template path and the
+ *  handler path must spell them the same way. C# has Math.Max (capitalised),
+ *  rounding answers double (an int field needs the cast) and no toFixed. */
+function csScalarCalls(code: string): string {
+  return rewriteToFixedCalls(
+    code
+      .replace(/\bMath\.round\s*\(/g, '(int)Math.Round(')
+      .replace(/\bMath\.floor\s*\(/g, '(int)Math.Floor(')
+      .replace(/\bMath\.ceil\s*\(/g, '(int)Math.Ceiling(')
+      .replace(/\bMath\.abs\s*\(/g, 'Math.Abs(')
+      .replace(/\bMath\.max\s*\(/g, 'Math.Max(')
+      .replace(/\bMath\.min\s*\(/g, 'Math.Min('),
+    (recv, d) => `RoseTheme.Fixed(${recv}, ${d})`,
+  );
+}
+
 function csExpr(code: string, ctx: NetCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'RoseKit.RoseContentList', 'RoseKit.RoseContentGet', '""');
+  // JS Math.* / toFixed have C# spellings; one pass serves templates and bodies.
+  out = csScalarCalls(out);
   // R276: the four R273 constructs translate BEFORE the $-name rewrite and the
   // state-getter unwrap - a template literal's interpolation would be mangled
   // and would never fire. The state read rides the dialect's own read.
@@ -3987,6 +4010,8 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
     const cap = name.charAt(0).toUpperCase() + name.slice(1);
     out = out.replace(new RegExp(`\\bset${cap}\\s*\\(`, 'g'), `app.Set("${name}", `);
   }
+  // Math.* and toFixed in a handler body, same spelling as the template path.
+  out = csScalarCalls(out);
   // R189: a handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it - `known` was
   // even discarded (`void known`). `store.likes` reached the file verbatim,

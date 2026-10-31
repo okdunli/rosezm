@@ -436,6 +436,7 @@ try {
     assert(anKit.includes('ACTION_DIAL') && anKit.includes('FLAG_ACTIVITY_NEW_TASK'), 'android: the dial branch opens the dialer through the kit Context');
     assert(anKit.includes('VibrationEffect.createOneShot') && anKit.includes('VibratorManager'), 'android: the vibrate branch covers both the S+ and the legacy service');
     assert(anAct.includes('ROSE_NATIVE_CONTEXT = this'), 'android: MainActivity actually sets the Context the kit doc promises');
+    assert(anAct.includes('safeDrawingPadding'), 'android: the app root stays out of the system bars (targetSdk 35 draws edge-to-edge)');
     assert(anAct.includes('import dev.rosezm.app.kit.ROSE_NATIVE_CONTEXT'), 'android: the activity imports the kit context');
     // The scan-code await bridge (AGENTS.md §312, option 1): roseNative flips
     // roseScanRequested, RoseApp overlays the scanner route, and the page
@@ -1138,6 +1139,8 @@ try {
   assert(mainPages.src.includes('pages/IndexPage'), 'the home route page is registered');
   const moduleJson = JSON.parse(aread('entry/src/main/module.json5'));
   assert(moduleJson.module.mainElement === 'EntryAbility' && moduleJson.module.pages === '$profile:main_pages', 'module.json5 wires the ability and the page profile');
+  const buildProfile = JSON.parse(aread('build-profile.json5'));
+  assert(buildProfile.app.products[0].compatibleSdkVersion === '5.0.0(12)', 'arkts: the SDK floor is HarmonyOS NEXT / API 12 - the @kit imports do not exist below it');
   assert(existsSync(join(adir2, 'entry/src/main/ets/entryability/EntryAbility.ets')), 'the EntryAbility loads pages/IndexPage');
   assert(aread('entry/src/main/ets/entryability/EntryAbility.ets').includes("loadContent('pages/IndexPage'"), 'the ability loads the generated home page');
   const arkPages = walk(join(adir2, 'entry/src/main/ets/pages')).filter((f) => f.endsWith('.ets'));
@@ -1277,7 +1280,7 @@ try {
   // R130: the guestbook submit handler used to stub on FormData. The shared
   // rewriteFormReads turns it into the bound @State field and strips the web event
   // bookkeeping; Swift spells trim/truthiness/let and wraps the single-line if.
-  assert(xIndex.includes('let guest = String(name).trimmingCharacters(in: .whitespaces);') && xIndex.includes('if (!guest.isEmpty) {') && xIndex.includes('guests = [ guest ] + (guests)'), 'SwiftUI runs the guestbook submit handler through the form channel');
+  assert(xIndex.includes('let guest = roseText(name).trimmingCharacters(in: .whitespaces);') && xIndex.includes('if (!guest.isEmpty) {') && xIndex.includes('guests = [ guest ] + (guests)'), 'SwiftUI runs the guestbook submit handler through the form channel');
   assert(!/not translated \(web-only API\)/.test(xIndex.split('func signGuestbook')[1] ?? ''), 'the guestbook handler is no longer a web-only stub on SwiftUI');
   assert(xIndex.includes('.font(.system(size: 20))'), 'a <style> rule becomes a SwiftUI font modifier');
   assert(existsSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/rose.imageset/rose.png')) && xIndex.includes('Image("rose")'), 'SwiftUI copies the image into an asset catalog and renders it');
@@ -1344,6 +1347,7 @@ try {
   const eread = (rel: string) => readFileSync(join(erdir, rel), 'utf8');
   const epkg = JSON.parse(eread('package.json'));
   assert(epkg.main === 'main.cjs' && epkg.devDependencies.electron, 'electron emits a package.json with main.cjs and the electron devDependency');
+  assert(Number(/\d+/.exec(String(epkg.devDependencies.electron))?.[0] ?? 0) >= 40, 'the electron shell does not pin an EOL Chromium (major >= 40)');
   assert(existsSync(join(erdir, 'preload.cjs')), 'the shell ships a (deliberately empty) preload');
   assert(eread('main.cjs').includes('contextIsolation: true') && eread('main.cjs').includes('nodeIntegration: false'), 'the window is hardened (no Node in the renderer)');
   assert(eread('main.cjs').includes('https://api.example.com'), 'the --api base is baked into the shell for the dynamic half');
@@ -1351,6 +1355,11 @@ try {
   const checkPreload = spawnSync(process.execPath, ['--check', join(erdir, 'preload.cjs')], { encoding: 'utf8' });
   assert(checkMain.status === 0 && checkPreload.status === 0, 'the shell scripts are valid CommonJS');
   assert(existsSync(join(erdir, 'dist', 'server.js')), 'the export builds the project from source and ships its SSR server');
+  // BUG BG (2026-10-31): without dist/package.json the ESM bundles parse as
+  // CommonJS, and the fallback rendered a bare body fragment with no shell.
+  assert(readFileSync(join(erdir, 'dist', 'package.json'), 'utf8').includes('"type"'), 'the export carries dist/package.json, so the ESM server imports as a module');
+  assert(existsSync(join(erdir, 'dist', 'prod.mjs')), 'the export ships prod.mjs - the full server the shell runs when nothing was prerendered');
+  assert(eread('main.cjs').includes('startProdServer') && eread('main.cjs').includes("prod.mjs"), 'the shell prefers the full prod server over rendering a body fragment');
   assert(readFileSync(join(erdir, 'dist', 'server.js'), 'utf8').includes('renderPage'), 'the shipped server exports renderPage, which the shell calls when there is no prerendered document');
   assert(walk(join(erdir, 'dist')).every((f) => !f.endsWith('.br')), 'the brotli siblings stay out of the shell (they are for the HTTP servers)');
   // The poisoned index.html above must not be in the export: if the emitter
@@ -1416,6 +1425,80 @@ try {
     const altW = await exportProject('weapp', altProj, { apiBase: 'x', outRoot: join(scratch, 'alt-weapp') });
     const altWxml = readFileSync(join(altW.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
     assert(altWxml.includes('aria-label="Rose logo"') && !/\salt=/.test(altWxml), 'weapp: img alt becomes aria-label, not an unknown alt attribute');
+  }
+
+  // A `$data` field is a JSON map on a native build: `post().title` has to read
+  // it through the kit's null-safe getter, because a raw property read on an
+  // untyped (or nullable) value does not compile. Swift is the reference.
+  {
+    const dp = join(scratch, 'data-map-proj');
+    mkdirSync(join(dp, 'src/pages'), { recursive: true });
+    writeFileSync(join(dp, 'src/pages/index.rose'), `<script>
+  let post = $data(async () => ({ title: 't', author: { name: 'Ada' } }));
+</script>
+<h1>{post().title}</h1><p>{post().author.name}</p><p>{String(post().title)}</p>`);
+    const sx = await exportProject('xcode', dp, { apiBase: 'x', outRoot: join(scratch, 'data-map-xcode') });
+    const sxView = readFileSync(join(sx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(sxView.includes('roseGet(post, "title")') && sxView.includes('roseGet(roseGet(post, "author"), "name")'), 'xcode: a $data member chain reads the JSON map through roseGet');
+    assert(!/\bpost\.title\b/.test(sxView), 'xcode: no raw member access on the untyped data field');
+    const ka = await exportProject('android', dp, { apiBase: 'x', outRoot: join(scratch, 'data-map-android') });
+    const kaPage = readFileSync(join(ka.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(kaPage.includes('roseGet(post, "title")') && kaPage.includes('roseGet(roseGet(post, "author"), "name")'), 'android: a $data member chain reads the JSON map through roseGet');
+    const kaKit = readFileSync(join(ka.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    assert(kaKit.includes('fun roseGet('), 'android: the kit carries the null-safe map read');
+    const fl = await exportProject('flutter', dp, { apiBase: 'x', outRoot: join(scratch, 'data-map-flutter') });
+    const flPage = readFileSync(join(fl.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(flPage.includes('dynamic post() => __data["post"];') && flPage.includes('roseGet(post(), "title")'), 'flutter: a $data field is an accessor read through roseGet');
+    const ar = await exportProject('arkts', dp, { apiBase: 'x', outRoot: join(scratch, 'data-map-arkts') });
+    const arPage = readFileSync(join(ar.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(arPage.includes("roseGet(this.post, 'title')") && arPage.includes('Object | null = null'), 'arkts: a $data member chain reads the JSON map through roseGet');
+    assert(sxView.includes('roseText(roseGet(post, "title"))'), 'xcode: String(x) goes through the kit stringifier, not a nonexistent constructor');
+    assert(kaPage.includes('(roseGet(post, "title")).toString()'), 'android: String(x) becomes toString()');
+    assert(flPage.includes('(roseGet(post(), "title")).toString()'), 'flutter: String(x) becomes toString()');
+  }
+
+  // JS number spellings: Math.* and toFixed are translated for the mobile
+  // targets; number parsing from a string still has no faithful spelling there
+  // and is warned. ArkTS is TypeScript and needs neither.
+  {
+    const np = join(scratch, 'number-proj');
+    mkdirSync(join(np, 'src/pages'), { recursive: true });
+    writeFileSync(join(np, 'src/pages/index.rose'), `<script>
+  let n = $state(3);
+  function calc(): void { n = Math.round(n * 1.5); }
+</script>
+<p>{(n * 1.5).toFixed(2)}</p>
+<p>{Math.max(n, 10)}</p>
+<p>{parseInt('4')}</p>
+<button on:click={calc}>c</button>`);
+    const sxN = await exportProject('xcode', np, { apiBase: 'x', outRoot: join(scratch, 'number-xcode') });
+    const sxSrc = readFileSync(join(sxN.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(sxSrc.includes('roseRound(n * 1.5)') && sxSrc.includes('roseFixed((n * 1.5), 2)') && sxSrc.includes('Swift.max(n, 10)'), 'xcode: Math.round/toFixed/max are translated to the kit');
+    const sxWarn = (sxN.warnings ?? []).join('\n');
+    assert(/parseInt\/Number/.test(sxWarn) && !/Math\.\*/.test(sxWarn) && !/\.toFixed/.test(sxWarn), 'xcode: only the untranslated number parsing is warned');
+    const flN = await exportProject('flutter', np, { apiBase: 'x', outRoot: join(scratch, 'number-flutter') });
+    const flSrc = readFileSync(join(flN.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(flSrc.includes('roseFixed((n * 1.5), 2)') && flSrc.includes('roseMax(n, 10)') && flSrc.includes('roseRound(n * 1.5)'), 'flutter: Math/toFixed ride the kit');
+    const kaN = await exportProject('android', np, { apiBase: 'x', outRoot: join(scratch, 'number-android') });
+    const kaSrc = readFileSync(join(kaN.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(kaSrc.includes('roseRound(n * 1.5)') && kaSrc.includes('roseFixed((n * 1.5), 2)') && kaSrc.includes('maxOf(n, 10)'), 'android: Math.round/toFixed/max are translated to the kit');
+    const kaWarn = (kaN.warnings ?? []).join('\n');
+    assert(/parseInt\/parseFloat/.test(kaWarn) && !/Math\.round/.test(kaWarn), 'android: only the untranslated number parsing is warned');
+    const pyN = await exportProject('python', np, { apiBase: 'x', outRoot: join(scratch, 'number-python') });
+    const pySrc = readFileSync(join(pyN.outDir, 'pages', 'index.py'), 'utf8');
+    assert(pySrc.includes('rose_fixed((st.get(\'n\') * 1.5), 2)') && pySrc.includes("st['n'] = round(n * 1.5)"), 'python: Math.round/toFixed are translated');
+    const pyWarn = (pyN.warnings ?? []).join('\n');
+    assert(/parseInt/.test(pyWarn) && !/Math\.\*/.test(pyWarn) && !/\.toFixed/.test(pyWarn), 'python: only the untranslated parseInt is warned');
+    const csN = await exportProject('dotnet', np, { apiBase: 'x', outRoot: join(scratch, 'number-dotnet') });
+    const csSrc = readFileSync(join(csN.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(csSrc.includes('RoseTheme.Fixed(') && csSrc.includes('(int)Math.Round(') && csSrc.includes('Math.Max('), 'dotnet: Math.round/toFixed/max are translated');
+    const jvN = await exportProject('java', np, { apiBase: 'x', outRoot: join(scratch, 'number-java') });
+    const jvSrc = readFileSync(join(jvN.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(jvSrc.includes('RoseTheme.fixed(') && jvSrc.includes('(int)Math.round('), 'java: Math.round/toFixed are translated');
+    const cppN = await exportProject('cpp', np, { apiBase: 'x', outRoot: join(scratch, 'number-cpp') });
+    assert((cppN.warnings ?? []).some((w: string) => /no faithful spelling/.test(w)), 'cpp: JS number spellings are warned, not exported broken');
+    const okA = await exportProject('arkts', np, { apiBase: 'x', outRoot: join(scratch, 'number-arkts') });
+    assert(!(okA.warnings ?? []).some((w: string) => /no faithful spelling/.test(w)), 'arkts: Math/toFixed are TypeScript, so no warning fires');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.
@@ -3149,6 +3232,15 @@ try {
     assert(lin.shape!.subPaths[0].gradient!.x2 === 100, 'the gradient coordinates are in viewBox units');
     const rad = parseSvg('<svg viewBox="0 0 100 100"><defs><radialGradient id="r" cx="50" cy="50" r="40"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></radialGradient></defs><path d="M0,0 L10,10 Z" fill="url(#r)"/></svg>');
     assert(rad.shape!.subPaths[0].gradient?.type === 'radial' && rad.shape!.subPaths[0].gradient!.r === 40, 'a radialGradient resolves with its radius');
+    // Basic shapes: logos are full of <rect>/<circle>, and refusing them put a
+    // placeholder on every native export instead of the mark.
+    const basic = parseSvg('<svg viewBox="0 0 100 100"><rect x="10" y="10" width="40" height="20" fill="#ff0000"/><circle cx="70" cy="30" r="10" fill="#00ff00"/><polygon points="10,60 30,90 50,60" fill="#0000ff"/></svg>');
+    assert(basic.shape !== null && basic.shape.subPaths.length === 3, 'rect, circle and polygon parse as three subpaths');
+    assert(basic.shape!.subPaths.every((sp: { ops: Array<{ op: string }> }) => sp.ops[0].op === 'move'), 'every basic shape starts with a move');
+    assert(basic.shape!.subPaths[1].ops.filter((o: { op: string }) => o.op === 'curve').length === 4, 'a circle is four cubic segments');
+    assert(basic.shape!.subPaths[0].fill === '#ff0000' && basic.shape!.subPaths[2].fill === '#0000ff', 'each shape keeps its own fill');
+    const round = parseSvg('<svg viewBox="0 0 10 10"><rect x="0" y="0" width="10" height="10" rx="2" fill="#000000"/></svg>');
+    assert(round.shape !== null && round.shape.subPaths[0].ops.some((o: { op: string }) => o.op === 'curve'), 'a rounded rect is drawn with curves, not square corners');
   }
   // The mini-program package now ships its public rasters at the root, so a
   // page's src="/rose.png" resolves as it does on the web.
@@ -3939,7 +4031,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(/Text\(`\$\{'Row ' \+ \(this\.n\)\.toString\(\) \+ \(1\)\.toString\(\)\}`\)/.test(ets), 'ArkTS coerces a string+number chain');
     const concatX = await exportProject('xcode', concatProj, { apiBase: 'x', outRoot: join(scratch, 'concat-swift') });
     const swift = readFileSync(join(concatX.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(swift.includes('"Row " + String(n) + String(1)'), 'SwiftUI coerces a string+number chain');    const concatF = await exportProject('flutter', concatProj, { apiBase: 'x', outRoot: join(scratch, 'concat-dart') });
+    assert(swift.includes('"Row " + roseText(n) + roseText(1)'), 'SwiftUI coerces a string+number chain');    const concatF = await exportProject('flutter', concatProj, { apiBase: 'x', outRoot: join(scratch, 'concat-dart') });
     const dart = readFileSync(join(concatF.outDir, 'lib/pages/index.dart'), 'utf8');
     assert(/roseText\('\$\{'Row ' \+ \(n\)\.toString\(\) \+ \(1\)\.toString\(\)\}'/.test(dart), 'Flutter coerces a string+number chain in the template path (the handler path already did)');
     // A pure-number chain is NOT a string concat and must stay untouched.
@@ -6183,6 +6275,10 @@ h2 { font-size: 40px; }
     writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: 'Acme Widgets', version: '2.3.4', slug: 'acme-widgets' }));
     const expected: Array<[string, string, RegExp]> = [
       ['android', 'app/build.gradle.kts', /applicationId = "com\.acme\.widgets"/],
+      // API 35 is the Google Play floor; the plugin that carries it is AGP 8.6.1.
+      ['android', 'app/build.gradle.kts', /compileSdk = 35/],
+      ['android', 'app/build.gradle.kts', /targetSdk = 35/],
+      ['android', 'build.gradle.kts', /com\.android\.application"\) version "8\.6\.1"/],
       ['xcode', 'rosezmApp.xcodeproj/project.pbxproj', /PRODUCT_BUNDLE_IDENTIFIER = com\.acme\.widgets;/],
       ['arkts', 'AppScope/app.json5', /"bundleName": "com\.acme\.widgets"/],
       ['tauri', 'src-tauri/tauri.conf.json', /"identifier": "com\.acme\.widgets"/],
@@ -6212,6 +6308,11 @@ h2 { font-size: 40px; }
       // Flutter's app bar shows the same rule: the page's <title>, else the
       // app's name - never the framework's, and never a raw route path.
       ['flutter', join('lib', 'pages', 'index.dart'), /AppBar\(title: const Text\("Acme Widgets"\)\)/],
+      // iOS's build number moves with the version (2.3.4 -> 2003004), like
+      // Android's versionCode - a literal "1" refuses the second upload of the
+      // same version at App Store Connect.
+      ['xcode', join('rosezmApp', 'Info.plist'), /<key>CFBundleVersion<\/key>\s*<string>2003004<\/string>/],
+      ['xcode', join('rosezmApp', 'Info.plist'), /<key>CFBundleDisplayName<\/key>\s*<string>Acme Widgets<\/string>/],
       // The desktop window title is what the user sees in the taskbar; it is the
       // app's name, not the framework's.
       ['python', 'app.py', /self\.title\('Acme Widgets'\)/],

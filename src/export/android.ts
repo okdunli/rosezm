@@ -31,7 +31,7 @@ import { appIcon } from './app-icon.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
-import { translateExpr, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
@@ -231,7 +231,7 @@ rootProject.name = "rosezm-app"
 include(":app")
 `, 'utf8');
   await fs.promises.writeFile(path.join(out, 'build.gradle.kts'), `plugins {
-    id("com.android.application") version "8.5.2" apply false
+    id("com.android.application") version "8.6.1" apply false
     id("org.jetbrains.kotlin.android") version "1.9.24" apply false
 }
 `, 'utf8');
@@ -250,12 +250,15 @@ android {
     // deliberately different things, so the package stays fixed and only the
     // identity moves with the project.
     namespace = "${PKG}"
-    compileSdk = 34
+    // API 35 is the current Google Play floor for new apps and updates; AGP
+    // 8.6.1 is the Android Gradle plugin that carries it (Gradle 8.7+, which
+    // the shipped CI workflow installs).
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "${app.id}"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = ${versionCode}
         versionName = "${app.version}"
         // The data-channel base the kit talks to, overridable per build
@@ -1710,6 +1713,18 @@ fun roseIndex(list: Any?, index: Int): Any? {
     return l.getOrNull(index)
 }
 
+/** A $data field arrives as a JSON map: post().title reads one key of it,
+ *  null-safely (the field is null until the patch lands). */
+fun roseGet(container: Any?, key: String): Any? = (container as? Map<*, *>)?.get(key)
+
+/** JS Math.round/floor/ceil answer Int, the type pages declare. */
+fun roseRound(value: Any?): Int = kotlin.math.round((value as? Number)?.toDouble() ?: 0.0).toInt()
+fun roseFloor(value: Any?): Int = kotlin.math.floor((value as? Number)?.toDouble() ?: 0.0).toInt()
+fun roseCeil(value: Any?): Int = kotlin.math.ceil((value as? Number)?.toDouble() ?: 0.0).toInt()
+
+/** JS Number.prototype.toFixed(digits). */
+fun roseFixed(value: Any?, digits: Int): String = String.format(java.util.Locale.US, "%." + digits + "f", (value as? Number)?.toDouble() ?: 0.0)
+
 /** R287: xs.find(pred) - the first element the predicate accepts, else null. */
 fun roseFind(list: Any?, pred: (Any?) -> Boolean): Any? {
     val l = list as? List<*> ?: return null
@@ -1901,8 +1916,10 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1922,7 +1939,9 @@ ${appKotlin.global ? `        // App-level globalData (src/app.rose): one map, e
         val deepLink = ((data?.host?.let { "/" + it } ?: "") + (data?.path ?: "")).takeIf { it.startsWith("/") && it.length > 1 } ?: "/"
         setContent {
             MaterialTheme {
-                Surface {
+                // targetSdk 35: the system draws edge-to-edge, so the app must
+                // keep its own content out of the status and navigation bars.
+                Surface(modifier = Modifier.safeDrawingPadding()) {
                     RoseApp(initialRoute = deepLink)
                 }
             }
@@ -1999,6 +2018,8 @@ interface AndroidCtx {
   warnings: string[];
   file: string;
   stateNames: Set<string>;
+  /** `$data` field names: their member reads are JSON map reads (see ktExpr). */
+  dataNames?: Set<string>;
   /** R191: `$derived` name -> its source expression, re-evaluated per read. */
   derivedExprs?: Map<string, string>;
   mapBinds: Set<string>;
@@ -2126,6 +2147,7 @@ function renderPage(
     warnings,
     file: page.cls,
     stateNames: new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data]),
+    dataNames: new Set(facts.data),
     derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
     mapBinds: new Set(knownBinds),
     components,
@@ -3057,11 +3079,38 @@ function kotlinHandlerDialect(ctx: AndroidCtx): HandlerDialect {
   };
 }
 
+/** JS scalar calls (String / Math.* / toFixed) in one place: the template path
+ *  and the handler path must spell them the same way. Kotlin's Math.round
+ *  answers Long (an Int field will not take it), and Double has no toFixed. */
+function ktScalarCalls(code: string): string {
+  return rewriteToFixedCalls(
+    rewriteStringCalls(code, (arg) => `(${arg}).toString()`)
+      .replace(/\bMath\.(round|floor|ceil)\s*\(/g, (_m, name: string) => `${name === 'round' ? 'roseRound' : name === 'floor' ? 'roseFloor' : 'roseCeil'}(`)
+      .replace(/\bMath\.(max|min)\s*\(/g, (_m, name: string) => (name === 'max' ? 'maxOf(' : 'minOf('))
+      .replace(/\bMath\.abs\s*\(/g, 'kotlin.math.abs('),
+    (recv, d) => `roseFixed(${recv}, ${d})`,
+  );
+}
+
 /** A Rose expression in Kotlin/Compose: state reads are the local fields. */
 function ktExpr(code: string, ctx: AndroidCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '""');
+  // `{post().title}` reads the JSON map the data channel delivers: the field is
+  // an Any?, so the member chain becomes nested roseGet calls (null-safe) where
+  // a raw `post.title` would not compile.
+  if (ctx.dataNames?.size) {
+    const names = [...ctx.dataNames].map(escapeRe).join('|');
+    out = out.replace(new RegExp(`\\b(${names})\\s*\\(\\s*\\)((?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*)+)`, 'g'), (_m, name: string, chain: string) => {
+      let expr = name;
+      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) expr = `roseGet(${expr}, "${key.replace(/^\?/, '')}")`;
+      return expr;
+    });
+  }
+  // JS String(x), Math.* and toFixed share one pass, so a template and a
+  // handler body can never disagree on the spelling.
+  out = ktScalarCalls(out);
   // R275: the four R273 constructs translate BEFORE the `$`-name rewrite - a
   // template literal's `${name}` would be rewritten to `$rosezm_name` and the
   // interpolation would never fire (the probe showed raw backticks surviving
@@ -3581,6 +3630,8 @@ function translateBody(body: string, file: string, stateNames: string[], warning
   out = out.replace(/\.length\b/g, '.size');
   out = out.replace(/\.trim\(\)/g, '.trim()');
   out = out.replace(/\bString\(/g, '(');
+  // Math.* and toFixed in a handler body, same spelling as the template path.
+  out = ktScalarCalls(out);
   out = out.replace(/\bnull\b/g, 'null').replace(/\bundefined\b/g, 'null');
   // A JS single-quoted string literal is a Kotlin double-quoted one.
   out = out.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
