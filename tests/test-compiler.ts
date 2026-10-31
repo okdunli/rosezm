@@ -2194,6 +2194,37 @@ let echoed = $data(async () => {
   safeRm(proj, { recursive: true });
 }
 
+// BUG.md BI: a regex literal containing a quote inside its character class must
+// not flip the scanner's string state - the scanner swallowed the rest of the
+// function, so a state read after the regex shipped un-called (dead reactivity),
+// and a later local const could come out callified.
+{
+  const dir = path.join(process.cwd(), '.test-compiler-out');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'bi-regex.rose');
+  fs.writeFileSync(file, `<script>
+let q = $state('a');
+let mode = $state('off');
+function stemOf(name) {
+  const base = String(name).replace(/[\\/:*?"<>|]+/g, ' ').trim();
+  return base + q;
+}
+function pick(btn) {
+  const mode = btn ? 'on' : 'off';
+  return mode;
+}
+</script>
+<div on:click={() => $setState('q', pick(null))}>
+  <p>{stemOf(q())}</p>
+</div>
+`, 'utf-8');
+  const outBI: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'bi', false, [], new Map());
+  const srcBI: string = String(outBI.client ?? outBI.ssr ?? '');
+  check('BI: a state read after a quote-bearing regex is still callified', srcBI.includes('base + q()'), srcBI.slice(0, 400));
+  check('BI: the local const that shadows a signal stays a const', srcBI.includes('const mode = ') && !srcBI.includes('const mode()'), srcBI.slice(0, 400));
+  safeRm(file);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} compiler check(s) FAILED`);
   process.exit(1);

@@ -944,7 +944,12 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         b.start.remove();
         b.end.remove();
       }
-    } else if (root.nodeType !== 11) clearHead();
+    }
+    // BH (R492): a route with no head markers does NOT clear here. On the
+    // first paint the document head is the server's, and a dynamically
+    // rendered page ships its <style data-rosezm-head> in <head> with no
+    // body marker to rebuild it from - clearing wiped every style. The
+    // navigation path clears in __navReset, where the head is provably stale.
   }
 
   const all = (holder as Element).querySelectorAll('*');

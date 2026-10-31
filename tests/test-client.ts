@@ -93,6 +93,22 @@ const assert = (cond: boolean, msg: string) => {
   assert(!document.head.querySelector('#aq-theme'), 'AQ: clearHead still removes the adopted node');
 }
 
+// BUG.md BH (R492): a page that went dynamic - its middleware short-circuits at
+// build time - ships its <style data-rosezm-head> in the server's <head> with no
+// body marker to rebuild it from. The first wire() must leave that head alone;
+// only a navigation, where the head provably belongs to the route being left,
+// clears it.
+{
+  const { wire, clearHead } = await import('../src/runtime/index.js');
+  document.head.insertAdjacentHTML('beforeend', '<style id="bh-style" data-rosezm-head="style:bh">.bh{color:red}</style>');
+  wire(appEl, []);
+  assert(document.head.querySelector('#bh-style') !== null, 'BH: a bare wire() keeps the server head (a dynamic page keeps its styles)');
+  clearHead();
+  document.head.insertAdjacentHTML('beforeend', '<style id="bh-nav" data-rosezm-head="style:bh-nav">.x{color:red}</style>');
+  await startNotFound(appEl, '/no-such-page-bh');
+  assert(document.head.querySelector('#bh-nav') === null, 'BH: a navigation clears the stale head (the 404 paint)');
+}
+
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 const home = await renderPage('/');

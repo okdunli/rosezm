@@ -461,7 +461,15 @@ function callifyStateReads(script: string, names: string[], rename?: Record<stri
         i = end;
         continue;
       }
-      
+      // BUG.md BI: a regex is not a division. `replace(/[\/:*?"<>|]+/g, ...)`
+      // used to fall through to the quote scanner, the `"` in the class flipped
+      // string state, and a later local const came out callified.
+      if (ch === '/' && isRegexStart(src, i)) {
+        const end = skipRegexLiteral(src, i);
+        out += src.slice(i, end);
+        i = end;
+        continue;
+      }
       if (/[A-Za-z_$]/.test(ch)) {
         let j = i;
         while (j < src.length && /[\w$]/.test(src[j])) j++;
@@ -2873,6 +2881,28 @@ function isRegexStart(src: string, i: number): boolean {
   return false;
 }
 
+/**
+ * The index just past the regex literal that begins at `i` (src[i] === '/').
+ * The one skip rule every scanner shares - the brace counter, the masker and
+ * callifyStateReads - so a `"` inside a character class can never flip the
+ * quote state of any of them (BUG.md BI, F1).
+ */
+function skipRegexLiteral(src: string, i: number, limit = src.length): number {
+  let j = i + 1;
+  let inClass = false;
+  while (j < limit) {
+    const c = src[j];
+    if (c === '\\') { j += 2; continue; }
+    if (inClass) { if (c === ']') inClass = false; j++; continue; }
+    if (c === '[') { inClass = true; j++; continue; }
+    if (c === '/' || c === '\n') break;
+    j++;
+  }
+  if (src[j] === '/') j++;
+  while (j < limit && /[a-z]/.test(src[j])) j++;
+  return j;
+}
+
 function extractDecls(script: string): Decl[] {
   const decls: Decl[] = [];
   // Match on the masked copy (comments and literals blanked) but slice every
@@ -2966,18 +2996,7 @@ function braceDepthAt(src: string, index: number): number {
     }
     // Regex literal: /[&<>"']/g contains quote chars - a naive scan opens a "string" mid-regex.
     if (ch === '/' && isRegexStart(src, i)) {
-      i++;
-      let inClass = false;
-      while (i < index) {
-        const c2 = src[i];
-        if (c2 === '\\') { i += 2; continue; }
-        if (inClass) { if (c2 === ']') inClass = false; i++; continue; }
-        if (c2 === '[') { inClass = true; i++; continue; }
-        if (c2 === '/') { i++; break; }
-        if (c2 === '\n') break;
-        i++;
-      }
-      while (i < index && /[a-z]/.test(src[i])) i++;
+      i = skipRegexLiteral(src, i, index);
       continue;
     }
     if (ch === '{') depth++;
@@ -3040,18 +3059,7 @@ function maskCommentsAndStrings(src: string): string {
     }
     // Regex literal: /[&<>"']/g contains quote chars - a naive scan opens a "string" mid-regex.
     if (ch === '/' && isRegexStart(src, i)) {
-      let j = i + 1;
-      let inClass = false;
-      while (j < src.length) {
-        const c2 = src[j];
-        if (c2 === '\\') { j += 2; continue; }
-        if (inClass) { if (c2 === ']') inClass = false; j++; continue; }
-        if (c2 === '[') inClass = true;
-        else if (c2 === '/') { j++; break; }
-        else if (c2 === '\n') break;
-        j++;
-      }
-      while (j < src.length && /[a-z]/.test(src[j])) j++;
+      const j = skipRegexLiteral(src, i);
       blank(i, j);
       i = j;
       continue;
@@ -7239,7 +7247,7 @@ reportVitals();
   // plus one slice per route pattern, each a variant of this same entry.
   const clientEntryFor = (v: { imports: string; routes: string; publish: string; nav: string; notFoundTable: string; errorRender: string; prefetchDoor?: string }): string => `
 ${v.imports}
-import { state, setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, esc, applyStorePatch } from './runtime.js';
+import { state, setState, resumeState, clearRequestState, resetEffects, wire, isolateStateAsync, restoreState, setRefreshHook, clearMounts, flushMounts, adoptCleanups, handlers, setActionDispatcher, setLocales, setLocalePacks, ensureLocale, isLocale, localeDir, setPrefetchOverride, serializeState, setFxOwner, resetContainerFx, clearHead, esc, applyStorePatch } from './runtime.js';
 ${v.publish}
 ${compiled.some((c) => c.usesStore) ? `
 // Live store channel: an app that reads a shared $store() keeps one EventSource to
@@ -7530,6 +7538,10 @@ function __navReset(container) {
   if (__ownsDoc(container)) {
     resetEffects();
     clearRequestState();
+    // BH (R492): the head being cleared here belongs to the route we are
+    // leaving. wire() no longer clears on a route with no head markers - on
+    // first paint those markers may be absent while the head is real.
+    clearHead();
   } else {
     resetContainerFx(container);
   }
