@@ -723,7 +723,9 @@ function composeModifiersOf(model: StyleModel): string[] {
     const painter = local
       ? `painterResource(id = R.drawable.${local})`
       : `rememberAsyncImagePainter(${JSON.stringify(model.backgroundImage)})`;
-    out.push(`.paint(${painter}, contentScale = ContentScale.Crop)`);
+    // R483: cover fills the box, contain fits inside it.
+    const scale = model.backgroundSize === 'contain' ? 'ContentScale.Fit' : model.backgroundSize === 'auto' ? 'ContentScale.None' : 'ContentScale.Crop';
+    out.push(`.paint(${painter}, contentScale = ${scale})`);
   }
   if (model.gradient && model.gradient.stops.length >= 2) {
     const colors = model.gradient.stops.map((s) => composeColor(s.color)).join(', ');
@@ -736,6 +738,16 @@ function composeModifiersOf(model: StyleModel): string[] {
     const uniform = b[0] === b[1] && b[1] === b[2] && b[2] === b[3];
     const w = uniform ? b[0] : Math.max(...b);
     if (w > 0) out.push(`.border(${n2(w)}.dp, ${composeColor(model.borderColor)}${shape ? `, ${shape}` : ''})`);
+  }
+  // R488: the CSS transform rides Compose's own layer (translation, rotation,
+  // scale) - no wrapper composable, so layout is untouched.
+  if (model.translateX !== undefined || model.translateY !== undefined || model.rotate !== undefined || model.scale !== undefined) {
+    const parts: string[] = [];
+    if (model.translateX !== undefined) parts.push(`translationX = ${n2(model.translateX)}f`);
+    if (model.translateY !== undefined) parts.push(`translationY = ${n2(model.translateY)}f`);
+    if (model.rotate !== undefined) parts.push(`rotationZ = ${n2(model.rotate)}f`);
+    if (model.scale !== undefined) parts.push(`scaleX = ${n2(model.scale)}f`, `scaleY = ${n2(model.scale)}f`);
+    out.push(`.graphicsLayer { ${parts.join('; ')} }`);
   }
   if (model.opacity !== undefined) out.push(`.graphicsLayer { alpha = ${n2(model.opacity)}f }`);
   if (model.padding) out.push(`.padding(${composeEdgeInsets(model.padding)})`);

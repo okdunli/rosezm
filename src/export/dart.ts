@@ -606,11 +606,19 @@ function styleArgsOf(model: StyleModel): string[] {
     // as-is for a remote picture).
     const mapped = assetMap.get(model.backgroundImage) ?? model.backgroundImage;
     args.push(`image: ${JSON.stringify(mapped)}`);
+    // R483: how the picture fills its box.
+    args.push(`imageFit: ${model.backgroundSize === 'contain' ? 'BoxFit.contain' : model.backgroundSize === 'auto' ? 'BoxFit.none' : 'BoxFit.cover'}`);
+    args.push(`imageRepeat: ${model.backgroundRepeat === 'no-repeat' ? 'ImageRepeat.noRepeat' : 'ImageRepeat.repeat'}`);
   }
   if (model.gradient && model.gradient.stops.length >= 2) {
     args.push(`gradient: <Color>[${model.gradient.stops.map((s) => dartColor(s.color)).join(', ')}]`);
     args.push(`gradientAngle: ${n(model.gradient.angle)}`);
   }
+  // R488: the CSS transform, decomposed.
+  if (model.translateX !== undefined) args.push(`translateX: ${n(model.translateX)}`);
+  if (model.translateY !== undefined) args.push(`translateY: ${n(model.translateY)}`);
+  if (model.rotate !== undefined) args.push(`rotate: ${n(model.rotate)}`);
+  if (model.scale !== undefined) args.push(`scale: ${n(model.scale)}`);
   if (model.padding) args.push(`padding: ${dartEdge(model.padding)}`);
   if (model.margin) args.push(`margin: ${dartEdge(model.margin)}`);
   if (model.gap !== undefined) args.push(`gap: ${n(model.gap)}`);
@@ -694,10 +702,11 @@ class RoseStyle {
     this.color, this.fontSize, this.weight, this.fontFamily, this.italic,
     this.letterSpacing, this.lineHeight, this.align, this.transform,
     this.underline, this.strike,
-    this.background, this.gradient, this.gradientAngle, this.image,
+    this.background, this.gradient, this.gradientAngle, this.image, this.imageFit, this.imageRepeat,
     this.padding, this.margin, this.gap,
     this.border,
     this.radius, this.shadow, this.opacity,
+    this.translateX, this.translateY, this.rotate, this.scale,
     this.direction, this.wrap, this.justify, this.items, this.selfAlign,
     this.grow, this.shrink,
     this.width, this.height, this.minWidth, this.maxWidth, this.minHeight, this.maxHeight,
@@ -721,6 +730,8 @@ class RoseStyle {
   final List<Color>? gradient;
   final double? gradientAngle;
   final String? image;
+  final BoxFit? imageFit;
+  final ImageRepeat? imageRepeat;
   final EdgeInsets? padding;
   final EdgeInsets? margin;
   final double? gap;
@@ -728,6 +739,10 @@ class RoseStyle {
   final BorderRadius? radius;
   final BoxShadow? shadow;
   final double? opacity;
+  final double? translateX;
+  final double? translateY;
+  final double? rotate;
+  final double? scale;
   final String? direction;
   final bool? wrap;
   final String? justify;
@@ -808,7 +823,7 @@ class RoseStyle {
     if (background == null && gradient == null && image == null && border == null && radius == null && shadow == null) return null;
     return BoxDecoration(
       color: background,
-      image: image == null ? null : DecorationImage(image: image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!), fit: BoxFit.cover),
+      image: image == null ? null : DecorationImage(image: image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!), fit: imageFit ?? BoxFit.cover, repeat: imageRepeat ?? ImageRepeat.repeat),
       gradient: gradient == null || gradient!.length < 2
           ? null
           : LinearGradient(
@@ -1011,6 +1026,10 @@ Widget roseBox(RoseStyle? s, Widget child) {
   final ratio = s.aspectRatio;
   if (deco == null && cons == null && pad == null && mar == null && s.opacity == null && ratio == null) return child;
   Widget out = child;
+  // R488: the CSS transform, applied outside the box so padding travels with it.
+  if (s.scale != null) out = Transform.scale(scale: s.scale!, child: out);
+  if (s.rotate != null) out = Transform.rotate(angle: s.rotate! * 3.1415926535897932 / 180, child: out);
+  if (s.translateX != null || s.translateY != null) out = Transform.translate(offset: Offset(s.translateX ?? 0, s.translateY ?? 0), child: out);
   if (s.opacity != null) out = Opacity(opacity: (s.opacity ?? 1).clamp(0.0, 1.0), child: out);
   out = Container(padding: pad, margin: mar, constraints: cons, decoration: deco, child: out);
   // R420: CSS aspect-ratio is Flutter's own AspectRatio around the box.

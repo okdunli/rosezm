@@ -257,6 +257,11 @@ interface CppStyle {
   italic: boolean;
   underline: boolean;
   strike: boolean;
+  /** R484: the background picture and how it fills the box. */
+  image: string;
+  imageFit: string;
+  /** R490: `cursor: pointer`. */
+  pointer: boolean;
   /** R257: the px size constraints. 0 = unset. */
   minWidth: number;
   maxWidth: number;
@@ -359,6 +364,8 @@ function compileStyles(css: string, warnings: string[], scope?: string): Map<str
   }
   for (const [key, model] of merged) rules.set(key, cppStyleOf(model));
   if (/(^|[\s,])body\b|(^|[\s,])html\b/.test(stripped)) warnings.push('cpp: body/html rules become the window default (Qt has no document)');
+  // R489: a plain QWidget has no transform hook (only QGraphicsView items do).
+  if (/transform\s*:/i.test(stripped)) warnings.push('cpp: transform has no QWidget equivalent - the element renders untransformed');
   for (const fam of customFontFamilies(stripped)) warnings.push(`cpp: font-family '${fam}' needs a registered font family - the Qt default is used`);
   return rules;
 }
@@ -446,6 +453,10 @@ function cppStyleOf(m: StyleModel): CppStyle {
     shadowColor: m.shadow ? m.shadow.color : '',
     nowrap: m.nowrap === true,
     ellipsis: m.ellipsis === true,
+    // R484: a copied asset keeps its export-time path; a remote URL stays a URL.
+    image: m.backgroundImage ? (assetMap.get(m.backgroundImage) ?? m.backgroundImage) : '',
+    imageFit: m.backgroundSize ?? 'cover',
+    pointer: m.cursor === 'pointer',
   };
 }
 
@@ -467,7 +478,7 @@ function qssGradient(g: { angle: number; stops: Array<{ at: number; color: Color
  *  table row could not (a descendant rule, an inherited colour, style=""). */
 function cppStyleLiteral(m: StyleModel): string {
   const s = cppStyleOf(m);
-  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}}`;
+  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}`;
 }
 
 /** The typography a container hands its children: Qt has no CSS inheritance, so
@@ -488,7 +499,7 @@ function textCarry(m: StyleModel): StyleModel | null {
 }
 
 function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false): string {
-  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}}},`).join('\n');
+  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}},`).join('\n');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, which return raw JSON the same way
@@ -543,6 +554,7 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #pragma once
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QScrollArea>
 #include <QFrame>
 #include <QColor>
@@ -716,6 +728,11 @@ struct RoseStyle {
     std::string shadow_color;
     /// R415: one line (nowrap); QLabel clips without an ellipsis.
     bool nowrap = false, ellipsis = false;
+    /// R484: a CSS background picture (a copied asset path, or a remote URL).
+    std::string image;
+    std::string image_fit;
+    /// R490: cursor: pointer - Qt PointingHandCursor.
+    bool pointer = false;
 
     bool is_flex() const { return !direction.empty(); }
     /// The insets, the uniform shorthand folded into the scalar.
@@ -1694,6 +1711,20 @@ void rose_apply_box(QWidget* widget, const RoseStyle& style) {
     std::string sheet;
     if (!style.gradient.empty()) sheet += "background: " + style.gradient + ";";
     else if (!style.background.empty()) sheet += "background: " + rose_css_color(style.background) + ";";
+    // R484: Qt has no background-size; border-image is the idiom that scales the
+    // picture to the widget box (the CSS cover behaviour).
+    if (!style.image.empty()) {
+        const std::string src = style.image.rfind("http", 0) == 0
+            ? style.image
+            : (QCoreApplication::applicationDirPath() + "/" + QString::fromStdString(style.image)).toStdString();
+        if (!src.empty()) {
+            // R486: both QSS properties work, but only border-image SCALES the
+            // picture. cover wants the fill, contain/auto want the pixels at
+            // their own size, centred and unrepeated.
+            if (style.image_fit == "cover") sheet += "border-image: url(" + src + ") 0 0 0 0 stretch stretch;";
+            else sheet += "background-image: url(" + src + "); background-position: center; background-repeat: no-repeat;";
+        }
+    }
     if (style.border_width > 0 && !style.border_color.empty()) {
         sheet += "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";";
     }
@@ -1701,6 +1732,8 @@ void rose_apply_box(QWidget* widget, const RoseStyle& style) {
     // the border together, so a card is no longer a square.
     sheet += rose_radius_qss(style);
     if (!sheet.empty()) widget->setStyleSheet(QString::fromStdString(sheet));
+    // R490: the hand cursor the CSS asked for.
+    if (style.pointer) widget->setCursor(Qt::PointingHandCursor);
     if (auto* box = qobject_cast<QBoxLayout*>(widget->layout())) {
         // R257: the QSS box model has two halves - padding is inside the border
         // (the layout's own margins), margin is outside it (the layout's

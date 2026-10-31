@@ -2114,6 +2114,15 @@ try {
   const cppAll = walk(join(cdir, 'src')).filter((f) => /\.(cpp|h)$/.test(f));
   const cppBad = cppAll.filter((f) => !balancedJava(readFileSync(f, 'utf8')));
   assert(cppAll.length >= 30 && cppBad.length === 0, `every emitted C++ file is brace-balanced (${cppAll.length} files: ${cppBad.map((f) => f.split(/[\\/]/).pop()).join(', ')})`);
+  // R491: RoseStyle is a POSITIONAL aggregate - a field added in the middle
+  // silently shifted every value after it (r484 did exactly that). The gate
+  // compares the struct's declared fields with one emitted initializer.
+  {
+    const aligned = roseAggregate(cread('src/rose.h'));
+    assert(aligned.members > 0 && aligned.members === aligned.values, `Qt RoseStyle is field-aligned (${aligned.members} members vs ${aligned.values} initializer values)`);
+    const shifted = roseAggregate('struct RoseStyle {\n int a = 0;\n int b = 0;\n int c = 0;\n};\n    {"x", {1, 2}},');
+    assert(shifted.members === 3 && shifted.values === 2, 'the aggregate gate is alive: a short initializer is counted as short');
+  }
   const cppLeftovers = cppAll.filter((f) => /\$\{|\{@|\{#|RoseMap/.test(readFileSync(f, 'utf8')) && !f.endsWith('rose.h'));
   assert(cppLeftovers.length === 0, 'no template/Rose syntax survives into C++');
   assert(cread('src/pages/DeftestPage.cpp').includes('hello'), 'the shared snippet expansion reaches C++ too');
@@ -5615,7 +5624,7 @@ h2 { font-size: 40px; }
     assert(existsSync(join(ba.outDir, 'app', 'src', 'main', 'res', 'drawable', 'rose.png')), 'android: the background picture is copied');
     const bx = await exportProject('xcode', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-xcode') });
     const bxTheme = readFileSync(join(bx.outDir, 'rosezmApp', 'Kit', 'RoseTheme.swift'), 'utf8');
-    assert(bxTheme.includes('RoseStyle(image: "rose", height: 120)') && bxTheme.includes('image: "https://example.com/a.png"'), 'xcode: a background-image maps to its asset, a remote one stays a URL');
+    assert(bxTheme.includes('RoseStyle(image: "rose", imageFit: "cover", height: 120)') && bxTheme.includes('image: "https://example.com/a.png"'), 'xcode: a background-image maps to its asset, a remote one stays a URL');
     assert(existsSync(join(bx.outDir, 'rosezmApp', 'Resources', 'Assets.xcassets', 'rose.imageset')), 'xcode: the background picture is copied');
     assert(bxTheme.includes('AsyncImage(url: URL(string: img))') && bxTheme.includes('Image(img).resizable().scaledToFill()'), 'xcode: the box draws a local or remote picture');
     const bk = await exportProject('arkts', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-arkts') });
@@ -5624,6 +5633,119 @@ h2 { font-size: 40px; }
     assert(bkStyles.includes('it.image = "https://example.com/a.png";'), 'arkts: a remote background-image keeps its URL');
     assert(existsSync(join(bk.outDir, 'entry', 'src', 'main', 'resources', 'base', 'media', 'rose.png')), 'arkts: the background picture is copied');
     assert(bkStyles.includes('(it: RoseModifier) => {it.') && !/=> \{\./.test(bkStyles), 'arkts: every style row assigns, never chains (the old rows were not valid ArkTS)');
+  }
+  // R483: background-size / background-repeat reach the native picture.
+  {
+    const fitproj = join(scratch, 'bg-fit-proj');
+    mkdirSync(join(fitproj, 'src/pages'), { recursive: true });
+    mkdirSync(join(fitproj, 'public'), { recursive: true });
+    writeFileSync(join(fitproj, 'public/rose.png'), readFileSync(join(example, 'public', 'rose.png')));
+    writeFileSync(join(fitproj, 'src/pages/index.rose'), '<style>\n.hero { background-image: url(/rose.png); background-size: contain; background-repeat: no-repeat; }\n.fill { background-image: url(/rose.png); background-size: cover; }\n</style>\n<div class="hero">hi</div><div class="fill">f</div>\n');
+    const ff = await exportProject('flutter', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-flutter') });
+    const ffStyles = readFileSync(join(ff.outDir, 'lib', 'styles.dart'), 'utf8');
+    assert(ffStyles.includes('imageFit: BoxFit.contain') && ffStyles.includes('imageRepeat: ImageRepeat.noRepeat'), 'flutter: background-size and background-repeat reach the picture');
+    assert(ffStyles.includes('imageFit: BoxFit.cover'), 'flutter: the default stays cover');
+    const fx = await exportProject('xcode', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-xcode') });
+    const fxTheme = readFileSync(join(fx.outDir, 'rosezmApp', 'Kit', 'RoseTheme.swift'), 'utf8');
+    assert(fxTheme.includes('imageFit: "contain"') && fxTheme.includes('scaledToFit()'), 'xcode: contain fits the picture inside the box');
+    const fa = await exportProject('android', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-android') });
+    const faPage = readFileSync(join(fa.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(faPage.includes('contentScale = ContentScale.Fit'), 'android: contain fits the picture inside the box');
+    const fw = await exportProject('dotnet', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-dotnet') });
+    const fwTheme = readFileSync(join(fw.outDir, 'RoseTheme.cs'), 'utf8');
+    assert(fwTheme.includes('BackgroundImage = "Assets/rose.png"'), 'dotnet: the background picture is the copied asset');
+    assert(fwTheme.includes('ImageBrushOf(Image, ImageFit') && fwTheme.includes('Stretch.Uniform'), 'dotnet: the panel paints it and honors contain');
+    const fc = await exportProject('cpp', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-cpp') });
+    const fcH = readFileSync(join(fc.outDir, 'src', 'rose.h'), 'utf8');
+    const fcRow = (fcH.split('\n').find((l: string) => l.includes('"hero__Index"')) ?? '');
+    assert(fcRow.includes('"assets/rose.png"') && fcRow.includes('"contain"'), 'cpp: the style row carries the picture and its fit');
+    const fcCpp = readFileSync(join(fc.outDir, 'src', 'rose.cpp'), 'utf8');
+    assert(fcCpp.includes('border-image: url(') && fcCpp.includes('0 0 0 0 stretch stretch'), 'cpp: Qt paints it as a scaled border-image');
+    const fj = await exportProject('java', fitproj, { apiBase: 'x', outRoot: join(scratch, 'bg-fit-java') });
+    const fjTheme = readFileSync(join(fj.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseTheme.java'), 'utf8');
+    assert(fjTheme.includes('.bg("images/rose.png", "contain")'), 'java: the style row carries the copied resource and its fit');
+    assert(fjTheme.includes('class RoseImagePanel extends JPanel') && fjTheme.includes('new RoseImagePanel()'), 'java: panels paint a background picture');
+    assert(fjTheme.includes('setPicture(style.backgroundImage, style.backgroundSize)'), 'java: the resolved style reaches the panel');
+  }
+  // R486: Qt cannot scale a background to "contain", so it stops stretching and
+  // keeps the pixels centred; Tk has no image background at all and says so.
+  {
+    const qproj = join(scratch, 'qt-fit-proj');
+    mkdirSync(join(qproj, 'src/pages'), { recursive: true });
+    mkdirSync(join(qproj, 'public'), { recursive: true });
+    writeFileSync(join(qproj, 'public/rose.png'), readFileSync(join(example, 'public', 'rose.png')));
+    writeFileSync(join(qproj, 'src/pages/index.rose'), '<style>\n.hero { background-image: url(/rose.png); background-size: contain; }\n.fill { background-image: url(/rose.png); }\n</style>\n<div class="hero">hi</div><div class="fill">f</div>\n');
+    const qc = await exportProject('cpp', qproj, { apiBase: 'x', outRoot: join(scratch, 'qt-fit-cpp') });
+    const qcCpp = readFileSync(join(qc.outDir, 'src', 'rose.cpp'), 'utf8');
+    assert(qcCpp.includes('if (style.image_fit == "cover") sheet += "border-image: url(') && qcCpp.includes('background-repeat: no-repeat'), 'cpp: cover scales, contain keeps the pixels centred');
+    const qp = await exportProject('python', qproj, { apiBase: 'x', outRoot: join(scratch, 'qt-fit-python') });
+    assert((qp.warnings ?? []).some((w: string) => /no Tk equivalent/.test(w)), 'python: a background image is named, not silently dropped');
+  }
+  // R487: ArkTS rendered a hero empty on a plain-class page - the static
+  // attribute chain never carried the picture, only the runtime modifier did.
+  {
+    const aproj = join(scratch, 'ark-bg-proj');
+    mkdirSync(join(aproj, 'src/pages'), { recursive: true });
+    mkdirSync(join(aproj, 'public'), { recursive: true });
+    writeFileSync(join(aproj, 'public/rose.png'), readFileSync(join(example, 'public', 'rose.png')));
+    writeFileSync(join(aproj, 'src/pages/index.rose'), '<style>\n.hero { background-image: url(/rose.png); background-size: contain; height: 120px; }\n</style>\n<div class="hero">hi</div>\n');
+    const akb = await exportProject('arkts', aproj, { apiBase: 'x', outRoot: join(scratch, 'ark-bg-out') });
+    const akbPage = readFileSync(join(akb.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(akbPage.includes('.backgroundImage($r(\'app.media.rose\'), ImageRepeat.NoRepeat)') && akbPage.includes('backgroundImageSize(ImageSize.Contain)'), 'arkts: a plain-class page paints its background picture');
+    const akbStyles = readFileSync(join(akb.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseStyles.ets'), 'utf8');
+    assert(akbStyles.includes("it.imageFit = 'contain'") && akbStyles.includes('ImageSize.Contain'), 'arkts: the runtime row carries the fit too');
+    assert(existsSync(join(akb.outDir, 'entry', 'src', 'main', 'resources', 'base', 'media', 'rose.png')), 'arkts: the background picture is copied');
+  }
+  // R488: a CSS transform was dropped entirely. every native end has its own
+  // translate/rotate/scale, so the three ops travel as native modifiers.
+  {
+    const tproj = join(scratch, 'tr-proj');
+    mkdirSync(join(tproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(tproj, 'src/pages/index.rose'), '<style>\n.tilt { transform: rotate(-6deg) translateX(8px) scale(1.1); }\n</style>\n<div class="tilt">hi</div>\n');
+    const tf = await exportProject('flutter', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-flutter') });
+    const tfStyles = readFileSync(join(tf.outDir, 'lib', 'styles.dart'), 'utf8');
+    assert(tfStyles.includes('RoseStyle(translateX: 8, rotate: -6, scale: 1.1)'), 'flutter: the transform decomposes into the style row');
+    assert(tfStyles.includes('Transform.rotate(angle: s.rotate! *') && tfStyles.includes('Transform.scale(scale: s.scale!'), 'flutter: the box applies rotation and scale');
+    const ta = await exportProject('android', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-android') });
+    const taPage = readFileSync(join(ta.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(taPage.includes('graphicsLayer { translationX = 8f; rotationZ = -6f; scaleX = 1.1f; scaleY = 1.1f }'), 'android: the transform rides one graphicsLayer');
+    const tx = await exportProject('xcode', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-xcode') });
+    const txView = readFileSync(join(tx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(txView.includes('.offset(x: 8, y: 0).rotationEffect(.degrees(-6)).scaleEffect(1.1)'), 'xcode: the transform becomes offset/rotation/scale');
+    const tk = await exportProject('arkts', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-arkts') });
+    const tkPage = readFileSync(join(tk.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(tkPage.includes('.translate({ x: 8, y: 0 }).rotate({ angle: -6 }).scale({ x: 1.1, y: 1.1 })'), 'arkts: the transform becomes translate/rotate/scale');
+    // R489: WPF carries the transform; Qt, Swing and Tk have no hook and say so.
+    const tw = await exportProject('dotnet', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-dotnet') });
+    const twTheme = readFileSync(join(tw.outDir, 'RoseTheme.cs'), 'utf8');
+    assert(twTheme.includes('new RoseStyle { TranslateX = 8, Rotate = -6, Scale = 1.1 }'), 'dotnet: the transform reaches the style row');
+    assert(twTheme.includes('new TransformGroup()') && twTheme.includes('new RotateTransform(style.Rotate.Value)'), 'dotnet: the element gets a RenderTransform');
+    assert(twTheme.includes('element.RenderTransformOrigin = new Point(0.5, 0.5)'), 'dotnet: the transform pivots on the centre like CSS');
+    const tc = await exportProject('cpp', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-cpp') });
+    assert((tc.warnings ?? []).some((w: string) => /transform has no QWidget equivalent/.test(w)), 'cpp: a transform is named, not silently dropped');
+    const tj = await exportProject('java', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-java') });
+    assert((tj.warnings ?? []).some((w: string) => /transform has no Swing equivalent/.test(w)), 'java: a transform is named, not silently dropped');
+    const tp = await exportProject('python', tproj, { apiBase: 'x', outRoot: join(scratch, 'tr-python') });
+    assert((tp.warnings ?? []).some((w: string) => /transform has no Tk equivalent/.test(w)), 'python: a transform is named, not silently dropped');
+  }
+  // R490: `cursor: pointer` used to be a parsed-but-unused hint, so a clickable
+  // card on the desktop showed the default arrow.
+  {
+    const cproj = join(scratch, 'cursor-proj');
+    mkdirSync(join(cproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(cproj, 'src/pages/index.rose'), '<style>\n.card { cursor: pointer; padding: 12px; }\n</style>\n<div class="card">tap</div>\n');
+    const cw = await exportProject('dotnet', cproj, { apiBase: 'x', outRoot: join(scratch, 'cursor-dotnet') });
+    const cwTheme = readFileSync(join(cw.outDir, 'RoseTheme.cs'), 'utf8');
+    assert(cwTheme.includes('Cursor = "pointer"') && cwTheme.includes('element.Cursor = Cursors.Hand'), 'dotnet: a pointer cursor reaches the element');
+    const cj = await exportProject('java', cproj, { apiBase: 'x', outRoot: join(scratch, 'cursor-java') });
+    const cjTheme = readFileSync(join(cj.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseTheme.java'), 'utf8');
+    assert(cjTheme.includes('.cursor("pointer")') && cjTheme.includes('Cursor.HAND_CURSOR'), 'java: a pointer cursor reaches the widget');
+    const cp2 = await exportProject('cpp', cproj, { apiBase: 'x', outRoot: join(scratch, 'cursor-cpp') });
+    const cp2H = readFileSync(join(cp2.outDir, 'src', 'rose.h'), 'utf8');
+    assert(/"cover", true}/.test(cp2H) && readFileSync(join(cp2.outDir, 'src', 'rose.cpp'), 'utf8').includes('if (style.pointer) widget->setCursor(Qt::PointingHandCursor)'), 'cpp: a pointer cursor reaches the widget');
+    const cp3 = await exportProject('python', cproj, { apiBase: 'x', outRoot: join(scratch, 'cursor-python') });
+    const cp3Styles = readFileSync(join(cp3.outDir, 'styles.py'), 'utf8');
+    assert(cp3Styles.includes("'cursor': 'hand2'"), 'python: a pointer cursor reaches the Tk widget');
   }
   // R477: `when` is a Kotlin keyword. A state named that way used to be emitted
   // verbatim, and the whole Android page stopped compiling.
@@ -7204,6 +7326,51 @@ h2 { font-size: 40px; }
   // Windows can still hold a handle in the temp tree for a moment (antivirus,
   // a just-exited child); a cleanup failure must not turn a green run red.
   try { rmSync(scratch, { recursive: true, force: true }); } catch { /* the OS temp dir reaps it */ }
+}
+
+/** R491: how many fields a positional RoseStyle declares, and how many values its
+ *  first emitted row carries. They must match, or every field after a gap reads
+ *  its neighbour's value. */
+function roseAggregate(roseH: string): { members: number; values: number } {
+  const start = roseH.indexOf('struct RoseStyle {');
+  const end = roseH.indexOf('\n};', start);
+  const body = start >= 0 && end > start ? roseH.slice(start + 'struct RoseStyle {'.length, end) : '';
+  const members = body
+    .split(';')
+    .map((d) => d.split('\n').filter((l) => !l.trim().startsWith('///') && !l.trim().startsWith('//')).join(' ').trim())
+    .filter((d) => d && !d.includes('('))
+    .reduce((n, d) => n + splitTopLevel(d).filter((p) => /[A-Za-z_]\w*\s*=/.test(p) || /^[A-Za-z_][\w:<>,\s*]*\s+[A-Za-z_]\w*$/.test(p.trim())).length, 0);
+  const row = roseH.split('\n').find((l) => /^\s*\{"[^"]+", \{/.test(l)) ?? '';
+  const open = row.indexOf('{', row.indexOf('{') + 1);
+  const close = open >= 0 ? row.lastIndexOf('}') : -1;
+  const values = open >= 0 && close > open ? splitTopLevel(row.slice(open + 1, close)).length : 0;
+  return { members, values };
+}
+
+/** R491: split a C++ initializer/declaration list at its top level only.
+ *  Brackets and quoted text nest, so a value like `RoseValue::list({a, b})`
+ *  stays one element. */
+function splitTopLevel(src: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let cur = '';
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      cur += ch;
+      if (ch === '\\') { cur += src[i + 1] ?? ''; i++; continue; }
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    if (ch === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
 }
 
 /** Balanced braces/parens/brackets, skipping string literals and comments. */

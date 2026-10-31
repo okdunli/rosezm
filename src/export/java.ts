@@ -145,6 +145,9 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   // does - a theme addresses global class names and element selectors, so a page
   // scope would make every rule in it miss. Each page's own `<style>` is layered
   // over it again below, which is the order a browser loads the two in.
+  // R485: the asset map is filled FIRST - a style row that names a background
+  // picture resolves its copied resource path here, not the raw URL.
+  assetMap = await copyPublicAssets(root, path.join(out, 'src', 'main', 'resources', 'images'), warnings);
   if (globalCss) for (const [k, v] of compileStyles(parseStylesheet(globalCss), globalCss, warnings)) styles.set(k, v);
   for (const pg of pages) warnJavaDrops(pg.style ?? '', warnings);
   for (const pg of pages) {
@@ -163,7 +166,6 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   }
   for (const [k, v] of compileStyles(parseStylesheet(SHELL_STYLES), SHELL_STYLES, warnings)) styles.set(k, v);
   const resources = path.join(out, 'src', 'main', 'resources');
-  assetMap = await copyPublicAssets(root, path.join(resources, 'images'), warnings);
   // The markdown collections, baked at export time so a page that reads them
   // works offline - the same static generation the web build does.
   const content = bakeContent(root);
@@ -257,6 +259,11 @@ interface JavaStyle {
   basis?: number;
   /** R257: paint order within the parent, a JLayeredPane layer index. */
   zIndex?: number;
+  /** R485: a CSS background picture (a copied resource path, or a remote URL). */
+  image?: string;
+  imageFit?: string;
+  /** R490: the CSS cursor, when it is one Swing has a stock shape for. */
+  cursor?: string;
   /** R257: the corner radii, tl/tr/br/bl in px - painted by the theme's
    *  rounded Border, so a card is no longer forced rectangular. */
   radius?: [number, number, number, number];
@@ -297,6 +304,10 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
     underline: m.underline === true,
     strike: m.strike === true,
     align: m.textAlign === 'center' ? 'center' : m.textAlign === 'right' || m.textAlign === 'justify' ? 'right' : 'left',
+    // R485: the copied resource path a panel paints, and how it fills the box.
+    image: m.backgroundImage ? (assetMap.get(m.backgroundImage) ?? m.backgroundImage) : undefined,
+    imageFit: m.backgroundSize ?? 'cover',
+    cursor: m.cursor === 'pointer' ? 'pointer' : undefined,
     // The JDK's five logical font names are always available; a custom family
     // would need the font installed on the host.
     fontName: generic === 'monospace' ? 'Monospaced' : generic === 'serif' ? 'Serif' : 'SansSerif',
@@ -383,6 +394,10 @@ function styleTail(s: JavaStyle): string {
   if (s.basis !== undefined) out += `.basis(${s.basis})`;
   if (s.zIndex !== undefined) out += `.layer(${s.zIndex})`;
   if (s.radius) out += `.radius(${s.radius.join(', ')})`;
+  // R485: the background picture and how it fills the box.
+  if (s.image) out += `.bg(${JSON.stringify(s.image)}, ${JSON.stringify(s.imageFit ?? 'cover')})`;
+  // R490: `cursor: pointer` becomes the hand cursor on every widget.
+  if (s.cursor === 'pointer') out += '.cursor("pointer")';
   return out;
 }
 
@@ -501,6 +516,8 @@ function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope
     }
   }
   if (/(^|[\s,])body\b|(^|[\s,])html\b/.test(css.replace(/\/\*[\s\S]*?\*\//g, ''))) warnings.push('java: body/html rules become the frame default (Swing has no document)');
+  // R489: a Swing component has no transform hook - only a custom paint could.
+  if (/transform\s*:/i.test(css.replace(/\/\*[\s\S]*?\*\//g, ''))) warnings.push('java: transform has no Swing equivalent - the element renders untransformed');
   for (const fam of customFontFamilies(css)) warnings.push(`java: font-family '${fam}' needs a font installed on the host - the Swing default is used`);
   return rules;
 }
@@ -596,6 +613,11 @@ public final class RoseTheme {
         public final String fontName;
         public final String borderColor;
         public final int borderWidth;
+        /** R490: cursor: pointer - the hand cursor Swing draws. */
+        public String cursor;
+        /** R485: a CSS background picture (a classpath resource, or a remote URL). */
+        public String backgroundImage;
+        public String backgroundSize;
 
         public Style(int fontSize, String color, String background, int padding, boolean bold, String align, String fontName, String borderColor, int borderWidth) {
             this.fontSize = fontSize;
@@ -687,6 +709,19 @@ public final class RoseTheme {
 
         public Style radius(int tl, int tr, int br, int bl) {
             this.radius = new int[]{tl, tr, br, bl};
+            return this;
+        }
+
+        /** R490: the CSS cursor (only pointer has a stock Swing counterpart). */
+        public Style cursor(String value) {
+            this.cursor = value;
+            return this;
+        }
+
+        /** R485: a CSS background picture and how it fills the box. */
+        public Style bg(String image, String fit) {
+            this.backgroundImage = image;
+            this.backgroundSize = fit;
             return this;
         }
 
@@ -783,7 +818,9 @@ ${rows || '        // no style rules'}
      *  BoxLayout has no gap and no space-between, so the layout the CSS asked
      *  for is applied by the hand-written Flex manager below instead. */
     private static JPanel panelOf(JPanel parent, Style style, boolean horizontal) {
-        JPanel panel = new JPanel();
+        // R485: the panel is the image-capable one; a plain JPanel would need a
+        // second class at every call site.
+        JPanel panel = new RoseImagePanel();
         panel.setOpaque(false);
         if (style != null) {
             // R257: the child stamp the Flex manager reads its margins and grow
@@ -924,6 +961,10 @@ ${rows || '        // no style rules'}
         else if (style.background != null) {
             panel.setOpaque(true);
             panel.setBackground(color(style.background));
+        }
+        // R485: a background picture paints under the children, over the fill.
+        if (style.backgroundImage != null && panel instanceof RoseImagePanel) {
+            ((RoseImagePanel) panel).setPicture(style.backgroundImage, style.backgroundSize);
         }
         // R257: the min/max box and the layered z-order a panel's style pinned.
         if (style.minWidth > 0 || style.minHeight > 0) {
@@ -1111,6 +1152,9 @@ ${rows || '        // no style rules'}
      *  painter, so the style is handed to the one that fits. */
     public static void apply(JComponent widget, Style style) {
         if (widget == null || style == null) return;
+        // R490: the hand cursor follows the style, so a clickable card shows one
+        // without the author spelling a button.
+        if ("pointer".equals(style.cursor)) widget.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         if (widget instanceof JButton button) applyButton(button, style);
         else if (widget instanceof JLabel label) applyLabel(label, style);
         else if (widget instanceof JPanel panel) applyBox(panel, style);
@@ -1931,6 +1975,44 @@ ${rows || '        // no style rules'}
         line.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
         parent.add(line);
         return line;
+    }
+}
+
+/** R485: a panel that paints a CSS background picture under its children.
+ *  cover fills and crops, contain fits inside, auto keeps the pixels. */
+public static final class RoseImagePanel extends JPanel {
+    private java.awt.Image picture;
+    private String fit = "cover";
+
+    public void setPicture(String resource, String fit) {
+        this.fit = fit == null ? "cover" : fit;
+        this.picture = null;
+        if (resource == null || resource.isEmpty()) return;
+        try {
+            java.net.URL url = resource.startsWith("http")
+                ? new java.net.URL(resource)
+                : RoseTheme.class.getResource("/" + resource);
+            if (url != null) this.picture = javax.imageio.ImageIO.read(url);
+        } catch (Exception ignored) {
+            // A missing picture keeps the fill; the export named it already.
+        }
+        repaint();
+    }
+
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        if (picture == null) return;
+        int iw = picture.getWidth(null), ih = picture.getHeight(null);
+        int w = getWidth(), h = getHeight();
+        if (iw <= 0 || ih <= 0 || w <= 0 || h <= 0) return;
+        double scale = "contain".equals(fit) ? Math.min((double) w / iw, (double) h / ih)
+            : "auto".equals(fit) ? 1.0
+            : Math.max((double) w / iw, (double) h / ih);
+        int dw = (int) Math.round(iw * scale), dh = (int) Math.round(ih * scale);
+        Graphics2D g2 = (Graphics2D) g.create();
+        g2.drawImage(picture, (w - dw) / 2, (h - dh) / 2, dw, dh, null);
+        g2.dispose();
     }
 }
 

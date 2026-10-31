@@ -593,6 +593,10 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
   }
   if (model.shadow) out.push(`.shadow(color: Color.rose(${JSON.stringify(hexOf(model.shadow.color))}), radius: ${n(model.shadow.blur)}, x: ${n(model.shadow.x)}, y: ${n(model.shadow.y)})`);
   if (model.opacity !== undefined) out.push(`.opacity(${n(model.opacity)})`);
+  // R488: the CSS transform as SwiftUI's own three modifiers.
+  if (model.translateX !== undefined || model.translateY !== undefined) out.push(`.offset(x: ${n(model.translateX ?? 0)}, y: ${n(model.translateY ?? 0)})`);
+  if (model.rotate !== undefined) out.push(`.rotationEffect(.degrees(${n(model.rotate)}))`);
+  if (model.scale !== undefined) out.push(`.scaleEffect(${n(model.scale)})`);
   // R420: CSS aspect-ratio is SwiftUI's own aspectRatio modifier.
   if (model.aspectRatio !== undefined) out.push(`.aspectRatio(${n(model.aspectRatio)}, contentMode: .fit)`);
   if (model.width && model.width.u !== 'auto') {
@@ -638,6 +642,8 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
     // R475: an asset name for a copied picture; a remote URL stays a URL.
     const mapped = swiftMedia.get(model.backgroundImage) ?? model.backgroundImage;
     args.push(`image: ${q(mapped)}`);
+    // R483: cover fills the box, contain fits inside it.
+    args.push(`imageFit: ${model.backgroundSize === 'contain' ? '"contain"' : '"cover"'}`);
   }
   if (model.gradient && model.gradient.stops.length >= 2) args.push(`gradient: [${model.gradient.stops.map((s) => q(s.color)).join(', ')}]`);
   if (model.fontSize !== undefined) args.push(`fontSize: ${n(model.fontSize)}`);
@@ -671,6 +677,10 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
     args.push(`shadowColor: ${q(model.shadow.color)}`);
   }
   if (model.opacity !== undefined) args.push(`opacity: ${n(model.opacity)}`);
+  if (model.translateX !== undefined) args.push(`translateX: ${n(model.translateX)}`);
+  if (model.translateY !== undefined) args.push(`translateY: ${n(model.translateY)}`);
+  if (model.rotate !== undefined) args.push(`rotate: ${n(model.rotate)}`);
+  if (model.scale !== undefined) args.push(`scale: ${n(model.scale)}`);
   // A percentage size needs a viewport the runtime does not have; the static
   // path honours it, and px reaches the runtime table.
   if (model.width && model.width.u === 'px') args.push(`width: ${n(model.width.n)}`);
@@ -731,6 +741,7 @@ struct RoseStyle {
     var color: String? = nil
     var background: String? = nil
     var image: String? = nil
+    var imageFit: String = "cover"
     var gradient: [String]? = nil
     var fontSize: Double? = nil
     var weight: Int? = nil
@@ -751,6 +762,10 @@ struct RoseStyle {
     var shadowBlur: Double? = nil
     var shadowColor: String? = nil
     var opacity: Double? = nil
+    var translateX: Double? = nil
+    var translateY: Double? = nil
+    var rotate: Double? = nil
+    var scale: Double? = nil
     var width: Double? = nil
     var height: Double? = nil
     var hidden: Bool = false
@@ -766,6 +781,7 @@ struct RoseStyle {
         if let v = o.color { m.color = v }
         if let v = o.background { m.background = v }
         if let v = o.image { m.image = v }
+        if let v = o.imageFit { m.imageFit = v }
         if let v = o.gradient { m.gradient = v }
         if let v = o.fontSize { m.fontSize = v }
         if let v = o.weight { m.weight = v }
@@ -786,6 +802,10 @@ struct RoseStyle {
         if let v = o.shadowBlur { m.shadowBlur = v }
         if let v = o.shadowColor { m.shadowColor = v }
         if let v = o.opacity { m.opacity = v }
+        if let v = o.translateX { m.translateX = v }
+        if let v = o.translateY { m.translateY = v }
+        if let v = o.rotate { m.rotate = v }
+        if let v = o.scale { m.scale = v }
         if let v = o.width { m.width = v }
         if let v = o.height { m.height = v }
         if o.hidden { m.hidden = true }
@@ -1006,13 +1026,21 @@ struct RoseCorners: Shape {
         if img.hasPrefix("http") {
             AsyncImage(url: URL(string: img)) { phase in
                 if let picture = phase.image {
-                    picture.resizable().scaledToFill().clipped()
+                    if (s?.imageFit ?? "cover") == "contain" {
+                        picture.resizable().scaledToFit()
+                    } else {
+                        picture.resizable().scaledToFill().clipped()
+                    }
                 } else {
                     Color.clear
                 }
             }
         } else {
-            Image(img).resizable().scaledToFill().clipped()
+            if (s?.imageFit ?? "cover") == "contain" {
+                Image(img).resizable().scaledToFit()
+            } else {
+                Image(img).resizable().scaledToFill().clipped()
+            }
         }
     } else if let g = s?.gradient, g.count >= 2 {
         LinearGradient(colors: g.map { Color.rose($0) }, startPoint: .top, endPoint: .bottom)
@@ -1048,6 +1076,9 @@ struct RoseBoxMod: ViewModifier {
             .clipShape(roseShapeOf(s?.radius))
             .shadow(color: (s?.shadowColor).map { Color.rose($0) } ?? .clear, radius: s?.shadowBlur ?? 0, x: s?.shadowX ?? 0, y: s?.shadowY ?? 0)
             .opacity(s?.opacity ?? 1)
+            .offset(x: CGFloat(s?.translateX ?? 0), y: CGFloat(s?.translateY ?? 0))
+            .rotationEffect(.degrees(s?.rotate ?? 0))
+            .scaleEffect(CGFloat(s?.scale ?? 1))
             .frame(width: (s?.width).map { CGFloat($0) }, height: (s?.height).map { CGFloat($0) })
             .padding(roseEdges(s?.margin))
     }

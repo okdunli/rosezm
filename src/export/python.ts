@@ -174,6 +174,14 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
     ...pages.flatMap((pg) => compileStyles([pg.style, compCss].filter((s) => s && s.trim()).join('\n'), warnings, pg.name)),
     ...compileStyles(SHELL_STYLES, warnings),
   ];
+  // R486: Tk has no image background (a Frame paints a colour only). Name it,
+  // so a hero that looked right on the web does not silently come out empty.
+  const cssAll = [globalCss, ...pages.map((pg) => pg.style ?? ''), ...components.map((c) => c.style ?? '')].join('\n');
+  if (/background-image\s*:/i.test(cssAll)) {
+    warnings.push('python: background-image has no Tk equivalent - the box keeps its colour; use an <img> for the picture');
+  }
+  // R489: Tk widgets take no transform.
+  if (/transform\s*:/i.test(cssAll)) warnings.push('python: transform has no Tk equivalent - the element renders untransformed');
   // R248: the hover entries, so each page's element pass can tell which of its
   // classes carry a :hover half (the same set STYLES carries at runtime).
   const hoverStyles = new Map(styles.filter((s) => s.className.startsWith('__hover_')).map((s) => [s.className, s.model]));
@@ -339,6 +347,8 @@ function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value:
     out.push({ key: 'highlightbackground', value: tkColor(m.borderColor ?? '#cccccc') ?? "'#cccccc'" });
     out.push({ key: 'highlightthickness', value: String(Math.max(...m.borderWidth)) });
   }
+  // R490: `cursor: pointer` is Tk's own 'hand2'.
+  if (m.cursor === 'pointer') out.push({ key: 'cursor', value: "'hand2'" });
   if (m.textAlign) {
     out.push({ key: 'justify', value: `'${m.textAlign === 'center' ? 'center' : m.textAlign === 'right' ? 'right' : 'left'}'` });
   }
@@ -348,8 +358,8 @@ function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value:
 /** Tk widgets do not all accept the same options: a Frame has no font. */
 function filterDecls(decls: Array<{ key: string; value: string }>, kind: 'Frame' | 'Label' | 'Button' | 'Entry' | 'Text' | 'Scale'): Array<{ key: string; value: string }> {
   const allowed: Record<string, string[]> = {
-    Frame: ['bg', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'width', 'height'],
-    Label: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'justify', 'wraplength', 'width', 'height'],
+    Frame: ['bg', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'width', 'height', 'cursor'],
+    Label: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'justify', 'wraplength', 'width', 'height', 'cursor'],
     Button: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'justify', 'state'],
     Entry: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'justify'],
     Text: ['bg', 'fg', 'font', 'padx', 'pady', 'highlightbackground', 'highlightthickness', 'wrap'],

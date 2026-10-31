@@ -295,6 +295,14 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
   if (model.underline !== undefined) put('Underline', model.underline ? 'true' : 'false');
   if (model.strike !== undefined) put('Strike', model.strike ? 'true' : 'false');
   if (model.background) put('Background', JSON.stringify(model.background));
+  if (model.cursor === 'pointer') put('Cursor', '"pointer"');
+  if (model.translateX !== undefined) put('TranslateX', csNum(model.translateX));
+  if (model.translateY !== undefined) put('TranslateY', csNum(model.translateY));
+  if (model.rotate !== undefined) put('Rotate', csNum(model.rotate));
+  if (model.scale !== undefined) put('Scale', csNum(model.scale));
+  // R484: a background picture travels as the asset path every other target uses.
+  if (model.backgroundImage) put('BackgroundImage', JSON.stringify(assetMap.get(model.backgroundImage) ?? model.backgroundImage));
+  if (model.backgroundSize) put('BackgroundSize', JSON.stringify(model.backgroundSize));
   if (model.gradient) {
     const stops = model.gradient.stops.map((s) => JSON.stringify(`${csNum(s.at)}:${s.color}`)).join(', ');
     put('Gradient', `new RoseGradient(${csNum(model.gradient.angle)}, new[] { ${stops} })`);
@@ -467,6 +475,16 @@ public sealed class RoseStyle
     public bool? Ellipsis;
     /* colour and box */
     public string? Background;
+    /// <summary>R490: cursor: pointer - the hand the desktop shells draw.</summary>
+    public string? Cursor;
+    /// <summary>R489: the CSS transform, decomposed into the three ops.</summary>
+    public double? TranslateX;
+    public double? TranslateY;
+    public double? Rotate;
+    public double? Scale;
+    /// <summary>R484: a CSS background picture, resolved to the copied asset path.</summary>
+    public string? BackgroundImage;
+    public string? BackgroundSize;
     public RoseGradient? Gradient;
     public double[]? Padding;
     public double[]? Margin;
@@ -521,6 +539,9 @@ public class RosePanel : Panel
     public string? StrokeColor;
     public string? StrokeStyle;
     public RoseShadow? Shadow;
+    /// <summary>R484: a CSS background picture (a copied asset path, or a remote URL).</summary>
+    public string? Image;
+    public string? ImageFit;
     public bool ClipContent;
     public RoseStyle? HoverStyle;
 
@@ -772,6 +793,18 @@ public class RosePanel : Panel
             dc.DrawRoundedRectangle(brushBody, null, body,
                 radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft);
         }
+        // R484: the background picture is drawn under the content, clipped to the
+        // panel's own rounded box - CSS paints it over the colour, under the text.
+        if (Image != null)
+        {
+            var brush = RoseTheme.ImageBrushOf(Image, ImageFit, width, height);
+            if (brush != null)
+            {
+                dc.PushClip(new RectangleGeometry(body, radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft));
+                dc.DrawRectangle(brush, null, body);
+                dc.Pop();
+            }
+        }
 
         var strokeWidths = hover?.BorderWidth ?? StrokeWidth;
         var strokeColor = hover?.BorderColor ?? StrokeColor;
@@ -933,6 +966,13 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (source.Underline != null) target.Underline = source.Underline;
         if (source.Strike != null) target.Strike = source.Strike;
         if (source.Background != null) target.Background = source.Background;
+        if (source.Cursor != null) target.Cursor = source.Cursor;
+        if (source.TranslateX != null) target.TranslateX = source.TranslateX;
+        if (source.TranslateY != null) target.TranslateY = source.TranslateY;
+        if (source.Rotate != null) target.Rotate = source.Rotate;
+        if (source.Scale != null) target.Scale = source.Scale;
+        if (source.BackgroundImage != null) target.BackgroundImage = source.BackgroundImage;
+        if (source.BackgroundSize != null) target.BackgroundSize = source.BackgroundSize;
         if (source.Gradient != null) target.Gradient = source.Gradient;
         if (source.Padding != null) target.Padding = source.Padding;
         if (source.Margin != null) target.Margin = source.Margin;
@@ -1080,6 +1120,26 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         catch { return Color.FromRgb(0x22, 0x22, 0x22); }
     }
 
+    /// R484: a background picture as a brush. A copied asset lives next to the
+    /// exe (Assets/…), a remote URL downloads through BitmapImage.
+    public static ImageBrush? ImageBrushOf(string src, string? fit, double width, double height)
+    {
+        BitmapImage bitmap;
+        try
+        {
+            bitmap = src.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                ? new BitmapImage(new Uri(src))
+                : new BitmapImage(new Uri(System.IO.Path.Combine(AppContext.BaseDirectory, src)));
+        }
+        catch { return null; }
+        return new ImageBrush(bitmap)
+        {
+            Stretch = fit == "contain" ? Stretch.Uniform : fit == "auto" ? Stretch.None : Stretch.UniformToFill,
+            AlignmentX = AlignmentX.Center,
+            AlignmentY = AlignmentY.Center,
+        };
+    }
+
     public static Brush? BrushOf(string? fill, RoseGradient? gradient)
     {
         if (gradient != null && gradient.Stops.Length > 0)
@@ -1107,6 +1167,19 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     public static void Apply(FrameworkElement element, RoseStyle? style)
     {
         if (style == null) return;
+        // R490: cursor: pointer is the hand cursor - WPF has it natively.
+        if (style.Cursor == "pointer") element.Cursor = Cursors.Hand;
+        // R489: the CSS transform. WPF carries it on every FrameworkElement, so
+        // one TransformGroup covers panels, labels, buttons and borders alike.
+        if (style.Rotate != null || style.Scale != null || style.TranslateX != null || style.TranslateY != null)
+        {
+            var group = new TransformGroup();
+            if (style.Scale != null) group.Children.Add(new ScaleTransform(style.Scale.Value, style.Scale.Value));
+            if (style.Rotate != null) group.Children.Add(new RotateTransform(style.Rotate.Value));
+            if (style.TranslateX != null || style.TranslateY != null) group.Children.Add(new TranslateTransform(style.TranslateX ?? 0, style.TranslateY ?? 0));
+            element.RenderTransform = group;
+            element.RenderTransformOrigin = new Point(0.5, 0.5);
+        }
         if (element is RoseButton button)
         {
             ApplyBorder(button, style);
@@ -1130,6 +1203,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (style.Padding != null) panel.Pad = style.Padding;
         if (style.Background != null) panel.Fill = style.Background;
         if (style.Gradient != null) panel.Shade = style.Gradient;
+        if (style.BackgroundImage != null) panel.Image = style.BackgroundImage;
+        if (style.BackgroundSize != null) panel.ImageFit = style.BackgroundSize;
         if (style.Radius != null) panel.Radii = style.Radius;
         if (style.BorderWidth != null) panel.StrokeWidth = style.BorderWidth;
         if (style.BorderColor != null) panel.StrokeColor = style.BorderColor;

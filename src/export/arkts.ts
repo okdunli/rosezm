@@ -450,6 +450,15 @@ function arkJustifyOf(j: Justify): string {
 function arkBoxMods(m: StyleModel): string[] {
   const mods: string[] = [];
   if (m.background) mods.push(`.backgroundColor('${arkColor(m.background)}')`);
+  // R487: the static chain never carried a background picture - only the runtime
+  // modifier did, so a page with plain classes rendered the hero empty.
+  if (m.backgroundImage) {
+    const local = arkMedia.get(m.backgroundImage);
+    const src = local ? `$r('app.media.${local}')` : JSON.stringify(m.backgroundImage);
+    // R487: cover/contain/auto are ArkUI's own ImageSize values.
+    const size = m.backgroundSize === 'contain' ? 'Contain' : m.backgroundSize === 'auto' ? 'Auto' : 'Cover';
+    mods.push(`.backgroundImage(${src}, ImageRepeat.NoRepeat).backgroundImageSize(ImageSize.${size})`);
+  }
   if (m.gradient) {
     const stops = m.gradient.stops.map((s) => `['${arkColor(s.color)}', ${Math.round(s.at) / 100}]`).join(', ');
     mods.push(`.linearGradient({ angle: ${m.gradient.angle}, colors: [${stops}] })`);
@@ -461,6 +470,10 @@ function arkBoxMods(m: StyleModel): string[] {
     const style = m.borderStyle === 'dashed' ? 'BorderStyle.Dashed' : m.borderStyle === 'dotted' ? 'BorderStyle.Dotted' : 'BorderStyle.Solid';
     mods.push(`.border({ width: { top: ${w[0]}, right: ${w[1]}, bottom: ${w[2]}, left: ${w[3]} }, color: '${arkColor(m.borderColor ?? '#e0e0e0')}', style: ${style} })`);
   }
+  // R488: the CSS transform, three ArkUI attributes.
+  if (m.translateX !== undefined || m.translateY !== undefined) mods.push(`.translate({ x: ${m.translateX ?? 0}, y: ${m.translateY ?? 0} })`);
+  if (m.rotate !== undefined) mods.push(`.rotate({ angle: ${m.rotate} })`);
+  if (m.scale !== undefined) mods.push(`.scale({ x: ${m.scale}, y: ${m.scale} })`);
   if (m.radius) {
     const [tl, tr, br, bl] = m.radius;
     mods.push(tl === tr && tr === br && br === bl
@@ -569,6 +582,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
     if (m.backgroundImage) {
       const local = arkMedia.get(m.backgroundImage);
       out.push(`it.image = ${local ? `$r('app.media.${local}')` : JSON.stringify(m.backgroundImage)};`);
+      out.push(`it.imageFit = '${m.backgroundSize ?? 'cover'}';`);
     }
     if (m.color) out.push(`it.color = '${arkColor(m.color)}';`);
     if (m.fontSize !== undefined) out.push(`it.fontSize = ${m.fontSize};`);
@@ -1422,7 +1436,10 @@ export function roseModifier(tag: string, classes: string[], scope: string, prop
       if (m.radius) instance.borderRadius(m.radius);
       if (m.borderWidth) instance.border({ width: m.borderWidth, color: m.borderColor || '#e0e0e0' });
       // R476: the CSS background picture.
-      if (m.image) instance.backgroundImage(m.image, ImageRepeat.NoRepeat);
+      if (m.image) {
+        instance.backgroundImage(m.image, ImageRepeat.NoRepeat);
+        instance.backgroundImageSize(m.imageFit === 'contain' ? ImageSize.Contain : m.imageFit === 'auto' ? ImageSize.Auto : ImageSize.Cover);
+      }
     }
   };
 }
@@ -1437,6 +1454,7 @@ function renderRoseModifier(): string {
 export class RoseModifier {
   backgroundColor: string = '';
   image: ResourceStr = '';
+  imageFit: string = 'cover';
   color: string = '';
   fontSize: number = 0;
   fontWeight: number = 0;
@@ -1461,6 +1479,7 @@ export class RoseModifier {
       case 'border-width': this.borderWidth = parseFloat(value) || 0; break;
       case 'border-color': this.borderColor = value; break;
       case 'background-image': this.image = value; break;
+      case 'background-image-fit': this.imageFit = value; break;
     }
   }
 }

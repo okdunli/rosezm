@@ -93,6 +93,18 @@ export interface StyleModel {
   ellipsis?: boolean;
   /** R418: object-fit for a replaced element (an image). */
   objectFit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+  /** R483: how a background picture fills its box. */
+  backgroundSize?: 'cover' | 'contain' | 'auto';
+  /** R483: where the background picture sits in its box. */
+  backgroundPosition?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+  /** R483: whether the background picture repeats. */
+  backgroundRepeat?: 'repeat' | 'no-repeat';
+  /** R488: a CSS transform, decomposed into the three ops a native toolkit has. */
+  translateX?: number;
+  translateY?: number;
+  /** Degrees, clockwise - CSS's own direction. */
+  rotate?: number;
+  scale?: number;
   /** R420: the width/height ratio a box keeps as it sizes. */
   aspectRatio?: number;
   /* colour and box */
@@ -610,6 +622,50 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
     }
     case 'text-overflow': {
       model.ellipsis = /ellipsis/i.test(v);
+      return true;
+    }
+    case 'transform': {
+      // R488: translate/rotate/scale are what every native toolkit can say. A
+      // matrix()/3d form is left to the warning path: no target has the matrix.
+      const ops = /\b(translate|translateX|translateY|rotate|scale)\s*\(([^)]*)\)/gi;
+      let found = false;
+      for (const m of v.matchAll(ops)) {
+        const kind = m[1].toLowerCase();
+        const args = m[2].split(',').map((a) => a.trim()).filter(Boolean);
+        const num = (a: string | undefined): number => {
+          if (!a) return 0;
+          const px = /^(-?[\d.]+)(px)?$/.exec(a);
+          if (px) return Number(px[1]);
+          const deg = /^(-?[\d.]+)deg$/.exec(a);
+          if (deg) return Number(deg[1]);
+          return 0;
+        };
+        if (kind === 'translate') {
+          model.translateX = num(args[0]);
+          model.translateY = num(args[1]);
+        } else if (kind === 'translatex') model.translateX = num(args[0]);
+        else if (kind === 'translatey') model.translateY = num(args[0]);
+        else if (kind === 'rotate') model.rotate = num(args[0]);
+        else if (kind === 'scale') model.scale = args.length > 1 ? num(args[1]) : num(args[0]);
+        found = true;
+      }
+      if (!found) warnings?.add?.('transform');
+      return true;
+    }
+    case 'background-size': {
+      // R483: cover/contain/auto are the three values a native toolkit can say.
+      const size = v.trim().toLowerCase();
+      if (size === 'cover' || size === 'contain' || size === 'auto') model.backgroundSize = size;
+      return true;
+    }
+    case 'background-position': {
+      const pos = v.trim().toLowerCase();
+      if (/^(center|top|bottom|left|right)/.test(pos)) model.backgroundPosition = pos.split(/\s+/)[0] as 'center' | 'top' | 'bottom' | 'left' | 'right';
+      return true;
+    }
+    case 'background-repeat': {
+      const rep = v.trim().toLowerCase();
+      if (rep === 'repeat' || rep === 'no-repeat') model.backgroundRepeat = rep;
       return true;
     }
     case 'object-fit': {
