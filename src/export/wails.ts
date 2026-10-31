@@ -34,7 +34,7 @@ import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { nativeUsage, type NativeCapability } from './native-api.js';
-import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, writeShellBridge } from './desktop-shell.js';
+import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 
 /** The target label: this shell's own directory, and the prefix of every
  *  warning it pushes (they arrive in one flat list for the whole export). */
@@ -81,6 +81,7 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   // before it is written.
   const native: NativeCapability[] = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
   await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`${LABEL}: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   await fs.promises.writeFile(path.join(out, 'wails.json'), JSON.stringify(wailsJson(app), null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'go.mod'), goMod(app), 'utf8');

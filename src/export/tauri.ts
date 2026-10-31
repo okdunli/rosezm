@@ -34,7 +34,7 @@ import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { nativeUsage } from './native-api.js';
-import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, writeShellBridge } from './desktop-shell.js';
+import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 
 export interface EmitTauriOptions {
   projectRoot: string;
@@ -71,6 +71,7 @@ export async function emitTauri(opts: EmitTauriOptions): Promise<{ pages: string
   // After the site and the documents: the bridge is written INTO the frontend
   // and linked from every HTML document, so it is the first thing the page runs.
   await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`tauri: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   const tauriDir = path.join(out, 'src-tauri');
   await fs.promises.mkdir(path.join(tauriDir, 'icons'), { recursive: true });

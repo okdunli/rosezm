@@ -248,6 +248,27 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     });
   }
 
+  // App-level script (uniapp's App.vue parity): `src/app.rose` with exported
+  // onLaunch/onShow/onHide/onError handlers and a `globalData` declaration,
+  // compiled into the emitted App({...}). Template nodes are ignored - the
+  // app scope has no UI of its own.
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appLifecycle: AppLifecycle | null = null;
+  if (fs.existsSync(appRosePath)) {
+    const parsedApp = parseRose(await fs.promises.readFile(appRosePath, 'utf8'), appRosePath, opts.target);
+    warnings.push(...parsedApp.warnings);
+    if (parsedApp.nodes.length) {
+      warnings.push(`${opts.target}: src/app.rose carries template nodes - the app scope has no UI, only the script's lifecycle exports are used`);
+    }
+    if (parsedApp.script) {
+      // The script is TypeScript (page scripts are too); esbuild strips the
+      // annotations before the lifecycle regexes look at it, so App({...})
+      // emits plain JS the mini-program runtime accepts.
+      const plain = transformSync(parsedApp.script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      appLifecycle = extractAppLifecycle(plain);
+    }
+  }
+
   const comps: ComponentFile[] = [];
   for (const file of compFiles) {
     const parsed = parseRose(await fs.promises.readFile(file, 'utf8'), file, opts.target);
@@ -531,7 +552,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
       warnings.push(`weapp: project.config.json carries the project's own appid (${appid}) - real-device preview and cloud work`);
     }
   }
-  await fs.promises.writeFile(path.join(out, 'app.js'), renderAppJs(opts), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'app.js'), renderAppJs(opts, appLifecycle), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.target, pageList.length, [...usingComponents.keys()].length, opts.apiBase ?? '', opts.warnings), 'utf8');
   return { pages: pageList, components: [...usingComponents.keys()] };
 }
@@ -552,7 +573,8 @@ export interface CloudExportOptions {
   cloudEnv?: string;
 }
 
-function renderAppJs(opts: { apiBase?: string; cloud?: boolean; cloudEnv?: string }): string {
+function renderAppJs(opts: { apiBase?: string; cloud?: boolean; cloudEnv?: string }, app?: AppLifecycle | null): string {
+  const userApp = app && (Object.keys(app.methods).length || app.globalData) ? app : null;
   if (opts.cloud) {
     // Mirror the original app's onLaunch contract: cloud init, then the
     // auto-login that keeps `globalData.userInfo` warm for every page
@@ -636,14 +658,77 @@ function renderAppJs(opts: { apiBase?: string; cloud?: boolean; cloudEnv?: strin
       '',
     ].join(String.fromCharCode(10));
   }
+  // App({...}): setApiBase first, then the project's own app.rose members.
+  // Function bodies and the globalData literal ride verbatim - they are the
+  // user's code, and JSON.stringify cannot carry a function anyway.
+  const parts: string[] = [];
+  if (userApp?.globalData) parts.push(`  globalData: ${indentBlock(userApp.globalData, 2)},`);
+  for (const [name, fn] of Object.entries(userApp?.methods ?? {})) {
+    const params = name === 'onError' && !fn.params ? 'err' : fn.params;
+    parts.push(`  ${fn.async ? 'async ' : ''}${name}(${params}) {`, indentBlock(fn.body, 4), '  },');
+  }
+  const appBody = parts.length ? 'App({\n' + parts.join('\n') + '\n});' : 'App({});';
   return [
     "const { setApiBase } = require('./utils/rosezm.js');",
     '',
     'setApiBase(' + JSON.stringify(opts.apiBase || '') + ');',
     '',
-    'App({});',
+    appBody,
     '',
   ].join(String.fromCharCode(10));
+}
+
+/** Re-indent a user block for nesting inside App({...}). */
+function indentBlock(src: string, spaces: number): string {
+  const pad = ' '.repeat(spaces);
+  return src.split('\n').map((l) => (l.trim() ? pad + l : l)).join('\n');
+}
+
+/** One exported lifecycle handler, split into its reusable pieces. */
+interface AppMethod {
+  async: boolean;
+  params: string;
+  body: string;
+}
+
+/**
+ * The app-level script contract: the lifecycle handlers a `src/app.rose`
+ * may export, plus the `globalData` initializer when one is declared.
+ */
+export interface AppLifecycle {
+  methods: Record<string, AppMethod>;
+  globalData: string | null;
+}
+
+/**
+ * Pull the lifecycle exports out of an app.rose script: `export function
+ * onLaunch() {...}` / `export async function onShow() {...}` / `onHide` /
+ * `onError`, and `export const globalData = {...}`. Function bodies are
+ * matched brace-deep so nested braces (an if inside a handler) survive.
+ */
+export function extractAppLifecycle(script: string): AppLifecycle {
+  const methods: Record<string, AppMethod> = {};
+  for (const name of ['onLaunch', 'onShow', 'onHide', 'onError']) {
+    const re = new RegExp(`(?:export\\s+)?(async\\s+)?function\\s+${name}\\s*\\(([^)]*)\\)\\s*\\{`);
+    const m = re.exec(script);
+    if (!m) continue;
+    let depth = 0;
+    let end = -1;
+    for (let i = m.index + m[0].length - 1; i < script.length; i++) {
+      if (script[i] === '{') depth++;
+      else if (script[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) continue;
+    methods[name] = {
+      async: Boolean(m[1]),
+      params: m[2].trim(),
+      body: script.slice(m.index + m[0].length, end).replace(/^\n+|\s+$/g, ''),
+    };
+  }
+  let globalData: string | null = null;
+  const g = /(?:export\s+)?const\s+globalData\s*=\s*(\{[\s\S]*?\})\s*;?/.exec(script);
+  if (g) globalData = g[1];
+  return { methods, globalData };
 }
 
 /**
@@ -3067,6 +3152,15 @@ function __rosezmPrompt(message, defaultValue) {
 ///   geolocation     -> { latitude, longitude }, or null
 ///   clipboard-read  -> the clipboard text ('' when empty)
 ///   clipboard-write -> true once written
+///   scan-code       -> the decoded string, or null
+///   make-phone-call -> true once the dialer opened
+///   vibrate         -> true once the device vibrated
+///   toast           -> true once the toast was shown
+///   modal           -> true when the user confirmed, false on dismiss, null when unavailable
+///   get-battery     -> { level: 0-100, charging: bool }, or null
+///   get-network-type -> { type: string }, or null
+///   get-system-info  -> { platform: string, system: string }, or null
+///   save-image        -> true once saved to the album, or false on deny/fail
 function __rosezmNativeApi() {
   if (typeof wx !== 'undefined' && wx.chooseMedia) return wx;
   if (typeof qq !== 'undefined' && qq.chooseMedia) return qq;
@@ -3144,6 +3238,88 @@ function __rosezmNative(capability, options) {
       if (typeof api.setClipboardData !== 'function') { resolve(false); return; }
       api.setClipboardData({
         data: text,
+        success: function () { resolve(true); },
+        fail: function () { resolve(false); },
+      });
+    });
+  }
+  if (capability === 'scan-code') {
+    return new Promise(function (resolve) {
+      // Alipay spells it my.scan; the WeChat family scanCode.
+      if (typeof api.scan !== 'function' && typeof api.scanCode !== 'function') { resolve(null); return; }
+      var handler = typeof api.scanCode === 'function' ? api.scanCode.bind(api) : api.scan.bind(api);
+      handler({
+        success: function (res) { resolve((res && (res.result || (res.code && res.code.value))) || null); },
+        fail: function () { resolve(null); },
+      });
+    });
+  }
+  if (capability === 'make-phone-call') {
+    return new Promise(function (resolve) {
+      var number = String(opts.number == null ? '' : opts.number);
+      if (!number || typeof api.makePhoneCall !== 'function') { resolve(false); return; }
+      api.makePhoneCall({ phoneNumber: number, success: function () { resolve(true); }, fail: function () { resolve(false); } });
+    });
+  }
+  if (capability === 'vibrate') {
+    return new Promise(function (resolve) {
+      // Alipay has no vibrateLong - the call answers false, the empty answer.
+      if (typeof api.vibrateLong !== 'function') { resolve(false); return; }
+      api.vibrateLong({ success: function () { resolve(true); }, fail: function () { resolve(false); } });
+    });
+  }
+  if (capability === 'toast') {
+    return new Promise(function (resolve) {
+      var title = String(opts.title == null ? '' : opts.title);
+      if (typeof api.showToast !== 'function') { resolve(false); return; }
+      api.showToast({ title: title, icon: 'none', complete: function () { resolve(true); } });
+    });
+  }
+  if (capability === 'modal') {
+    return new Promise(function (resolve) {
+      if (typeof api.showModal !== 'function' && typeof api.confirm !== 'function') { resolve(null); return; }
+      var handler = typeof api.showModal === 'function' ? api.showModal.bind(api) : api.confirm.bind(api);
+      handler({
+        title: String(opts.title == null ? '' : opts.title),
+        content: String(opts.message == null ? '' : opts.message),
+        success: function (res) { resolve(Boolean(res.confirm)); },
+        fail: function () { resolve(null); },
+      });
+    });
+  }
+  if (capability === 'get-battery') {
+    return new Promise(function (resolve) {
+      if (typeof api.getBatteryInfo !== 'function') { resolve(null); return; }
+      api.getBatteryInfo({
+        success: function (res) { resolve({ level: Number((res && res.level) || 0), charging: (res && (res.isCharging === true || res.Charging === 'true')) || false }); },
+        fail: function () { resolve(null); },
+      });
+    });
+  }
+  if (capability === 'get-network-type') {
+    return new Promise(function (resolve) {
+      if (typeof api.getNetworkType !== 'function') { resolve(null); return; }
+      api.getNetworkType({
+        success: function (res) { resolve({ type: String((res && res.networkType) || 'unknown') }); },
+        fail: function () { resolve(null); },
+      });
+    });
+  }
+  if (capability === 'get-system-info') {
+    return new Promise(function (resolve) {
+      if (typeof api.getSystemInfo !== 'function') { resolve(null); return; }
+      api.getSystemInfo({
+        success: function (res) { resolve({ platform: String((res && res.platform) || 'unknown'), system: String((res && res.system) || '') }); },
+        fail: function () { resolve(null); },
+      });
+    });
+  }
+  if (capability === 'save-image') {
+    return new Promise(function (resolve) {
+      var filePath = String(opts.filePath == null ? '' : opts.filePath);
+      if (!filePath || typeof api.saveImageToPhotosAlbum !== 'function') { resolve(false); return; }
+      api.saveImageToPhotosAlbum({
+        filePath: filePath,
         success: function () { resolve(true); },
         fail: function () { resolve(false); },
       });

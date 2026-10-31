@@ -989,7 +989,20 @@ ${native.includes('camera') ? `    if (capability == "camera") {
         if (link.empty()) return RoseValue(false);
         return RoseValue(QDesktopServices::openUrl(QUrl::fromUserInput(QString::fromStdString(link))));
     }
-` : ''}    return RoseValue();
+` : ''}${native.includes('make-phone-call') ? `    if (capability == "make-phone-call") {
+        // QDesktopServices on a tel: URL reaches the OS's own dialer
+        // handler - the same desktop stand-in the share branch uses.
+        const std::string tel = rose_str(rose_get(options, "number"));
+        if (tel.empty()) return RoseValue(false);
+        return RoseValue(QDesktopServices::openUrl(QUrl(QString::fromStdString("tel:" + tel))));
+    }
+    }` : ''}${native.includes('modal') ? `    if (capability == "modal") {
+        // QMessageBox is the Qt way to ask - the toolkit paints it.
+        const std::string message = rose_str(rose_get(options, "message"));
+        const std::string title = rose_str(rose_get(options, "title"));
+        QMessageBox box(QMessageBox::Information, QString::fromStdString(title), QString::fromStdString(message), QMessageBox::Ok | QMessageBox::Cancel);
+        return RoseValue(box.exec() == QMessageBox::Ok);
+    }` : ''}    return RoseValue();
 }
 ` : '';
   return `#include "rose.h"
@@ -1004,7 +1017,7 @@ ${native.includes('camera') ? `    if (capability == "camera") {
 #include <QDebug>
 ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `#include <QClipboard>
 #include <QGuiApplication>
-` : ''}${native.includes('share') ? `#include <QDesktopServices>
+` : ''}${native.includes('share') || native.includes('make-phone-call') ? `#include <QDesktopServices>
 ` : ''}
 #include <regex>
 #include <sstream>

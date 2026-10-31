@@ -25,6 +25,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { transformSync } from 'esbuild';
+import { extractAppLifecycle } from './miniprogram.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
@@ -125,6 +126,56 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const out = path.join(opts.outDir, 'flutter');
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
   const app = appIdentity(opts.projectRoot);
+  // App-level lifecycle (src/app.rose, uniapp's App.vue parity): the handlers
+  // are translated JS->Dart with the same machinery page handlers use, and
+  // wired into RoseApp's widget lifecycle (onLaunch once in initState,
+  // onShow/onHide via WidgetsBindingObserver, globalData as a kit map).
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appLifecycle: import('./miniprogram.js').AppLifecycle | null = null;
+  if (fs.existsSync(appRosePath)) {
+    const parsedApp = parseRose(await fs.promises.readFile(appRosePath, 'utf8'), appRosePath, 'flutter');
+    warnings.push(...parsedApp.warnings);
+    if (parsedApp.nodes.length) {
+      warnings.push('flutter: src/app.rose carries template nodes - the app scope has no UI, only the script\'s lifecycle exports are used');
+    }
+    if (parsedApp.script) {
+      const plain = transformSync(parsedApp.script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      appLifecycle = extractAppLifecycle(plain);
+    }
+  }
+  const appDart: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null };
+  if (appLifecycle) {
+    const translateLifecycle = (body: string): string | null => {
+      // Rewrite the two shapes a lifecycle body touches that page handlers
+      // spell differently: getApp().globalData reads the kit's app map, and
+      // window.* flags become plain global identifiers.
+      const rewritten = body
+        .replace(/getApp\(\)\.globalData/g, 'roseAppGlobal')
+        .replace(/\bwindow\./g, '')
+        // A map write must be a Dart subscript: roseAppGlobal is a
+        // Map<String, dynamic>, and `.name = v` is not valid Dart on it.
+        .replace(/roseAppGlobal\.([A-Za-z_$][\w$]*)\s*=/g, "roseAppGlobal['$1'] =")
+        // The refusal list stops at `console.` - but a lifecycle's most common
+        // body is a log line, and the kit's own spelling (debugPrint) is one
+        // token away. Rewritten before the refusal sees it.
+        .replace(/\bconsole\.(log|warn|error)\(/g, 'debugPrint(');
+      const dart = translateBody(rewritten, appRosePath, warnings);
+      return dart.trim() ? dart : null;
+    };
+    if (appLifecycle.methods.onLaunch) appDart.launch = translateLifecycle(appLifecycle.methods.onLaunch.body);
+    if (appLifecycle.methods.onShow) appDart.show = translateLifecycle(appLifecycle.methods.onShow.body);
+    if (appLifecycle.methods.onHide) appDart.hide = translateLifecycle(appLifecycle.methods.onHide.body);
+    if (appLifecycle.globalData) {
+      try {
+        appDart.global = JSON.stringify(JSON.parse(appLifecycle.globalData
+          .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+          .replace(/'/g, '"')), null, 0);
+      } catch {
+        warnings.push('flutter: src/app.rose globalData is not a plain literal - it is emitted empty');
+        appDart.global = null;
+      }
+    }
+  }
   tagStyles = new Map<string, StyleModel>();
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
@@ -234,7 +285,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   for (const page of pages) {
     await fs.promises.writeFile(path.join(out, 'lib', 'pages', page.fileName + '.dart'), renderPage(page, components, warnings, content, allHoverKeys, allFocusKeys, allActiveKeys, globalCss), 'utf8');
   }
-  await fs.promises.writeFile(path.join(out, 'lib', 'main.dart'), renderMain(pages, components), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'lib', 'main.dart'), renderMain(pages, components, appDart), 'utf8');
   await writeDeployScaffold('flutter', out, warnings);
   // The Dart sources are the whole app, but Flutter cannot build a platform it
   // has no runner folder for: `flutter build apk` in this tree fails with "No
@@ -932,6 +983,12 @@ dynamic roseContentGet(String coll, String slug) {
     native.includes('camera') ? "import 'package:image_picker/image_picker.dart';" : '',
     native.includes('geolocation') ? "import 'package:geolocator/geolocator.dart';" : '',
     native.includes('share') ? "import 'package:share_plus/share_plus.dart';" : '',
+    native.includes('make-phone-call') ? "import 'package:url_launcher/url_launcher.dart';" : '',
+    native.includes('get-battery') ? "import 'package:battery_plus/battery_plus.dart';" : '',
+    native.includes('get-network-type') ? "import 'package:connectivity_plus/connectivity_plus.dart';" : '',
+    native.includes('get-system-info') ? "import 'package:device_info_plus/device_info_plus.dart';" : '',
+    native.includes('scan-code') ? "import 'package:mobile_scanner/mobile_scanner.dart';" : '',
+    native.includes('save-image') ? "import 'package:gal/gal.dart';" : '',
   ].filter(Boolean).join('\n');
   const nativeKit = native.length ? `
 /// The device capabilities this project's pages asked for through
@@ -943,6 +1000,29 @@ dynamic roseContentGet(String coll, String slug) {
 ///   clipboard-read  -> the clipboard text ('' when empty)
 ///   clipboard-write -> true once written
 ///   share           -> true once the share sheet was shown
+///   make-phone-call -> true once the dialer opened
+///   vibrate         -> true once the device vibrated
+///   save-image      -> true once the image reached the gallery, false on deny
+/// The scan-code route: the system-grade viewfinder mobile_scanner renders,
+/// resolved with the first decoded value. Pushed by roseNative('scan-code'),
+/// popped the moment a barcode is read (the back button answers null).
+class RoseScannerPage extends StatelessWidget {
+  const RoseScannerPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          final code = capture.barcodes.firstOrNull?.rawValue;
+          if (code != null && Navigator.canPop(context)) Navigator.pop(context, code);
+        },
+      ),
+    );
+  }
+}
+
 Future<dynamic> roseNative(String capability, [Map<String, dynamic> options = const {}]) async {
   try {
     switch (capability) {
@@ -968,6 +1048,78 @@ ${native.includes('camera') ? `      case 'camera':
 ` : ''}${native.includes('share') ? `      case 'share':
         await SharePlus.instance.share(ShareParams(text: (options['text'] ?? '').toString(), subject: options['title']?.toString()));
         return true;
+` : ''}${native.includes('make-phone-call') ? `
+      case 'make-phone-call':
+        final number = (options['number'] ?? '').toString();
+        if (number.isEmpty) return false;
+        await launchUrl(Uri(scheme: 'tel', path: number));
+        return true;
+` : ''}${native.includes('vibrate') ? `
+      case 'vibrate':
+        await HapticFeedback.mediumImpact();
+        return true;
+` : ''}${native.includes('toast') ? `
+      case 'toast':
+        final messenger = Scaffold.maybeOf(rosezmNavigatorKey.currentContext!);
+        messenger?.showSnackBar(SnackBar(content: Text((options['title'] ?? '').toString())));
+        return messenger != null;
+` : ''}${native.includes('modal') ? `
+      case 'modal':
+        final context = rosezmNavigatorKey.currentContext!;
+        final answer = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: Text((options['title'] ?? '').toString()),
+            content: Text((options['message'] ?? '').toString()),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('OK')),
+            ],
+          ),
+        );
+        return answer ?? false;
+` : ''}${native.includes('get-battery') ? `
+      case 'get-battery':
+        final battery = Battery();
+        final level = await battery.batteryLevel;
+        final state = await battery.batteryState;
+        return {'level': level, 'charging': state == BatteryState.charging || state == BatteryState.full};
+` : ''}${native.includes('get-network-type') ? `
+      case 'get-network-type':
+        final connectivity = Connectivity().checkConnectivity();
+        final type = connectivity == ConnectivityResult.wifi ? 'wifi'
+            : connectivity == ConnectivityResult.mobile ? 'mobile'
+            : connectivity == ConnectivityResult.none ? 'none' : 'unknown';
+        return {'type': type};
+` : ''}${native.includes('get-system-info') ? `
+      case 'get-system-info':
+        if (Platform.isAndroid) {
+          final info = await DeviceInfoPlugin().androidInfo;
+          return {'platform': 'android', 'system': info.version.release};
+        }
+        if (Platform.isIOS) {
+          final info = await DeviceInfoPlugin().iosInfo;
+          return {'platform': 'ios', 'system': info.systemName + ' ' + info.systemVersion};
+        }
+        return {'platform': Platform.operatingSystem, 'system': Platform.operatingSystemVersion};
+` : ''}${native.includes('scan-code') ? `
+      case 'scan-code':
+        final scanned = await rosezmNavigatorKey.currentState!.push<String>(
+          MaterialPageRoute(builder: (_) => const RoseScannerPage()),
+        );
+        return scanned;
+` : ''}${native.includes('save-image') ? `
+      case 'save-image':
+        final path = (options['filePath'] ?? '').toString();
+        if (path.isEmpty) return false;
+        // gal writes through the platform's own gallery API (MediaStore on
+        // Android, PHPhotoLibrary on iOS) and asks for the permission itself.
+        try {
+          await Gal.putImage(path);
+          return true;
+        } catch (_) {
+          return false;
+        }
 ` : ''}      default:
         return null;
     }
@@ -1462,6 +1614,12 @@ const NATIVE_PLUGIN_FLOORS: Record<string, string> = {
   image_picker: '>=1.0.0 <2.0.0',
   geolocator: '>=11.0.0 <14.0.0',
   share_plus: '>=10.0.0 <12.0.0',
+  url_launcher: '>=6.0.0 <7.0.0',
+  battery_plus: '>=2.0.0 <4.0.0',
+  connectivity_plus: '>=4.0.0 <7.0.0',
+  device_info_plus: '>=9.0.0 <12.0.0',
+  mobile_scanner: '>=5.0.0 <8.0.0',
+  gal: '>=2.3.0 <3.0.0',
 };
 
 function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[], scheme: string): string {
@@ -1535,7 +1693,11 @@ async function addPlatformRunners(out: string, warnings: string[], app: AppIdent
   }
 }
 
-function renderMain(pages: Array<{ className: string; fileName: string; route: string; params: string[]; title: string }>, components: Array<{ className: string }>): string {
+function renderMain(
+  pages: Array<{ className: string; fileName: string; route: string; params: string[]; title: string }>,
+  components: Array<{ className: string }>,
+  appDart: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null },
+): string {
   const imports = pages.map((p) => `import 'pages/${p.fileName}.dart';`).join('\n');
   const routes = pages
     .filter((p) => p.params.length === 0)
@@ -1552,19 +1714,53 @@ function renderMain(pages: Array<{ className: string; fileName: string; route: s
       }`;
     })
     .join('\n');
+  const appGlobalLine = appDart.global
+    ? `\n// App-level globalData (src/app.rose): one kit-side map every page reads.\nfinal Map<String, dynamic> roseAppGlobal = ${appDart.global};`
+    : '';
+  const hasApp = Boolean(appDart.launch || appDart.show || appDart.hide || appDart.global);
+  const roseAppClass = hasApp ? `class RoseApp extends StatefulWidget {
+  const RoseApp({super.key});
+
+  @override
+  State<RoseApp> createState() => _RoseAppState();
+}
+
+class _RoseAppState extends State<RoseApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+${appDart.launch ? appDart.launch.split('\n').map((l) => `      ${l}`).join('\n') : '      // no onLaunch declared'}
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+${appDart.show ? appDart.show.split('\n').map((l) => `      ${l}`).join('\n') : '      // no onShow declared'}
+    }
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+${appDart.hide ? appDart.hide.split('\n').map((l) => `      ${l}`).join('\n') : '      // no onHide declared'}
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {` : `class RoseApp extends StatelessWidget {
+  const RoseApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {`;
   return `import 'package:flutter/material.dart';
 ${imports}
 import 'rosezm.dart';
 import 'vectors.dart';
 
 void main() => runApp(const RoseApp());
+${appGlobalLine}
 
 
-class RoseApp extends StatelessWidget {
-  const RoseApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
+${roseAppClass}
     return MaterialApp(
       title: 'rosezm',
       navigatorKey: rosezmNavigatorKey,

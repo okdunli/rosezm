@@ -1239,6 +1239,47 @@ p { color: red; }
     check('F17c AT: a renamed user function compiles clean', renamed === 'COMPILED', renamed);
   }
 
+  // BF (BUG.md, 2026-10-31): a $state named like a runtime export
+  // (`let state = $state(...)`) made esbuild alias the import to the same
+  // short name as the local destructuring - `let[n,i]=n(...)`, a TDZ
+  // self-reference that 500s SSR renders on some pages only. The build now
+  // refuses it loudly, naming a rename.
+  {
+    const fsBF = await import('fs');
+    const pathBF = await import('path');
+    const rootBF = pathBF.resolve('.test-compiler-out');
+    fsBF.mkdirSync(rootBF, { recursive: true });
+    fsBF.writeFileSync(pathBF.resolve(rootBF, 'state-collision.rose'), `<script>
+  let state = $state('loading');
+</script>
+<p>{state}</p>`, 'utf-8');
+    let refused = '';
+    let refusedHint = '';
+    let refusedCode = '';
+    try {
+      await compileComponent(pathBF.resolve(rootBF, 'state-collision.rose'), pathBF.join(process.cwd(), 'public'), 'statecollisionpage', false, [], new Map());
+    } catch (e) {
+      const re = e as { message?: string; hint?: string; code?: string };
+      refused = String(re.message ?? e);
+      refusedHint = String(re.hint ?? '');
+      refusedCode = String(re.code ?? '');
+    }
+    check('BF: the runtime-name collision fails the build loud', refused.includes('collides with the framework\'s runtime import'), refused || 'no error thrown');
+    check('BF: the refusal points at the .rose file', refused.includes('state-collision.rose'), refused);
+    check('BF: the hint names a rename', refusedCode === 'E-SCRIPT' && refusedHint.includes('rename the variable'), refusedCode + ' | ' + refusedHint);
+    // a name outside the runtime surface still compiles
+    fsBF.writeFileSync(pathBF.resolve(rootBF, 'state-ok.rose'), `<script>
+  let status = $state('loading');
+</script>
+<p>{status}</p>`, 'utf-8');
+    let okOut = '';
+    try {
+      const c = await compileComponent(pathBF.resolve(rootBF, 'state-ok.rose'), pathBF.join(process.cwd(), 'public'), 'stateokpage', false, [], new Map());
+      okOut = typeof c === 'string' ? c : 'COMPILED';
+    } catch (e) { okOut = 'ERROR: ' + String((e as { message?: string }).message ?? e); }
+    check('BF: a non-colliding name still compiles', okOut.includes('status') || okOut === 'COMPILED', okOut.slice(0, 80));
+  }
+
   // R280 (BUG.md AV): a comment in the template carrying a literal
   // `<script>`/`</script>` must not confuse the script extraction - the lazy
   // COMPONENT_RE used to grab from the first open tag it saw, so a JS comment

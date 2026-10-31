@@ -24,9 +24,9 @@
  */
 
 /** The capabilities a `.rose` script may name. */
-export type NativeCapability = 'camera' | 'geolocation' | 'clipboard-read' | 'clipboard-write' | 'share';
+export type NativeCapability = 'camera' | 'geolocation' | 'clipboard-read' | 'clipboard-write' | 'share' | 'scan-code' | 'make-phone-call' | 'vibrate' | 'toast' | 'modal' | 'get-battery' | 'get-network-type' | 'get-system-info' | 'save-image';
 
-export const NATIVE_CAPABILITIES: NativeCapability[] = ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'];
+export const NATIVE_CAPABILITIES: NativeCapability[] = ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'scan-code', 'make-phone-call', 'vibrate', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'];
 
 /** The export registry's target names. Duplicated as a plain union so this
  *  module does not import the registry, which imports every emitter. */
@@ -58,7 +58,7 @@ export interface NativeTargetSupport {
  * `<button open-type="share">` plus an onShareAppMessage handler, which is a
  * template construct, not a call a handler can make.
  */
-const MINI_CAPS: NativeCapability[] = ['camera', 'geolocation', 'clipboard-read', 'clipboard-write'];
+const MINI_CAPS: NativeCapability[] = ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'scan-code', 'make-phone-call', 'vibrate', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'];
 
 export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   weapp: {
@@ -69,6 +69,15 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       geolocation: 'wx.getLocation',
       'clipboard-read': 'wx.getClipboardData',
       'clipboard-write': 'wx.setClipboardData',
+      'scan-code': 'wx.scanCode',
+      'make-phone-call': 'wx.makePhoneCall',
+      'toast': 'wx.showToast',
+      'modal': 'wx.showModal',
+      'get-battery': 'wx.getBatteryInfo',
+      'get-network-type': 'wx.getNetworkType',
+      'get-system-info': 'wx.getSystemInfo',
+      'save-image': 'wx.saveImageToPhotosAlbum',
+      'vibrate': 'wx.vibrateLong',
     },
     manifest: { geolocation: ['scope.userLocation'] },
   },
@@ -80,6 +89,15 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       geolocation: 'qq.getLocation',
       'clipboard-read': 'qq.getClipboardData',
       'clipboard-write': 'qq.setClipboardData',
+      'scan-code': 'qq.scanCode',
+      'make-phone-call': 'qq.makePhoneCall',
+      'toast': 'qq.showToast',
+      'modal': 'qq.showModal',
+      'get-battery': 'qq.getBatteryInfo',
+      'get-network-type': 'qq.getNetworkType',
+      'get-system-info': 'qq.getSystemInfo',
+      'save-image': 'qq.saveImageToPhotosAlbum',
+      'vibrate': 'qq.vibrateLong',
     },
     manifest: { geolocation: ['scope.userLocation'] },
   },
@@ -91,6 +109,14 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       geolocation: 'my.getLocation',
       'clipboard-read': 'my.getClipboard',
       'clipboard-write': 'my.setClipboard',
+      'scan-code': 'my.scan',
+      'make-phone-call': 'my.makePhoneCall',
+      'toast': 'my.showToast',
+      'modal': 'my.confirm',
+      'get-battery': 'my.getBatteryInfo',
+      'get-network-type': 'my.getNetworkType',
+      'get-system-info': 'my.getSystemInfo',
+      'save-image': 'my.saveImageToPhotosAlbum',
     },
     manifest: { geolocation: ['location'] },
   },
@@ -102,6 +128,15 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       geolocation: 'swan.getLocation',
       'clipboard-read': 'swan.getClipboardData',
       'clipboard-write': 'swan.setClipboardData',
+      'scan-code': 'swan.scanCode',
+      'make-phone-call': 'swan.makePhoneCall',
+      'toast': 'swan.showToast',
+      'modal': 'swan.showModal',
+      'get-battery': 'swan.getBatteryInfo',
+      'get-network-type': 'swan.getNetworkType',
+      'get-system-info': 'swan.getSystemInfo',
+      'save-image': 'swan.saveImageToPhotosAlbum',
+      'vibrate': 'swan.vibrateLong',
     },
     manifest: { geolocation: ['scope.userLocation'] },
   },
@@ -113,45 +148,82 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       geolocation: 'tt.getLocation',
       'clipboard-read': 'tt.getClipboardData',
       'clipboard-write': 'tt.setClipboardData',
+      'scan-code': 'tt.scanCode',
+      'make-phone-call': 'tt.makePhoneCall',
+      'toast': 'tt.showToast',
+      'modal': 'tt.showModal',
+      'get-battery': 'tt.getBatteryInfo',
+      'get-network-type': 'tt.getNetworkType',
+      'get-system-info': 'tt.getSystemInfo',
+      'save-image': 'tt.saveImageToPhotosAlbum',
+      'vibrate': 'tt.vibrateLong',
     },
     manifest: { geolocation: ['scope.userLocation'] },
   },
   flutter: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
-    dependencies: { camera: 'image_picker', geolocation: 'geolocator', share: 'share_plus' },
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
+    dependencies: { camera: 'image_picker', geolocation: 'geolocator', share: 'share_plus', 'make-phone-call': 'url_launcher', 'scan-code': 'mobile_scanner', 'get-battery': 'battery_plus', 'get-network-type': 'connectivity_plus', 'get-system-info': 'device_info_plus', 'save-image': 'gal' },
     platform: {
       camera: 'image_picker',
       geolocation: 'geolocator',
       'clipboard-read': 'Clipboard.getData',
       'clipboard-write': 'Clipboard.setData',
       share: 'share_plus',
+      'make-phone-call': 'url_launcher tel:',
+      vibrate: 'HapticFeedback.mediumImpact',
+      'scan-code': 'mobile_scanner (a pushed scanner route)',
+      'get-battery': 'battery_plus (a package)',
+      'get-network-type': 'connectivity_plus (a package)',
+      'get-system-info': 'device_info_plus (a package)',
+      'save-image': 'gal (a package)',
+      toast: 'SnackBar (no package)',
+      modal: 'showDialog (no package)'
     },
   },
   arkts: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info'],
     platform: {
       camera: '@ohos.multimedia.camera / photoAccessHelper',
+      'get-battery': '@ohos.batteryInfo (sync property)',
+      'get-network-type': '@ohos.telephony.data (sync)',
+      'get-system-info': '@ohos.deviceInfo (sync property)',
+      'save-image': 'photoAccessHelper (needs security component)',
+      toast: 'promptAction.showToast (UIKit)',
+      modal: 'promptAction.showDialog (UIKit)',
+      'scan-code': 'scanBarcode.launchScanner (ScanKit)',
       geolocation: '@ohos.geoLocationManager',
       'clipboard-read': '@ohos.pasteboard',
       'clipboard-write': '@ohos.pasteboard',
       share: '@ohos.app.ability.wantAgent',
+      'make-phone-call': 'call.makeCall (TelephonyKit)',
+      vibrate: '@ohos.vibrator (VibratePreset)'
     },
     manifest: {
       camera: ['ohos.permission.CAMERA'],
       geolocation: ['ohos.permission.LOCATION', 'ohos.permission.APPROXIMATELY_LOCATION'],
+      vibrate: ['ohos.permission.VIBRATE'],
     },
   },
   android: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'toast', 'modal', 'scan-code', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
     platform: {
       camera: 'ActivityResultContracts.TakePicture',
+      toast: 'Toast.makeText',
+      modal: 'AlertDialog (needs an Activity Context)',
       geolocation: 'FusedLocationProviderClient',
       'clipboard-read': 'ClipboardManager',
       'clipboard-write': 'ClipboardManager',
       share: 'Intent.ACTION_SEND',
+      'make-phone-call': 'Intent.ACTION_DIAL',
+      'get-battery': 'BatteryManager sticky intent (sync)',
+      'get-network-type': 'ConnectivityManager (sync)',
+      'get-system-info': 'Build (sync)',
+      'save-image': 'MediaStore (API 29+, no permission)',
+      vibrate: 'Vibrator (VibratorManager)',
+      'scan-code': 'ML Kit Barcode Scanning (the RoseApp scan bridge)',
     },
     // A permission is not optional decoration: without CAMERA the contract
     // fails on a real device, and without a location permission the fused
@@ -163,13 +235,22 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   xcode: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-system-info', 'save-image'],
     platform: {
       camera: 'UIImagePickerController',
+      toast: 'no first-party toast (a label overlay works)',
+      modal: 'UIAlertController (the RoseKit modal bridge)',
       geolocation: 'CLLocationManager',
       'clipboard-read': 'UIPasteboard',
       'clipboard-write': 'UIPasteboard',
       share: 'UIActivityViewController',
+      'make-phone-call': 'UIApplication.open(tel:)',
+      'get-battery': 'UIDevice.batteryLevel (needs monitoring enabled)',
+      'get-network-type': 'NWPathMonitor (async, no first-party sync)',
+      'get-system-info': 'UIDevice + ProcessInfo (sync)',
+      'save-image': 'UIImageWriteToSavedPhotosAlbum (photo-add usage)',
+      vibrate: 'UIImpactFeedbackGenerator',
+      'scan-code': 'DataScannerViewController (pushed as a full-screen cover)',
     },
     // Info.plist usage descriptions, named by KEY: iOS does not deny the
     // request without one, it terminates the process - the app crashes the
@@ -177,6 +258,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
     manifest: {
       camera: ['NSCameraUsageDescription'],
       geolocation: ['NSLocationWhenInUseUsageDescription'],
+      'save-image': ['NSPhotoLibraryAddUsageDescription'],
     },
   },
   // Wired through the preload bridge: the electron export ships the framework's
@@ -185,13 +267,17 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // on the other side of contextIsolation.
   electron: {
     helper: 'useNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call'],
     platform: {
       camera: 'navigator.mediaDevices.getUserMedia',
       geolocation: 'navigator.geolocation',
       'clipboard-read': 'navigator.clipboard.readText',
       'clipboard-write': 'navigator.clipboard.writeText',
       share: 'navigator.share',
+      vibrate: 'navigator.vibrate',
+      'make-phone-call': 'ipcRenderer.invoke + shell.openExternal(tel:)',
+      toast: 'a DOM toast element (no native chrome needed)',
+      modal: 'a DOM modal dialog (no native chrome needed)',
     },
   },
   // Wired through the kit: the emitted rosezm.py defines rose_native(...) with
@@ -199,35 +285,44 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // expands its useNative call to it.
   python: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal'],
     platform: {
       camera: 'tkinter.filedialog',
+      toast: 'tkinter message label / Toplevel (a window, the Tk way)',
+      modal: 'tkinter.messagebox (stdlib)',
       geolocation: 'no Tk API (an app needs an OS/web location service)',
       'clipboard-read': 'tkinter.clipboard_get',
       'clipboard-write': 'tkinter.clipboard_append',
       share: 'webbrowser.open',
+      'make-phone-call': 'webbrowser.open(tel:)',
     },
   },
   dotnet: {
     helper: 'RoseKit.RoseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
     platform: {
       camera: 'OpenFileDialog',
+      toast: 'a WPF overlay (no system toast)',
+      modal: 'MessageBox.Show',
       geolocation: 'GeoCoordinateWatcher (a package - not in the box for net8.0)',
       'clipboard-read': 'Clipboard.GetText',
       'clipboard-write': 'Clipboard.SetText',
       share: 'Process.Start',
+      'make-phone-call': 'Process.Start(tel:)',
     },
   },
   java: {
     helper: 'RoseKit.roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
     platform: {
       camera: 'no capture API (java.awt.Robot / third-party webcam lib)',
+      toast: 'a Swing overlay (no system toast)',
+      modal: 'JOptionPane (stdlib)',
       geolocation: 'no JDK API (third-party library)',
       'clipboard-read': 'Toolkit.getSystemClipboard',
       'clipboard-write': 'Toolkit.getSystemClipboard',
       share: 'Desktop.browse',
+      'make-phone-call': 'Desktop.browse(tel:)',
     },
   },
   // Wired through the kit: rose.h declares rose_native(...), rose.cpp defines
@@ -235,13 +330,16 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // useNative call to it.
   cpp: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
     platform: {
       camera: 'QFileDialog',
+      toast: 'a QLabel overlay (no system toast)',
+      modal: 'QMessageBox (Qt)',
       geolocation: 'QGeoPositionInfoSource',
       'clipboard-read': 'QClipboard',
       'clipboard-write': 'QClipboard',
       share: 'QDesktopServices::openUrl',
+      'make-phone-call': 'QDesktopServices::openUrl(tel:)',
     },
   },
 };

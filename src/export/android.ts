@@ -24,6 +24,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
+import { extractAppLifecycle } from './miniprogram.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, xmlEscape } from './app-identity.js';
 import { appIcon } from './app-icon.js';
@@ -80,6 +81,43 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   const javaRoot = path.join(out, 'app', 'src', 'main', 'java', PKG_PATH);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
+  // App-level lifecycle (src/app.rose, uniapp's App.vue parity): onCreate runs
+  // the translated onLaunch, onResume/onPause carry onShow/onHide, globalData
+  // is a companion-object map every page's kit can read.
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appKotlin: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null };
+  if (fs.existsSync(appRosePath)) {
+    const parsedApp = parseRose(await fs.promises.readFile(appRosePath, 'utf8'), appRosePath, 'android');
+    warnings.push(...parsedApp.warnings);
+    if (parsedApp.nodes.length) {
+      warnings.push('android: src/app.rose carries template nodes - the app scope has no UI, only the script\'s lifecycle exports are used');
+    }
+    if (parsedApp.script) {
+      const plain = transformSync(parsedApp.script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      const lifecycle = extractAppLifecycle(plain);
+      const translateLifecycle = (body: string): string | null => {
+        const rewritten = body
+          .replace(/getApp\(\)\.globalData\.([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g, 'RoseKit.roseAppGlobal["$1"] = $2;')
+          .replace(/getApp\(\)\.globalData/g, 'RoseKit.roseAppGlobal')
+          .replace(/\bwindow\./g, '')
+          .replace(/\bconsole\.(log|warn|error)\(/g, 'println(');
+        const kt = translateBody(rewritten, appRosePath, [], warnings);
+        return kt.trim() ? kt : null;
+      };
+      if (lifecycle.methods.onLaunch) appKotlin.launch = translateLifecycle(lifecycle.methods.onLaunch.body);
+      if (lifecycle.methods.onShow) appKotlin.show = translateLifecycle(lifecycle.methods.onShow.body);
+      if (lifecycle.methods.onHide) appKotlin.hide = translateLifecycle(lifecycle.methods.onHide.body);
+      if (lifecycle.globalData) {
+        try {
+          appKotlin.global = JSON.stringify(JSON.parse(lifecycle.globalData
+            .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+            .replace(/'/g, '"')), null, 0);
+        } catch {
+          warnings.push('android: src/app.rose globalData is not a plain literal - it is emitted empty');
+        }
+      }
+    }
+  }
 
   const layers = new Map<string, { nodes: IrNode[]; script: string | null; style: string | null }>();
   for (const f of pageFiles) {
@@ -160,7 +198,7 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
-  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route)), 'utf8');
+  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route), appKotlin.global, native.includes('scan-code')), 'utf8');
   // The style table for the dynamic half: a class bound to state has to be
   // resolved while the composable recomposes, so the compiled classes ship as
   // data and the kit merges them exactly like the cascade does.
@@ -171,8 +209,8 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   for (const page of pages) {
     await fs.promises.writeFile(path.join(javaRoot, 'pages', page.cls + 'Page.kt'), renderPage(page, components, styles, media, fontMap, warnings, content, globalCss), 'utf8');
   }
-  await fs.promises.writeFile(path.join(javaRoot, 'RoseApp.kt'), renderApp(pages), 'utf8');
-  await fs.promises.writeFile(path.join(javaRoot, 'MainActivity.kt'), renderActivity(), 'utf8');
+  await fs.promises.writeFile(path.join(javaRoot, 'RoseApp.kt'), renderApp(pages, native.includes('scan-code')), 'utf8');
+  await fs.promises.writeFile(path.join(javaRoot, 'MainActivity.kt'), renderActivity(appKotlin, native.some((n) => CONTEXT_CAPS.includes(n))), 'utf8');
   await fs.promises.writeFile(path.join(out, 'settings.gradle.kts'), `pluginManagement {
     repositories {
         google()
@@ -250,6 +288,13 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+${native.includes('scan-code') ? `    // The scan-code await bridge (AGENTS.md §312): CameraX for the viewfinder,
+    // ML Kit for the decoding.
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+` : ''}
 }
 `, 'utf8');
   await fs.promises.writeFile(path.join(out, 'app', 'src', 'main', 'AndroidManifest.xml'), `<?xml version="1.0" encoding="utf-8"?>
@@ -1160,6 +1205,11 @@ function sizeOf(v: string): string {
  * Those three return null and name what the app must supply rather than
  * emitting a call that compiles and then silently does nothing.
  */
+/** The capabilities whose kit branch reaches the app's Context - the one hook
+ *  MainActivity publishes and the kit declares. A capability outside this list
+ *  (camera's launcher, scan's bridge) gets its own wiring. */
+const CONTEXT_CAPS: NativeCapability[] = ['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'];
+
 function nativeKit(native: NativeCapability[]): string {
   if (!native.length) return '';
   const clipboard = native.includes('clipboard-read') || native.includes('clipboard-write');
@@ -1199,16 +1249,141 @@ function nativeKit(native: NativeCapability[]): string {
         // MainActivity, using opts["text"] / opts["title"] as the payload.
         return null
     }` : '',
+    native.includes('make-phone-call') ? `    if (capability == "make-phone-call") {
+        // ACTION_DIAL opens the dialer with the number filled in - no CALL
+        // permission, no user surprise. NEW_TASK is required because the kit
+        // holds a Context, not an Activity.
+        val ctx = ROSE_NATIVE_CONTEXT ?: return false
+        val number = opts["number"]?.toString() ?: return false
+        if (number.isEmpty()) return false
+        ctx.startActivity(
+            Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + number))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        return true
+    }` : '',
+    native.includes('vibrate') ? `    if (capability == "vibrate") {
+        val ctx = ROSE_NATIVE_CONTEXT ?: return false
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = ctx.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager ?: return false
+            manager.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return false
+        }
+        if (!vibrator.hasVibrator()) return false
+        val ms = (opts["duration"] as? Number)?.toLong() ?: 200L
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+        else @Suppress("DEPRECATION") vibrator.vibrate(ms)
+        return true
+    }` : '',
+    native.includes('scan-code') ? `    if (capability == "scan-code") {
+        // The await-bridge (AGENTS.md §312, option 1): the call flips a
+        // request flag; RoseApp overlays the scanner route and writes the
+        // decoded value into roseScanResult, which the page reads
+        // reactively - the Compose way to await UI.
+        roseScanRequested.value = true
+        return null
+    }` : '',
+    native.includes('get-battery') ? `    if (capability == "get-battery") {
+        // The sticky ACTION_BATTERY_CHANGED intent is the sync way to read
+        // the battery - no receiver registration needed.
+        val ctx = ROSE_NATIVE_CONTEXT ?: return null
+        val intent = ctx.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)) ?: return null
+        val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+        val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+        if (level < 0) return null
+        return mapOf("level" to (level * 100 / scale), "charging" to (status == android.os.BatteryManager.BATTERY_STATUS_CHARGING))
+    }` : '',
+    native.includes('get-network-type') ? `    if (capability == "get-network-type") {
+        val ctx = ROSE_NATIVE_CONTEXT ?: return null
+        val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return null
+        val network = cm.activeNetwork ?: return null
+        val caps = cm.getNetworkCapabilities(network) ?: return null
+        val type = if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) "wifi" else if (caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)) "mobile" else "none"
+        return mapOf("type" to type)
+    }` : '',
+    native.includes('get-system-info') ? `    if (capability == "get-system-info") {
+        return mapOf("platform" to "android", "system" to android.os.Build.VERSION.RELEASE)
+    }` : '',
+    native.includes('save-image') ? `    if (capability == "save-image") {
+        // Scoped storage: MediaStore owns the gallery on API 29+, so the write
+        // needs no permission at all. Below Q the insert would throw without
+        // WRITE_EXTERNAL_STORAGE, so the call reports the gap instead.
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return false
+        val ctx = ROSE_NATIVE_CONTEXT ?: return false
+        val path = opts["filePath"]?.toString() ?: return false
+        if (path.isEmpty()) return false
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, path.substringAfterLast('/'))
+            put(MediaStore.Images.Media.MIME_TYPE, "image/*")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/rosezm")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val target = ctx.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        return try {
+            ctx.contentResolver.openOutputStream(target)?.use { out ->
+                java.io.File(path).inputStream().use { it.copyTo(out) }
+            } ?: return false
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            ctx.contentResolver.update(target, values, null, null)
+            true
+        } catch (error: Exception) {
+            // A half-written row is worse than no row: drop the pending asset.
+            ctx.contentResolver.delete(target, null, null)
+            false
+        }
+    }` : '',
+    native.includes('toast') ? `    if (capability == "toast") {
+        val ctx = ROSE_NATIVE_CONTEXT ?: return false
+        android.widget.Toast.makeText(ctx, opts["title"]?.toString() ?: "", android.widget.Toast.LENGTH_SHORT).show()
+        return true
+    }` : '',
+    native.includes('modal') ? `    if (capability == "modal") {
+        // AlertDialog must be built on the UI thread; the kit call arrives
+        // on whatever thread the handler ran on, so hop through runOnUiThread.
+        val ctx = ROSE_NATIVE_CONTEXT ?: return null
+        var answer: Boolean? = null
+        var latch = java.util.concurrent.CountDownLatch(1)
+        (ctx as? android.app.Activity)?.runOnUiThread {
+            val builder = android.app.AlertDialog.Builder(ctx)
+                .setTitle(opts["title"]?.toString() ?: "")
+                .setMessage(opts["message"]?.toString() ?: "")
+                .setPositiveButton("OK") { _, _ -> answer = true; latch.countDown() }
+                .setNegativeButton("Cancel") { _, _ -> answer = false; latch.countDown() }
+            builder.show()
+        }
+        latch.await()
+        return answer
+    }` : '',
   ].filter(Boolean).join('\n');
-  return `
-${clipboard ? `import android.content.ClipData
+  const nativeImports = [
+    clipboard ? `import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-
-/**
+` : '',
+    native.includes('make-phone-call') ? `import android.content.Intent
+import android.net.Uri
+` : '',
+    native.includes('vibrate') ? `import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+` : '',
+    native.includes('save-image') ? `import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
+` : '',
+    native.includes('scan-code') ? "import androidx.compose.runtime.getValue\nimport androidx.compose.runtime.mutableStateOf" : '',
+  ].filter(Boolean).join('\n');
+  return `
+${nativeImports}${native.some((c) => CONTEXT_CAPS.includes(c)) ? `/**
  * The app's Context: the one hook a real branch needs. Set it once in
  * MainActivity.onCreate (ROSE_NATIVE_CONTEXT = this) - a kit function has no
- * Context of its own, and the clipboard is not reachable without one.
+ * Context of its own, and neither the clipboard nor starting an activity nor
+ * the vibrator is reachable without one.
  */
 var ROSE_NATIVE_CONTEXT: Context? = null
 
@@ -1235,7 +1410,13 @@ ${branches}
 `;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = [], appGlobal: string | null = null, scanState = false): string {
+  const appGlobalBlock = appGlobal
+    ? `\n// App-level globalData (src/app.rose): one map every page's handler reads.\nval roseAppGlobal = mutableMapOf<String, Any?>(\n${appGlobal.replace(/[{}]/g, '').trim().split(',').filter((s) => s.trim()).map((kv) => {
+      const m = /^"?([^":]+)"?\s*:\s*(.+)$/.exec(kv.trim());
+      return m ? `    "${m[1].replace(/"/g, '')}" to ${m[2].trim()}` : '';
+    }).filter(Boolean).join(',\n')}\n)`
+    : '';
   const contentBlock = content ? `
 /**
  * The project's markdown collections, baked at export time. A page reads them
@@ -1274,11 +1455,60 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
+${appGlobalBlock}
 import androidx.compose.ui.text.style.TextDecoration
 ${contentBlock}
+${scanState ? `
+// The scan-code await bridge (AGENTS.md §312, option 1): the page sets
+// roseScanRequested through roseNative; RoseApp overlays the scanner route
+// and fills roseScanResult, which the page reads reactively.
+var roseScanRequested = mutableStateOf(false)
+val roseScanResult = mutableStateOf<String?>(null)
+` : ''}
 import androidx.compose.ui.graphics.Color
 ${nativeKit(native)}
-/// Base URL of the deployed rosezm server (rosezm export --api). BuildConfig
+${scanState ? `
+/// The scanner route the bridge overlays: CameraX feeds the preview, ML Kit
+/// decodes, and the FIRST value retires the overlay (the result lands in
+/// roseScanResult; back or a timeout = no scan, the contract's null).
+@Composable
+fun RoseScannerRoute(onDone: (String?) -> Unit) {
+    val owner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
+        androidx.compose.ui.viewinterop.AndroidView(
+            factory = { ctx ->
+                val pv = androidx.camera.view.PreviewView(ctx)
+                val future = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
+                future.addListener({
+                    val provider = future.get()
+                    val preview = androidx.camera.core.Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+                    val analysis = androidx.camera.core.ImageAnalysis.Builder()
+                        .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                    val scanner = com.google.mlkit.vision.barcode.BarcodeScanning.getClient()
+                    val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+                    analysis.setAnalyzer(executor) { proxy ->
+                        @Suppress("DEPRECATION")
+                        val media = com.google.mlkit.vision.common.InputImage.fromMediaImage(proxy.image, proxy.imageInfo.rotationDegrees)
+                        scanner.process(media)
+                            .addOnSuccessListener { codes ->
+                                val value = codes.firstOrNull()?.rawValue
+                                if (value != null) { onDone(value); scanner.close() }
+                            }
+                            .addOnCompleteListener { proxy.close() }
+                    }
+                    provider.unbindAll()
+                    provider.bindToLifecycle(owner, androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                }, androidx.core.content.ContextCompat.getMainExecutor(ctx))
+                pv
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+        androidx.compose.material3.Text("Scan a barcode", modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).padding(24f))
+    }
+}
+` : ''}
+/// Base URL of the deployed rosezm server/// Base URL of the deployed rosezm server (rosezm export --api). BuildConfig
 /// fills it from the ROSEZM_API environment variable at BUILD time, falling
 /// back to the value baked at export time:
 ///   ROSEZM_API=https://staging.example.com ./gradlew assembleRelease
@@ -1657,10 +1887,18 @@ a server action POSTs the framework's own protocol.
 ${renderWarningSection(warnings)}`;
 }
 
-function renderActivity(): string {
+function renderActivity(
+  appKotlin: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null },
+  needsContext = false,
+): string {
+  const indent = (body: string | null, pad: string): string =>
+    body ? body.split('\n').map((l) => pad + l).join('\n') : `${pad}// nothing declared`;
+  const appImport = appKotlin.global ? `\nimport ${PKG}.kit.roseAppGlobal` : '';
+  const ctxImport = needsContext ? `\nimport ${PKG}.kit.ROSE_NATIVE_CONTEXT` : '';
   return `package ${PKG}
-
+${appImport}${ctxImport}
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
@@ -1669,6 +1907,15 @@ import androidx.compose.material3.Surface
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+${needsContext ? `        ${PKG}.kit.ROSE_NATIVE_CONTEXT = this` : ''}
+${appKotlin.global ? `        // App-level globalData (src/app.rose): one map, every page's kit reads it.
+        RoseKit.roseAppGlobal.putAll(
+            mapOf(${appKotlin.global.replace(/[{}]/g, '').trim().split(',').filter((s) => s.trim()).map((kv) => {
+              const m = /^"?([^":]+)"?\s*:\s*(.+)$/.exec(kv.trim());
+              return m ? `"${m[1].replace(/"/g, '')}" to ${m[2].trim()}` : '';
+            }).filter(Boolean).join(', ')})
+)
+` : ''}${appKotlin.launch ? indent(appKotlin.launch, '        ') + '\n' : ''}
         // iOS and Android both parse acme://blog/7 as host=blog, path=/7 -
         // rebuild the route from both, so the link maps to /blog/7.
         val data = intent?.data
@@ -1681,11 +1928,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+${indent(appKotlin.show, '        ')}
+    }
+
+    override fun onPause() {
+        super.onPause()
+${indent(appKotlin.hide, '        ')}
+    }
 }
 `;
 }
 
-function renderApp(pages: Array<{ route: string; cls: string; params: string[] }>): string {
+function renderApp(pages: Array<{ route: string; cls: string; params: string[] }>, scanState = false): string {
   const imports = pages.map((p) => `import ${PKG}.pages.${p.cls}Page`).join('\n');
   const staticRoutes = pages.filter((p) => p.params.length === 0).map((p) => `        route == ${JSON.stringify(p.route)} -> ${p.cls}Page(onNavigate = navigate, route = route)`).join('\n');
   const dynamicRoutes = pages.filter((p) => p.params.length > 0).map((p) => {
@@ -1701,6 +1958,10 @@ function renderApp(pages: Array<{ route: string; cls: string; params: string[] }
 import androidx.compose.runtime.*
 import androidx.activity.compose.BackHandler
 import ${PKG}.kit.roseWallNavigate
+${scanState ? `
+import ${PKG}.kit.roseScanRequested
+import ${PKG}.kit.roseScanResult
+` : ''}
 ${imports}
 
 private const val ROSE_HOME = "/"
@@ -1723,6 +1984,12 @@ fun RoseApp(initialRoute: String = "/") {
 ${staticRoutes}
 ${dynamicRoutes}
         else -> IndexPage(onNavigate = navigate, route = route)
+    }
+    // The scan-code await bridge (AGENTS.md 312, option 1): the overlay sits
+    // on top of whatever route is showing; a decoded value lands in
+    // roseScanResult and the overlay retires itself.
+    if (roseScanRequested.value) {
+        RoseScannerRoute(onDone = { code -> roseScanResult.value = code; roseScanRequested.value = false })
     }
 }
 `;

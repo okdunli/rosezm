@@ -237,6 +237,13 @@ async function sendPage(req: any, res: any, ssrModule: any, hookCtx: any, page: 
   let html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false, ssrModule.sliceKeyFor?.(routePath) ?? null);
   if (pjaxRequested(req)) html = pjaxFragment(html);
   let headers: Record<string, any> = pageHeaders(ssrModule, routePath, nonce);
+  // AR: cookies a middleware or page collected via $setCookie merge into the
+  // rendered response - the seam that makes sliding session expiry work
+  // without short-circuiting the render.
+  if (page.setCookies?.length) {
+    const existing = headers['set-cookie'];
+    headers['set-cookie'] = existing ? [...[].concat(existing), ...page.setCookies] : page.setCookies;
+  }
   if (hookCtx) {
     // P0-3: the document's content-type travels WITH the Response.
     const out = await ssrModule.runResponseHooks(hookCtx, new Response(html, {

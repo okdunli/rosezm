@@ -90,6 +90,21 @@ async function copyTree(from: string, to: string): Promise<void> {
  *      for, and a denied permission is `null` (the capability contract's empty
  *      answer) rather than a ReferenceError inside a tap handler.
  */
+/**
+ * The capabilities the shell bridge implements - the WebView's own browser
+ * APIs. A page naming anything else gets the contract's null at runtime; this
+ * list is what the export warns against, so the gap is named at build time
+ * too (the "warned, never silent" rule) instead of only at the first tap.
+ */
+export const SHELL_BRIDGE_CAPABILITIES: ReadonlySet<NativeCapability> = new Set([
+  'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info',
+]);
+
+/** The page-requested capabilities this shell's bridge cannot answer. */
+export function shellCapabilityGaps(native: NativeCapability[]): NativeCapability[] {
+  return native.filter((c) => !SHELL_BRIDGE_CAPABILITIES.has(c));
+}
+
 export async function writeShellBridge(frontendRoot: string, apiBase: string, native: NativeCapability[]): Promise<number> {
   await fs.promises.writeFile(path.join(frontendRoot, 'rosezm-shell.js'), renderBridge(apiBase, native), 'utf8');
   let patched = 0;
@@ -234,6 +249,129 @@ function renderCapabilities(native: NativeCapability[]): string {
       if (typeof navigator.share !== 'function') return null;
       await navigator.share({ text: String(options.text == null ? '' : options.text), title: String(options.title == null ? '' : options.title) });
       return true;
+    }
+`);
+  }
+  if (native.includes('vibrate')) {
+    branches.push(`    if (capability === 'vibrate') {
+      if (typeof navigator.vibrate !== 'function') return false;
+      return navigator.vibrate(typeof options.duration === 'number' ? options.duration : 200);
+    }
+`);
+  }
+  if (native.includes('make-phone-call')) {
+    // The dial rides the shell runtime: wails v2 injects BrowserOpenURL,
+    // tauri v2 exposes opener through __TAURI__ when the app opts in. A
+    // runtime without either answers false (the contract's empty shape for
+    // a boolean capability).
+    branches.push(`    if (capability === 'make-phone-call') {
+      var number = String(options.number == null ? '' : options.number);
+      if (!number) return false;
+      if (typeof window.runtime === 'object' && typeof window.runtime.BrowserOpenURL === 'function') {
+        window.runtime.BrowserOpenURL('tel:' + number);
+        return true;
+      }
+      var opener = window.__TAURI__ && window.__TAURI__.opener;
+      if (opener && typeof opener.openUrl === 'function') {
+        opener.openUrl('tel:' + number);
+        return true;
+      }
+      return false;
+    }
+`);
+  }
+  if (native.includes('scan-code')) {
+    // Chromium's BarcodeDetector: the WebView every shell ships has it, so a
+    // scan is a camera stream plus a detect loop - no camera pipeline of our
+    // own. Without the detector (or a denied camera) the contract's null.
+    branches.push(`    if (capability === 'scan-code') {
+      if (typeof BarcodeDetector !== 'function') return null;
+      var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      try {
+        var video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        await video.play();
+        var detector = new BarcodeDetector();
+        var found = await new Promise(function (resolve) {
+          var ticks = 0;
+          var timer = setInterval(function () {
+            ticks += 1;
+            detector.detect(video).then(function (codes) {
+              if (codes.length) { clearInterval(timer); resolve(codes[0].rawValue); }
+              else if (ticks > 150) { clearInterval(timer); resolve(null); }
+            }).catch(function () {});
+          }, 100);
+        });
+        return found;
+      } finally {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+      }
+    }
+`);
+  }
+  if (native.includes('toast')) {
+    // A DOM toast: no native chrome needed - the WebView paints it, and the
+    // auto-dismiss keeps the contract's fire-and-forget shape.
+    branches.push(`    if (capability === 'toast') {
+      var t = document.createElement('div');
+      t.textContent = String(options.title == null ? '' : options.title);
+      t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 18px;border-radius:8px;font:14px system-ui;z-index:2147483647;opacity:0;transition:opacity .2s';
+      document.body.appendChild(t);
+      requestAnimationFrame(function () { t.style.opacity = '1'; });
+      setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 250); }, typeof options.duration === 'number' ? options.duration : 2000);
+      return true;
+    }
+`);
+  }
+  if (native.includes('modal')) {
+    // A DOM confirm modal: resolves true on confirm, false on dismiss - the
+    // boolean the mini-program showModal contract spells as res.confirm.
+    branches.push(`    if (capability === 'modal') {
+      var result = await new Promise(function (resolve) {
+        var backdrop = document.createElement('div');
+        backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483647';
+        var box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;color:#222;border-radius:12px;padding:20px 24px;font:15px system-ui;min-width:260px;z-index:2147483647';
+        var title = document.createElement('div');
+        title.textContent = String(options.title == null ? '' : options.title);
+        title.style.cssText = 'font-weight:600;margin-bottom:8px';
+        var message = document.createElement('div');
+        message.textContent = String(options.message == null ? '' : options.message);
+        message.style.cssText = 'margin-bottom:16px;white-space:pre-wrap';
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
+        var no = document.createElement('button');
+        no.textContent = 'Cancel';
+        no.style.cssText = 'padding:6px 16px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer';
+        var yes = document.createElement('button');
+        yes.textContent = 'OK';
+        yes.style.cssText = 'padding:6px 16px;border-radius:6px;border:none;background:#e91e63;color:#fff;cursor:pointer';
+        function done(v) { backdrop.remove(); resolve(v); }
+        no.onclick = function () { done(false); };
+        yes.onclick = function () { done(true); };
+        row.appendChild(no);
+        row.appendChild(yes);
+        box.appendChild(title);
+        box.appendChild(message);
+        box.appendChild(row);
+        backdrop.appendChild(box);
+        document.body.appendChild(backdrop);
+      });
+      return result;
+    }
+`);
+  }
+  if (native.includes('get-network-type')) {
+    branches.push(`    if (capability === 'get-network-type') {
+      return { type: navigator.onLine ? 'wifi' : 'none' };
+    }
+`);
+  }
+  if (native.includes('get-system-info')) {
+    branches.push(`    if (capability === 'get-system-info') {
+      return { platform: 'web', userAgent: navigator.userAgent };
     }
 `);
   }

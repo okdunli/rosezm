@@ -1640,6 +1640,12 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
       mkdirSync(join(scratch, name), { recursive: true });
       cpSync('src/runtime/index.ts', join(scratch, name, 'index.ts'));
       cpSync('src/runtime/lorawan.ts', join(scratch, name, 'lorawan.ts'));
+      // tsx transforms the scratch copy by ITS OWN rules. Outside the project
+      // it finds no tsconfig and falls back to strip-only mode - the runtime's
+      // TS parameter properties then load as a mangled module with no exports.
+      // The nearest package.json saying "type": "module" is what turns the
+      // full transform on.
+      writeFileSync(join(scratch, name, 'package.json'), JSON.stringify({ type: 'module' }));
     }
     const modA = await import(pathToFileURL(join(scratch, 'a', 'index.ts')).href);
     const modB = await import(pathToFileURL(join(scratch, 'b', 'index.ts')).href);
@@ -1863,6 +1869,81 @@ function flip(): void { known = true; v = '84'; }
   assert(texts[0]!.textContent === '84', 'the text binding in the same element updated too');
   rmSync(styRoot, { recursive: true, force: true });
   rmSync(styOut, { recursive: true, force: true });
+}
+
+// App-level lifecycle (src/app.rose, uniapp's App.vue parity): the compiler
+// embeds the exports into the client entry - onLaunch fires once at boot with
+// the route, onShow/onHide ride visibilitychange, globalData sits on
+// window.__rosezmApp, TypeScript annotations are stripped.
+{
+  const { writeFileSync, mkdirSync, rmSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const { pathToFileURL } = await import('url');
+  const { buildProject } = await import('../src/compiler/index.js');
+
+  const root = join(tmpdir(), 'rosezm-appfix');
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(join(root, 'src', 'pages'), { recursive: true });
+  writeFileSync(join(root, 'src', 'app.rose'), `<script>
+  export const globalData = { theme: 'dark', visits: 0 };
+  export function onLaunch(opts: { path: string }) {
+    window.__launched = opts.path;
+    window.__gd = window.__rosezmApp.theme;
+  }
+  export function onShow() { window.__shown = (window.__shown ?? 0) + 1; }
+  export function onHide() { window.__hidden = true; }
+  export function onError(err: Error) { window.__errMsg = err.message; }
+</script>
+`);
+  writeFileSync(join(root, 'src', 'pages', 'index.rose'), `<script>
+  let n = $state(1);
+  function bump() { n = n + 1; }
+</script>
+
+<button on:click={bump}>{n}</button>
+`);
+  const out = join(tmpdir(), 'rosezm-appfix-dist');
+  rmSync(out, { recursive: true, force: true });
+  await buildProject(root, out);
+  const appServer = await import(pathToFileURL(join(out, 'server.js')).href);
+  const appHome = await appServer.renderPage('/');
+  const appState = document.createElement('script');
+  appState.id = '__rosezm_state';
+  appState.textContent = appHome.state;
+  document.body.appendChild(appState);
+  appEl.innerHTML = appHome.html;
+  // window must exist BEFORE the client module evaluates: the embedded app
+  // block sets window.__rosezmApp at module eval.
+  const w = (globalThis as any).window = dom.window;
+  const appClient = await import(pathToFileURL(join(out, 'client.js')).href);
+  assert(w.__rosezmApp.theme === 'dark' && w.__rosezmApp.visits === 0, 'app.rose globalData sits on window.__rosezmApp');
+  await appClient.start(appEl, '/', true);
+  assert(w.__launched === '/', 'onLaunch fired exactly once at boot with the route');
+  assert(w.__gd === 'dark', 'onLaunch reads globalData');
+  await appClient.start(appEl, '/', false);
+  assert(w.__launched === '/', 'a client-side navigation does not re-run onLaunch');
+  Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+  document.dispatchEvent(new dom.window.Event('visibilitychange'));
+  assert(w.__hidden === true, 'onHide rides visibilitychange');
+  Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+  document.dispatchEvent(new dom.window.Event('visibilitychange'));
+  assert(w.__shown === 1, 'onShow rides visibilitychange');
+  // onError rides both channels: window.onerror and unhandledrejection.
+  const errEvt = new dom.window.Event('error') as any;
+  errEvt.message = 'boom-sync';
+  errEvt.error = new Error('boom-sync');
+  w.dispatchEvent(errEvt);
+  assert(w.__errMsg === 'boom-sync', 'onError rides window.onerror');
+  const rejEvt = new dom.window.Event('unhandledrejection') as any;
+  rejEvt.reason = new Error('boom-async');
+  w.dispatchEvent(rejEvt);
+  assert(w.__errMsg === 'boom-async', 'onError rides unhandledrejection too');
+  // The exported app.js bundle carries no TypeScript residue.
+  const bundleSrc = (await import('fs')).readFileSync(join(out, 'client.js'), 'utf8');
+  assert(!bundleSrc.includes(': { path: string }'), 'the embedded lifecycle carries no TypeScript annotations');
+  rmSync(root, { recursive: true, force: true });
+  rmSync(out, { recursive: true, force: true });
 }
 
 // BL: a client-side navigation asks the server's middleware gate BEFORE it

@@ -1679,6 +1679,25 @@ function nativeKit(native: NativeCapability[]): string {
                     return true;
                 }
 ` : '',
+    native.includes('modal') ? `                case "modal":
+                {
+                    // MessageBox.Show is the WPF way to ask - the OS paints it.
+                    var message = opts.TryGetValue("message", out var m) ? m?.ToString() ?? '' : '';
+                    var title = opts.TryGetValue("title", out var t) ? t?.ToString() ?? '' : '';
+                    var answer = System.Windows.MessageBox.Show(message, title, System.Windows.MessageBoxButton.OKCancel);
+                    return answer == System.Windows.MessageBoxResult.OK;
+                }
+` : '',
+    native.includes('make-phone-call') ? `
+                {
+                    // Process.Start on a tel: URI reaches the OS's own
+                    // dialer handler (Windows Dialer, macOS FaceTime).
+                    var number = opts.TryGetValue("number", out var n) ? n?.ToString() ?? "" : "";
+                    if (number.Length == 0) return false;
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("tel:" + number) { UseShellExecute = true });
+                    return true;
+                }
+` : '',
   ].filter(Boolean).join('');
   return `
     /// <summary>The device capabilities this project's pages asked for through
@@ -1688,7 +1707,8 @@ function nativeKit(native: NativeCapability[]): string {
     ///   geolocation     -> { latitude, longitude }, or null
     ///   clipboard-read  -> the clipboard text ('' when empty)
     ///   clipboard-write -> true once written
-    ///   share           -> true once the OS handler was opened</summary>
+    ///   share           -> true once the OS handler was opened
+    ///   make-phone-call -> true once the OS dialer handler was opened</summary>
     public static object? RoseNative(string capability, Dictionary<string, object?>? options)
     {
         var opts = options ?? new Dictionary<string, object?>();

@@ -26,7 +26,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { nativeUsage } from './native-api.js';
-import { bakeShellDocuments, pageNames, pruneServerBundle, stageBuiltSite, writeShellBridge } from './desktop-shell.js';
+import { bakeShellDocuments, pageNames, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 
@@ -57,6 +57,7 @@ export async function emitZig(opts: EmitZigOptions): Promise<{ pages: string[]; 
   // inside a shipped artifact it is also every API route and its credentials.
   await pruneServerBundle(frontend);
   await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`${LABEL}: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   const files = walkFiles(frontend);
   await fs.promises.writeFile(path.join(out, 'assets.zig'), renderAssets(files), 'utf8');

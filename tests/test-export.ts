@@ -26,11 +26,12 @@ import { tmpdir } from 'os';
 import { join, relative, basename } from 'path';
 import { createContext, runInContext, Script } from 'vm';
 import { exportProject, TARGETS } from '../src/export/index.js';
+import { NATIVE_TARGETS, NATIVE_CAPABILITIES } from '../src/export/native-api.js';
 import { buildProject } from '../src/compiler/index.js';
 import { parseStylesheet, sanitizeFor } from '../src/export/style-engine.js';
 import { forgetAppIdentity } from '../src/export/app-identity.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Every file under a directory, recursively. */
 function walk(dir: string): string[] {
@@ -129,6 +130,82 @@ try {
     const routeEnd = sRoutesText.indexOf(';' + String.fromCharCode(10) + 'module.exports.__tabs');
     const sRoutes = JSON.parse(sRoutesText.slice(routeStart, routeEnd));
     assert(sRoutes['/extra'] === 'pkg/pages/extra/extra', 'subPackages: the routes file maps the web route to the subpackaged path');
+  }
+
+  // App-level lifecycle (uniapp's App.vue parity): src/app.rose compiles into
+  // the emitted App({...}) - globalData plus onLaunch/onShow/onHide/onError,
+  // TypeScript stripped so the emitted app.js is plain JS.
+  {
+    const aProj = join(scratch, 'applifecycle');
+    mkdirSync(join(aProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(aProj, 'src/app.rose'), `<script>
+  export const globalData = { theme: 'dark', visits: 0 };
+  export async function onLaunch(options: Record<string, unknown>) {
+    getApp().globalData.visits = 1;
+    console.log('launched', options);
+  }
+  export function onError(err: Error) {
+    console.error('app error', err.message);
+  }
+</script>
+`);
+    writeFileSync(join(aProj, 'src/pages/index.rose'), `<script>
+  let theme = $state('');
+  function load() { theme = getApp().globalData.theme; }
+</script>
+<button on:click={load}>{theme}</button>`);
+    const aExp = await exportProject('weapp', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-out') });
+    const appJs = readFileSync(join(aExp.outDir, 'app.js'), 'utf8');
+    assert(/globalData:\s*\{/.test(appJs) && appJs.includes('"dark"'), 'app.rose globalData rides into App({}) verbatim');
+    assert(appJs.includes('async onLaunch(options)') && !appJs.includes('Record<'), 'onLaunch becomes an App() method with its TypeScript annotation stripped');
+    assert(appJs.includes('onError(err)') && appJs.includes('err.message'), 'onError keeps its parameter and body');
+    assert(!appJs.includes('export '), 'the app.js carries no leftover export keywords');
+    assert(readFileSync(join(aExp.outDir, 'pages/index/index.js'), 'utf8').includes('getApp().globalData.theme'), 'a page handler reaches globalData through the platform\'s own getApp()');
+    // Flutter: the same app.rose translates into main.dart - globalData as a
+    // kit map, onLaunch once at startup, onShow/onHide via the app lifecycle
+    // observer, console lines as debugPrint.
+    const fExp = await exportProject('flutter', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-flutter-out') });
+    const mainDart = readFileSync(join(fExp.outDir, 'lib', 'main.dart'), 'utf8');
+    assert(mainDart.includes('final Map<String, dynamic> roseAppGlobal = {"theme":"dark","visits":0};'), 'flutter: globalData becomes a typed kit map');
+    assert(mainDart.includes('WidgetsBindingObserver') && mainDart.includes('AppLifecycleState.resumed'), 'flutter: onShow/onHide ride the app lifecycle observer');
+    assert(mainDart.includes('debugPrint("launched"'), 'flutter: the onLaunch body translates (console as debugPrint)');
+    assert(mainDart.includes("roseAppGlobal['visits'] = 1"), 'flutter: a globalData write is a Dart map subscript');
+    assert(!mainDart.includes('not translated'), 'flutter: no lifecycle body degrades to a stub');
+    assert(!mainDart.includes('AppLifecycleStateHide'), 'flutter: the observer uses the real callback name');
+    // ArkTS: onCreate seeds AppStorage + runs the launch body, onForeground/
+    // onBackground carry onShow/onHide, console lines become hilog.info.
+    const kExp = await exportProject('arkts', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-arkts-out') });
+    const ability = readFileSync(join(kExp.outDir, 'entry', 'src', 'main', 'ets', 'entryability', 'EntryAbility.ets'), 'utf8');
+    assert(ability.includes("AppStorage.setOrCreate('rosezmAppGlobal', JSON.parse"), 'arkts: globalData seeds AppStorage in onCreate');
+    assert(ability.includes("AppStorage.setOrCreate('rosezmAppGlobal.visits', 1);"), 'arkts: a globalData write becomes a setOrCreate call');
+    assert(ability.includes('hilog.info(0x0000, \'rosezm\', "launched"'), 'arkts: the onLaunch body translates (console as hilog.info)');
+    assert(ability.includes('onForeground()') && ability.includes('onBackground()'), 'arkts: onShow/onHide ride the ability foreground/background hooks');
+    assert(!ability.includes('not translated'), 'arkts: no lifecycle body degrades to a stub');
+    // Android: the kit carries the globalData map, onCreate runs the launch
+    // body, onResume/onPause carry onShow/onHide, console lines become println.
+    const anExp = await exportProject('android', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-android-out') });
+    const act = readFileSync(join(anExp.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'MainActivity.kt'), 'utf8');
+    const anKit = readFileSync(join(anExp.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    assert(anKit.includes('val roseAppGlobal = mutableMapOf<String, Any?>(') && anKit.includes('"theme" to "dark"'), 'android: globalData becomes a kit-side map');
+    assert(act.includes('roseAppGlobal["visits"] = 1'), 'android: a globalData write is a map subscript');
+    assert(act.includes('println("launched"'), 'android: the onLaunch body translates (console as println)');
+    assert(act.includes('override fun onResume()') && act.includes('override fun onPause()'), 'android: onShow/onHide ride the activity resume/pause hooks');
+    assert(!act.includes('not translated'), 'android: no lifecycle body degrades to a stub');
+    // Xcode: RoseKit carries the dictionary, init() runs the launch body,
+    // scenePhase carries onShow/onHide, console lines become print().
+    const xExp = await exportProject('xcode', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-xcode-out') });
+    const mainSwift = readFileSync(join(xExp.outDir, 'rosezmApp', 'rosezmApp.swift'), 'utf8');
+    assert(mainSwift.includes('static var roseAppGlobal: [String: Any] = ["theme": "dark"'), 'xcode: globalData becomes a Swift dictionary');
+    assert(mainSwift.includes('roseAppGlobal["visits"] = 1'), 'xcode: a globalData write is a subscript');
+    assert(mainSwift.includes('print("launched"'), 'xcode: the onLaunch body translates (console as print)');
+    assert(mainSwift.includes('scenePhase') && mainSwift.includes('.active') && mainSwift.includes('.background'), 'xcode: onShow/onHide ride scenePhase');
+    assert(!mainSwift.includes('not translated'), 'xcode: no lifecycle body degrades to a stub');
+    // the project without app.rose keeps the thin App({})
+    const bProj = join(scratch, 'noapp');
+    mkdirSync(join(bProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(bProj, 'src/pages/index.rose'), '<p>home</p>');
+    const plainExp = await exportProject('weapp', bProj, { apiBase: 'x', outRoot: join(scratch, 'app-plain-out') });
+    assert(readFileSync(join(plainExp.outDir, 'app.js'), 'utf8').includes('App({});'), 'a project without src/app.rose keeps the empty App({})');
   }
 
   // 2. the template translation
@@ -291,6 +368,196 @@ try {
     const plain = await exportProject('android', example, { apiBase: 'x', outRoot: join(scratch, 'caps-plain') });
     const plainMan = readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
     assert(!/CAMERA|LOCATION/.test(plainMan), 'android: a project that never calls useNative gets no extra permission');
+  }
+
+  // Scan / dial / vibrate: the three uniapp-parity capabilities the mp family
+  // answers with first-party APIs and the desktop webview answers with
+  // navigator.vibrate. A page calling them compiles through the same kit.
+  {
+    const svProj = join(scratch, 'scanvibe');
+    mkdirSync(join(svProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(svProj, 'src/pages/index.rose'), `<script>
+  let code = $state('');
+  async function scan(): Promise<void> { code = String(await useNative('scan-code')); }
+  async function dial(): Promise<void> { await useNative('make-phone-call', { number: '10086' }); }
+  async function buzz(): Promise<void> { await useNative('vibrate', { duration: 100 }); }
+</script>
+<button on:click={scan}>scan</button>
+<button on:click={dial}>call</button>
+<button on:click={buzz}>vibrate</button>
+`);
+    const w = await exportProject('weapp', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-weapp') });
+    const wKit = readFileSync(join(w.outDir, 'utils', 'rosezm.js'), 'utf8');
+    assert(wKit.includes("capability === 'scan-code'") && wKit.includes("capability === 'make-phone-call'") && wKit.includes("capability === 'vibrate'"), 'weapp: the kit carries scan/dial/vibrate branches');
+    const pageJs = readFileSync(join(w.outDir, 'pages', 'index', 'index.js'), 'utf8');
+    assert(pageJs.includes('scan-code') && pageJs.includes('make-phone-call'), 'weapp: the handler bodies rewrite to the kit calls');
+    const alipay = await exportProject('alipay', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-alipay') });
+    const aKit = readFileSync(join(alipay.outDir, 'utils', 'rosezm.js'), 'utf8');
+    assert(aKit.includes('api.scan') && aKit.includes('vibrateLong'), 'alipay: the scan spelling (my.scan) and the no-vibrate answer are handled');
+    const e = await exportProject('electron', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-electron') });
+    const shell = readFileSync(join(e.outDir, 'preload.cjs'), 'utf8');
+    assert(shell.includes("capability === 'vibrate'"), 'electron: the preload answers vibrate through navigator.vibrate');
+    const f = await exportProject('flutter', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-flutter') });
+    const fKit = readFileSync(join(f.outDir, 'lib', 'rosezm.dart'), 'utf8');
+    assert(fKit.includes("case 'make-phone-call':") && fKit.includes('HapticFeedback.mediumImpact()'), 'flutter: dial and vibrate ride the kit switch');
+    const pub = readFileSync(join(f.outDir, 'pubspec.yaml'), 'utf8');
+    assert(pub.includes('url_launcher'), 'flutter: url_launcher rides pubspec when a page dials');
+    // scan-code rides mobile_scanner: roseNative pushes the kit's scanner
+    // route and resolves with the first decoded value. Implemented, so the
+    // gap warning must NOT fire for it.
+    assert(fKit.includes('class RoseScannerPage') && fKit.includes('MobileScanner('), 'flutter: the kit carries the pushed scanner route');
+    const pubScan = readFileSync(join(f.outDir, 'pubspec.yaml'), 'utf8');
+    assert(pubScan.includes('mobile_scanner'), 'flutter: mobile_scanner rides pubspec when a page scans');
+    assert(!(f.warnings ?? []).some((x: string) => x.includes("'scan-code'")), 'flutter: an implemented scan-code is never warned as a gap');
+    const an = await exportProject('android', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-android') });
+    const anKit = readFileSync(join(an.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    const anAct = readFileSync(join(an.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'MainActivity.kt'), 'utf8');
+    assert(anKit.includes('ACTION_DIAL') && anKit.includes('FLAG_ACTIVITY_NEW_TASK'), 'android: the dial branch opens the dialer through the kit Context');
+    assert(anKit.includes('VibrationEffect.createOneShot') && anKit.includes('VibratorManager'), 'android: the vibrate branch covers both the S+ and the legacy service');
+    assert(anAct.includes('ROSE_NATIVE_CONTEXT = this'), 'android: MainActivity actually sets the Context the kit doc promises');
+    assert(anAct.includes('import dev.rosezm.app.kit.ROSE_NATIVE_CONTEXT'), 'android: the activity imports the kit context');
+    // The scan-code await bridge (AGENTS.md §312, option 1): roseNative flips
+    // roseScanRequested, RoseApp overlays the scanner route, and the page
+    // reads roseScanResult reactively.
+    assert(anKit.includes('roseScanRequested.value = true') && anKit.includes('var roseScanRequested = mutableStateOf(false)') && anKit.includes('val roseScanResult'), 'android: the scan bridge carries the request flag and the result state');
+    const anApp = readFileSync(join(an.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseApp.kt'), 'utf8');
+    assert(anApp.includes('RoseScannerRoute(onDone') && anApp.includes('roseScanRequested.value'), 'android: RoseApp overlays the scanner route while the flag is up');
+    const anGradle = readFileSync(join(an.outDir, 'app', 'build.gradle.kts'), 'utf8');
+    assert(anGradle.includes('barcode-scanning') && anGradle.includes('camera-camera2'), 'android: CameraX + ML Kit ride build.gradle.kts when a page scans');
+    const plainAn = await exportProject('android', example, { apiBase: 'x', outRoot: join(scratch, 'scan-plain-android') });
+    const plainKit = readFileSync(join(plainAn.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    assert(!plainKit.includes('roseScanRequested'), 'android: a project that never scans carries no scanner state');
+    // scan-code is wired through the bridge: no gap warning survives.
+    assert(!(an.warnings ?? []).some((x: string) => x.includes('scan-code')), 'android: the wired scan-code reports no gap');
+    const k = await exportProject('arkts', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-arkts') });
+    const kKitTm = readFileSync(join(k.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseKit.ets'), 'utf8');
+    assert(kKitTm.includes('call.makeCall') && kKitTm.includes('startVibration'), 'arkts: dial and vibrate ride the kit');
+    assert(kKitTm.includes("@kit.TelephonyKit") && kKitTm.includes("@ohos.vibrator"), 'arkts: the kit imports the telephony and vibrator modules');
+    const kMod = readFileSync(join(k.outDir, 'entry', 'src', 'main', 'module.json5'), 'utf8');
+    assert(kMod.includes('ohos.permission.VIBRATE'), 'arkts: the VIBRATE permission rides module.json5');
+    assert(kKitTm.includes('scanBarcode.launchScanner') && kKitTm.includes('@kit.ScanKit'), 'arkts: scan-code rides the system scanner (one call, no camera pipeline)');
+    const xk = await exportProject('xcode', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-xcode') });
+    const xKit = readFileSync(join(xk.outDir, 'rosezmApp', 'Kit', 'RoseKit.swift'), 'utf8');
+    assert(xKit.includes('capability == "make-phone-call"') && xKit.includes('UIApplication.shared.open'), 'xcode: the dial branch opens the tel: url');
+    assert(xKit.includes('UIImpactFeedbackGenerator'), 'xcode: vibrate rides the haptic generator');
+    assert(xKit.includes('import UIKit'), 'xcode: the kit imports UIKit only when a capability needs it');
+    const xApp = readFileSync(join(xk.outDir, 'rosezmApp', 'rosezmApp.swift'), 'utf8');
+    assert(xApp.includes('struct RoseAlertView') && xApp.includes('UIAlertController') && xApp.includes('RoseKit.roseModalTitle'), 'xcode: the modal rides an alert cover wired to the kit options');
+    assert(xApp.includes('fullScreenCover(isPresented: Binding(get: { RoseKit.roseScanRequested }') && xApp.includes('struct RoseScannerView') && xApp.includes('DataScannerViewController'), 'xcode: the app presents the DataScanner cover and the kit ships the scanner view');
+    assert(xKit.includes('RoseKit.roseScanRequested = true'), 'xcode: the scan bridge flips the request flag the app observes');
+    // The desktop shells answer scan-code through Chromium's BarcodeDetector:
+    // camera stream + detect loop in the bridge/preload, no camera pipeline of
+    // our own. Implemented, so the gap warning must NOT fire for it.
+    const wl = await exportProject('wails', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-wails') });
+    const bridge = readFileSync(join(wl.outDir, 'frontend', 'dist', 'rosezm-shell.js'), 'utf8');
+    assert(bridge.includes("capability === 'scan-code'") && bridge.includes('BarcodeDetector'), 'wails: the bridge scans through BarcodeDetector');
+    assert(!(wl.warnings ?? []).some((x: string) => x.includes("'scan-code'")), 'wails: an implemented scan-code is never warned as a gap');
+    const ePreload = readFileSync(join(e.outDir, 'preload.cjs'), 'utf8');
+    assert(ePreload.includes('BarcodeDetector'), 'electron: the preload scans through BarcodeDetector too');
+    assert(!(e.warnings ?? []).some((x: string) => x.includes("'scan-code'")), 'electron: an implemented scan-code is never warned as a gap');
+    // Desktop four: the dial branch is the same tel: story in each toolkit's
+    // own spelling - webbrowser.open (python), Process.Start (dotnet),
+    // Desktop.browse (java), QDesktopServices::openUrl (cpp).
+    // electron: the dial rides IPC - main.cjs registers shell.openExternal
+    // behind `if (dial)`, the preload invokes it. A project that never dials
+    // registers nothing.
+    assert(ePreload.includes("capability === 'make-phone-call'") && ePreload.includes("invoke('rosezm:openExternal'"), 'electron: the preload dials through the openExternal IPC');
+    const eMain = readFileSync(join(e.outDir, 'main.cjs'), 'utf8');
+    assert(eMain.includes('if (dial) ipcMain.handle') && eMain.includes('shell.openExternal'), 'electron: main.cjs registers the openExternal handler when a page dials');
+    const wl2 = await exportProject('wails', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-wails') });
+    const wBridge = readFileSync(join(wl2.outDir, 'frontend', 'dist', 'rosezm-shell.js'), 'utf8');
+    assert(wBridge.includes("capability === 'make-phone-call'") && wBridge.includes('BrowserOpenURL'), 'wails: the bridge dials through the shell runtime');
+    const ta = await exportProject('tauri', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-tauri') });
+    const tBridge = readFileSync(join(ta.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
+    assert(tBridge.includes('BrowserOpenURL') && tBridge.includes('__TAURI__.opener'), 'tauri: the bridge dials through the wails runtime or the tauri opener');
+    // toast/modal: the mp kit maps to showToast/showModal, the desktop bridge
+    // renders DOM chrome - no native dependency anywhere.
+    const tmProj2 = join(scratch, 'toastwails');
+    mkdirSync(join(tmProj2, 'src/pages'), { recursive: true });
+    writeFileSync(join(tmProj2, 'src/pages/index.rose'), '<script>\n  async function ping(): Promise<void> { await useNative(\'toast\', { title: \'hi\' }); }\n  async function ask(): Promise<void> { await useNative(\'modal\', { title: \'Sure?\', message: \'Pick\' }); }\n</script>\n<button on:click={ask}>m</button><button on:click={ping}>t</button>');
+    const tm = await exportProject('weapp', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast') });
+    const tmKit = readFileSync(join(tm.outDir, 'utils', 'rosezm.js'), 'utf8');
+    assert(tmKit.includes("capability === 'toast'") && tmKit.includes('showToast') && tmKit.includes("capability === 'modal'") && tmKit.includes('showModal'), 'weapp: toast/modal ride the kit');
+    const tmW = await exportProject('wails', tmProj2, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast-wails') });
+    const tmBridge = readFileSync(join(tmW.outDir, 'frontend', 'dist', 'rosezm-shell.js'), 'utf8');
+    const tmF = await exportProject('flutter', tmProj2, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast-flutter') });
+    const tmFKit = readFileSync(join(tmF.outDir, 'lib', 'rosezm.dart'), 'utf8');
+    assert(tmBridge.includes("capability === 'toast'"), 'wails: the toast renders as DOM chrome in the bridge');
+    const nsProj = join(scratch, 'netsysinfo');
+    mkdirSync(join(nsProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(nsProj, 'src/pages/index.rose'), '<script>' + String.fromCharCode(10) + '  async function check(): Promise<void> { await useNative("get-network-type", {}); await useNative("get-system-info", {}); }' + String.fromCharCode(10) + '</script>' + String.fromCharCode(10) + '<button on:click={check}>check</button>');
+    const nsW = await exportProject('wails', nsProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-ns-wails') });
+    const nsBridge = readFileSync(join(nsW.outDir, 'frontend', 'dist', 'rosezm-shell.js'), 'utf8');
+    assert(nsBridge.includes("capability === 'get-network-type'") && nsBridge.includes('navigator.onLine'), 'wails: the network branch reads navigator.onLine');
+    assert(nsBridge.includes("capability === 'get-system-info'") && nsBridge.includes('userAgent'), 'wails: the system-info branch reads the user agent');
+    const siW = await exportProject('weapp', nsProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-si-weapp') });
+    const siKit = readFileSync(join(siW.outDir, 'utils', 'rosezm.js'), 'utf8');
+    assert(siKit.includes("capability === 'save-image'") && siKit.includes('saveImageToPhotosAlbum'), 'weapp: the save-image branch calls saveImageToPhotosAlbum');
+    assert(tmBridge.includes("capability === 'modal'"), 'wails: the modal renders as DOM chrome in the bridge');
+    const fKitTm = readFileSync(join(tmF.outDir, 'lib', 'rosezm.dart'), 'utf8');
+    assert(fKitTm.includes("case 'modal':") && fKitTm.includes('showDialog<bool>'), 'flutter: modal rides showDialog');
+    const siProj = join(scratch, 'saveimg-flutter');
+    mkdirSync(join(siProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(siProj, 'src/pages/index.rose'), `<script>
+  async function save(): Promise<void> { await useNative('save-image', { filePath: '/tmp/photo.png' }); }
+</script>
+<button on:click={save}>save</button>`);
+    const tmFSi = await exportProject('flutter', siProj, { apiBase: 'x', outRoot: join(scratch, 'saveimg-flutter-out') });
+    const tmFSiKit = readFileSync(join(tmFSi.outDir, 'lib', 'rosezm.dart'), 'utf8');
+    assert(tmFSiKit.includes("case 'save-image':") && tmFSiKit.includes('Gal.putImage'), 'flutter: save-image rides gal');
+    const tmASi = await exportProject('android', siProj, { apiBase: 'x', outRoot: join(scratch, 'saveimg-android-out') });
+    const aSiKit = readFileSync(join(tmASi.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    assert(aSiKit.includes('MediaStore.Images.Media.IS_PENDING') && aSiKit.includes('openOutputStream'), 'android: save-image writes through MediaStore');
+    const tmXSi = await exportProject('xcode', siProj, { apiBase: 'x', outRoot: join(scratch, 'saveimg-xcode-out') });
+    const xSiKit = readFileSync(join(tmXSi.outDir, 'rosezmApp', 'Kit', 'RoseKit.swift'), 'utf8');
+    const xSiPlist = readFileSync(join(tmXSi.outDir, 'rosezmApp', 'Info.plist'), 'utf8');
+    assert(xSiKit.includes('UIImageWriteToSavedPhotosAlbum') && xSiKit.includes('import UIKit'), 'xcode: save-image hands the image to the photo library');
+    assert(xSiPlist.includes('NSPhotoLibraryAddUsageDescription'), 'xcode: save-image declares its photo-add usage description');
+    const toastOnly = join(scratch, 'toast-only-proj');
+    mkdirSync(join(toastOnly, 'src/pages'), { recursive: true });
+    writeFileSync(join(toastOnly, 'src/pages/index.rose'), `<script>
+  async function ping(): Promise<void> { await useNative('toast', { title: 'hi' }); }
+</script>
+<button on:click={ping}>t</button>`);
+    const tO = await exportProject('android', toastOnly, { apiBase: 'x', outRoot: join(scratch, 'toast-only-android') });
+    const tOKit = readFileSync(join(tO.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    const tOAct = readFileSync(join(tO.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'MainActivity.kt'), 'utf8');
+    assert(tOKit.includes('var ROSE_NATIVE_CONTEXT') && tOAct.includes('ROSE_NATIVE_CONTEXT = this'), 'android: a toast-only app still publishes the Context its branch reads');
+    const tmK = await exportProject('arkts', tmProj2, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast-arkts') });
+    const kKit = readFileSync(join(tmK.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseKit.ets'), 'utf8');
+    const tmKKit = readFileSync(join(tmK.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseKit.ets'), 'utf8');
+    assert(tmKKit.includes('promptAction.showDialog'), 'arkts: modal rides promptAction.showDialog');
+    const tmA = await exportProject('android', tmProj2, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast-android') });
+    const tmX = await exportProject('xcode', tmProj2, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-toast-xcode') });
+    const tmXKit = readFileSync(join(tmX.outDir, 'rosezmApp', 'Kit', 'RoseKit.swift'), 'utf8');
+    assert(tmXKit.includes('UIWindow(frame:') && tmXKit.includes('capability == "toast"'), 'xcode: the toast rides a UIKit window overlay');
+    const tmXApp = readFileSync(join(tmX.outDir, 'rosezmApp', 'rosezmApp.swift'), 'utf8');
+    assert(tmXApp.includes('fullScreenCover(isPresented: Binding(get: { RoseKit.roseModalRequested }') && tmXApp.includes('struct RoseAlertView'), 'xcode: the modal rides an alert cover wired to the kit options');
+    const aKitTm = readFileSync(join(tmA.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseKit.kt'), 'utf8');
+    assert(aKitTm.includes('Toast.makeText') && aKitTm.includes('AlertDialog.Builder'), 'android: toast/modal ride the platform dialogs');
+    const dials: Array<[string, string, RegExp]> = [
+      ['python', 'rosezm.py', /webbrowser\.open\('tel:' \+ number\)/],
+      ['dotnet', 'RoseKit.cs', /ProcessStartInfo\("tel:" \+ number\)/],
+      ['java', 'src/main/java/dev/rosezm/app/RoseKit.java', /new java\.net\.URI\("tel:" \+ number\)/],
+      ['cpp', 'src/rose.cpp', /QDesktopServices::openUrl\(QUrl\(QString::fromStdString\("tel:" \+ tel\)\)\)/],
+    ];
+    for (const [target, rel, want] of dials) {
+      const d = await exportProject(target as 'python', svProj, { apiBase: 'x', outRoot: join(scratch, `scanvibe-${target}`) });
+      const kit = readFileSync(join(d.outDir, rel), 'utf8');
+      assert(want.test(kit), `${target}: the dial branch opens a tel: url the kit's own way`);
+    }
+    // Desktop four: the modal branch is each toolkit's own messagebox.
+    const modals: Array<[string, string, string]> = [
+      ['python', 'rosezm.py', 'askyesno'],
+      ['dotnet', 'RoseKit.cs', 'MessageBox.Show'],
+      ['java', 'src/main/java/dev/rosezm/app/RoseKit.java', 'JOptionPane.showConfirmDialog'],
+      ['cpp', 'src/rose.cpp', 'QMessageBox box'],
+    ];
+    for (const [target, rel, want] of modals) {
+      const d = await exportProject(target as never, tmProj2, { apiBase: 'x', outRoot: join(scratch, `scanvibe-modal-${target}`) });
+      const kit2 = readFileSync(join(d.outDir, rel), 'utf8');
+      assert(kit2.includes(want), );
+    }
   }
 
   // The other eight kits answer a wall the same way: detect it at the status,
@@ -3392,6 +3659,45 @@ try {
       // Nothing CALLS it in a project that never asked - that is the real invariant.
       assert(!/__rosezmNative\s*\(\s*['"]/.test(cleanBody), `${target}: no page calls the native bridge when the project never uses it`);
     }
+    // The matrix is a promise in both directions. An advertised capability
+    // with no kit branch answers null with no warning at all; a branch the
+    // matrix omits is dead code the emitter never reaches. Check the source
+    // first - it names the file when the promise breaks - then the runtime
+    // warning contract.
+    const branchFiles: Array<[string, keyof typeof NATIVE_TARGETS]> = [
+      ['src/export/arkts.ts', 'arkts'], ['src/export/android.ts', 'android'],
+      ['src/export/swift.ts', 'xcode'], ['src/export/dart.ts', 'flutter'],
+      ['src/export/electron.ts', 'electron'], ['src/export/python.ts', 'python'],
+      ['src/export/dotnet.ts', 'dotnet'], ['src/export/java.ts', 'java'],
+      ['src/export/cpp.ts', 'cpp'],
+    ];
+    for (const [file, target] of branchFiles) {
+      const src = readFileSync(fileURLToPath(new URL(file, repo)), 'utf8');
+      const branches = new Set(Array.from(src.matchAll(/native\.includes\('([a-z-]+)'\)/g), (m) => m[1]));
+      for (const cap of branches) {
+        assert(NATIVE_TARGETS[target].capabilities.includes(cap as never), `${target}: the ${cap} branch is advertised in the matrix`);
+      }
+      for (const cap of NATIVE_TARGETS[target].capabilities) {
+        assert(branches.has(cap), `${target}: the advertised ${cap} has a kit branch`);
+      }
+    }
+    const allCapsProj = join(scratch, 'all-caps-proj');
+    mkdirSync(join(allCapsProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(allCapsProj, 'src/pages/index.rose'), `<script>
+  let out = $state('');
+  async function run() {
+${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}', { filePath: '/tmp/x.png', number: '10086', text: 'hi', title: 't', message: 'm' }));`).join('\n')}
+  }
+</script>
+<button on:click={run}>{out}</button>`);
+    for (const target of Object.keys(NATIVE_TARGETS) as Array<keyof typeof NATIVE_TARGETS>) {
+      const exp = await exportProject(target as never, allCapsProj, { apiBase: 'x', outRoot: join(scratch, `all-caps-${target}`) });
+      const warned = new Set((exp.warnings ?? []).filter((w: string) => w.includes('useNative(')).map((w: string) => (w.match(/useNative\('([a-z-]+)'\)/) ?? [])[1]));
+      for (const cap of NATIVE_CAPABILITIES) {
+        const advertised = NATIVE_TARGETS[target].capabilities.includes(cap);
+        assert(advertised ? !warned.has(cap) : warned.has(cap), `${target}: useNative('${cap}') is ${advertised ? 'honoured silently' : 'reported as a gap'}`);
+      }
+    }
     const fP = await exportProject('python', formProj, { apiBase: 'x', outRoot: join(scratch, 'form-p') });
     const fp = walk(fP.outDir).filter((f) => f.endsWith('.py')).map((f) => readFileSync(f, 'utf8')).join('\n');
     assert(/tk\.Scale\([^)]*from_=0, to=10/.test(fp), 'python: a range is a tk.Scale over its bounds');
@@ -5577,6 +5883,25 @@ h2 { font-size: 40px; }
       'tauri: the lib crate main.rs calls is the crate Cargo.toml declares',
     );
 
+    // App-level lifecycle rides the desktop shells: the shells embed the web
+    // build, and the web build already compiles src/app.rose into the client
+    // entry - so a desktop app gets onLaunch/onShow/onHide for free, pinned
+    // here so the shell pipeline can't prune the block away.
+    {
+      const aProj = join(scratch, 'shellapp');
+      mkdirSync(join(aProj, 'src/pages'), { recursive: true });
+      writeFileSync(join(aProj, 'src/app.rose'), `<script>
+  export const globalData = { theme: 'dark' };
+  export function onLaunch() { window.__launched = true; }
+</script>
+`);
+      writeFileSync(join(aProj, 'src/pages/index.rose'), '<button on:click={() => {}}>hi</button>');
+      const aExp = await exportProject('electron', aProj, { apiBase: 'x', outRoot: join(scratch, 'shellapp-out') });
+      const clientJs = readFileSync(join(aExp.outDir, 'dist', 'client.js'), 'utf8');
+      assert(clientJs.includes('__rosezmApp') && clientJs.includes('"dark"'), 'app.rose globalData rides into the electron shell\'s web bundle');
+      assert(clientJs.includes('onLaunch') && clientJs.includes('visibilitychange'), 'the shell\'s client entry keeps the onLaunch/visibility hooks');
+    }
+
     // The bridge is code, so it is EXECUTED here, not grepped: a page that asks
     // for the clipboard must get the clipboard. A shell ships no preload, but its
     // WebView has the same browser APIs Electron's preload sits on - which is why
@@ -5947,6 +6272,37 @@ h2 { font-size: 40px; }
     assert(!/\{\{\s*['"][^}]*['"]\s*\+/.test(wxml), 'no concatenation survives inside a style mustache - the platform would drop the attribute');
     assert(/animation-delay:\s*\{\{[^}]+\}\}s/.test(wxml), 'a concatenated declaration is rewritten as literal text around a mustache');
     assert(/color:\s*\{\{[^}]+\}\}/.test(wxml), 'a declaration that ends in an expression is a plain mustache too');
+  }
+
+  // AR (BUG.md): a middleware that calls $setCookie and returns undefined lets
+  // the render continue, and the collected cookies ride renderPage's result so
+  // every server can merge them into the response - sliding session expiry
+  // without short-circuiting. Executed against the real SSR bundle, not grepped.
+  {
+    const mwProj = join(scratch, 'mwcookie');
+    mkdirSync(join(mwProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(mwProj, 'src/pages/_middleware.rose'), `<script>
+  export async function handle(request: Request) {
+    $setCookie('rosezm_sid', 'refreshed-42', { maxAge: 60 * 60 * 24 * 3 });
+    if (new URL(request.url).pathname === '/walled' && !$cookies(request).rosezm_sid) {
+      return new Response(null, { status: 302, headers: { location: '/' } });
+    }
+  }
+</script>
+`);
+    writeFileSync(join(mwProj, 'src/pages/index.rose'), '<h1>home</h1>');
+    const mwOut = join(scratch, 'mwcookie-out');
+    const r = await buildProject(mwProj, mwOut, {});
+    const server = await import(pathToFileURL(join(mwOut, 'server.js')).href);
+    const mw = await server.runMiddleware(new Request('http://localhost/'));
+    assert(mw === null, 'a middleware that only sets a cookie returns null - the render continues');
+    const page = await server.renderPage('/');
+    assert(page.status === 200, 'the render behind a cookie-setting middleware still succeeds');
+    assert(Array.isArray(page.setCookies) && page.setCookies.length === 1
+      && /rosezm_sid=refreshed-42/.test(page.setCookies[0]) && /Max-Age=259200/.test(page.setCookies[0]),
+      'the cookie the middleware set rides the render result');
+    const walled = await server.runMiddleware(new Request('http://localhost/walled'));
+    assert(walled instanceof Response && walled.status === 302, 'the middleware wall still short-circuits - $setCookie did not swallow the guard');
   }
 
   console.log(`\nAll export checks passed - one source tree, ${result.pages.length} pages to WeChat, ${alipay.pages.length} to Alipay, ${flutter.pages.length} to Flutter/Dart, ${python.pages.length} to Python/Tkinter, ${arkts.pages.length} to HarmonyOS ArkTS, ${android.pages.length} to Android/Compose, ${xcode.pages.length} to Xcode/SwiftUI, ${java.pages.length} to Java/Swing, ${dotnet.pages.length} to .NET/WPF, ${cpp.pages.length} to C++/Qt; the Electron shell wraps the built site - ${checks} assertions.\nEvery target in the registry is ready - one .rose tree, every platform.`);

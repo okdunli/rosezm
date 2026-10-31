@@ -22,7 +22,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildProject, scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
-import { nativeUsage, type NativeCapability } from './native-api.js';
+import { nativeUsage, NATIVE_TARGETS, type NativeCapability } from './native-api.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
@@ -83,7 +83,13 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
     scripts: { start: 'electron .', dev: 'electron .' },
     devDependencies: { electron: '^31.0.0' },
   }, null, 2) + '\n', 'utf8');
-  await fs.promises.writeFile(path.join(out, 'main.cjs'), renderMain(opts.apiBase ?? '', app), 'utf8');
+  const pageFiles = await scanRoseFiles(opts.projectRoot);
+  const compFiles = await scanComponentFiles(opts.projectRoot);
+  const native = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
+  const shellGaps = native.filter((c) => !NATIVE_TARGETS.electron.capabilities.includes(c));
+  for (const gap of shellGaps) opts.warnings.push(`electron: useNative('${gap}') has no preload branch - the renderer answers the contract's null at runtime`);
+
+  await fs.promises.writeFile(path.join(out, 'main.cjs'), renderMain(opts.apiBase ?? '', app, native.includes('make-phone-call')), 'utf8');
   // useNative(...): this shell ships the framework's real web bundle
   // untouched - it has no script-translation step of its own - and the bundle
   // leaves the call as a bare global. The preload is the sanctioned bridge
@@ -91,9 +97,6 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
   // one global the bundle already calls, mapped to browser APIs. The
   // capabilities come from the project's sources: a project that never calls
   // useNative keeps the empty preload it has today, byte for byte.
-  const pageFiles = await scanRoseFiles(opts.projectRoot);
-  const compFiles = await scanComponentFiles(opts.projectRoot);
-  const native = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
   await fs.promises.writeFile(path.join(out, 'preload.cjs'), renderPreload(native), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', app.scheme), 'utf8');
   await writeDeployScaffold('electron', out, opts.warnings);
@@ -120,7 +123,7 @@ function renderPreload(native: NativeCapability[]): string {
 // Node surface), so it exposes the very global the bundle already calls -
 // navigator's own browser APIs on the other side of the bridge. One branch
 // per capability the project's pages asked for, nothing for the rest.
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 const optionOf = (options) => (options && typeof options === 'object' ? options : {});
 ${native.includes('camera') ? `
@@ -181,6 +184,40 @@ ${native.includes('camera') ? `    if (capability === 'camera') {
         await navigator.share({ text: String(opts.text ?? ''), title: String(opts.title ?? '') });
         return true;
       } catch (_e) { return false; }
+    }
+` : ''}${native.includes('vibrate') ? `    if (capability === 'vibrate') {
+      if (typeof navigator.vibrate !== 'function') return false;
+      return navigator.vibrate(typeof opts.duration === 'number' ? opts.duration : 200);
+    }
+` : ''}${native.includes('make-phone-call') ? `    if (capability === 'make-phone-call') {
+      const number = String(opts.number ?? '');
+      if (!number) return false;
+      return await ipcRenderer.invoke('rosezm:openExternal', 'tel:' + number);
+    }
+` : ''}${native.includes('scan-code') ? `    if (capability === 'scan-code') {
+      if (typeof BarcodeDetector !== 'function') return null;
+      var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      try {
+        var video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        await video.play();
+        var detector = new BarcodeDetector();
+        var found = await new Promise(function (resolve) {
+          var ticks = 0;
+          var timer = setInterval(function () {
+            ticks += 1;
+            detector.detect(video).then(function (codes) {
+              if (codes.length) { clearInterval(timer); resolve(codes[0].rawValue); }
+              else if (ticks > 150) { clearInterval(timer); resolve(null); }
+            }).catch(function () {});
+          }, 100);
+        });
+        return found;
+      } finally {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+      }
     }
 ` : ''}    return null;
   } catch (_err) {
@@ -265,7 +302,7 @@ fine on a real desktop (BUG.md, 2026-10-30 correction).
 `;
 }
 
-function renderMain(apiBase: string, app: AppIdentity): string {
+function renderMain(apiBase: string, app: AppIdentity, dial = false): string {
   return `'use strict';
 
 // rosezm - the exported desktop shell.
@@ -276,7 +313,7 @@ function renderMain(apiBase: string, app: AppIdentity): string {
 //    (server actions, unbaked /api routes, middleware-gated pages);
 // 3. open a hardened BrowserWindow (contextIsolation on, nodeIntegration off).
 
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -306,6 +343,13 @@ const MIME = {
   '.xml': 'application/xml',
   '.map': 'application/json',
 };
+
+// The dial capability rides IPC: the renderer has no Node surface, so the
+// main process opens the OS's tel: handler on its behalf.
+if (dial) ipcMain.handle('rosezm:openExternal', (_e, uri) => {
+  if (typeof uri === 'string' && /^(tel:|mailto:|https?:)/.test(uri)) return shell.openExternal(uri).then(() => true).catch(() => false);
+  return false;
+});
 
 function safePath(urlPath) {
   const decoded = decodeURIComponent((urlPath || '/').split('?')[0]);

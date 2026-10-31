@@ -26,6 +26,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
+import { extractAppLifecycle } from './miniprogram.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
@@ -72,6 +73,44 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   const app = appIdentity(opts.projectRoot);
   tagStyles = new Map<string, StyleModel>();
   const appDir = path.join(out, APP);
+  // App-level lifecycle (src/app.rose, uniapp's App.vue parity): onLaunch runs
+  // once at app init, onShow/onHide ride SwiftUI's scenePhase, globalData is a
+  // static kit dictionary. Bodies translate with the page-handler machinery;
+  // anything untranslatable is warned and skipped, never stubbed silently.
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appSwift: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null };
+  if (fs.existsSync(appRosePath)) {
+    const parsedApp = parseRose(await fs.promises.readFile(appRosePath, 'utf8'), appRosePath, 'xcode');
+    warnings.push(...parsedApp.warnings);
+    if (parsedApp.nodes.length) {
+      warnings.push('xcode: src/app.rose carries template nodes - the app scope has no UI, only the script\'s lifecycle exports are used');
+    }
+    if (parsedApp.script) {
+      const plain = transformSync(parsedApp.script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      const lifecycle = extractAppLifecycle(plain);
+      const translateLifecycle = (body: string): string | null => {
+        const rewritten = body
+          .replace(/getApp\(\)\.globalData\.([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g, 'RoseKit.roseAppGlobal["$1"] = $2;')
+          .replace(/getApp\(\)\.globalData/g, 'RoseKit.roseAppGlobal')
+          .replace(/\bwindow\./g, '')
+          .replace(/\bconsole\.(log|warn|error)\(/g, 'print(');
+        const swift = translateBody(rewritten, appRosePath, [], new Set(), warnings);
+        return swift.trim() ? swift : null;
+      };
+      if (lifecycle.methods.onLaunch) appSwift.launch = translateLifecycle(lifecycle.methods.onLaunch.body);
+      if (lifecycle.methods.onShow) appSwift.show = translateLifecycle(lifecycle.methods.onShow.body);
+      if (lifecycle.methods.onHide) appSwift.hide = translateLifecycle(lifecycle.methods.onHide.body);
+      if (lifecycle.globalData) {
+        try {
+          appSwift.global = JSON.stringify(JSON.parse(lifecycle.globalData
+            .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+            .replace(/'/g, '"')), null, 0);
+        } catch {
+          warnings.push('xcode: src/app.rose globalData is not a plain literal - it is emitted empty');
+        }
+      }
+    }
+  }
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
 
@@ -160,7 +199,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     await fs.promises.writeFile(path.join(appDir, 'Pages', page.view + '.swift'), renderPage(page, components, assets, vectors, warnings, content, fontMap, globalCss), 'utf8');
   }
   await fs.promises.writeFile(path.join(appDir, 'RoseRootView.swift'), renderRoot(pages), 'utf8');
-  await fs.promises.writeFile(path.join(appDir, 'rosezmApp.swift'), renderApp(), 'utf8');
+  await fs.promises.writeFile(path.join(appDir, 'rosezmApp.swift'), renderApp(appSwift, native.includes('scan-code') || native.includes('modal')), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'Info.plist'), renderInfoPlist(app, native, [...fontMap].map(([family, file]) => ({ family, file }))), 'utf8');
 
   const swiftFiles = walk(appDir).filter((f) => f.endsWith('.swift'));
@@ -539,6 +578,8 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
 function renderTheme(styles: Map<string, StyleModel>, fontMap: Map<string, string>): string {
   const rows = [...styles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no style rules';
   const tagRows = [...tagStyles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no element selector rules';
+
+
   return `import SwiftUI
 import Foundation
 
@@ -933,6 +974,21 @@ function nativeKit(native: NativeCapability[]): string {
         UIPasteboard.general.string = (opts["text"] as? String) ?? String(describing: opts["text"] ?? "")
         return true
     }` : '',
+    native.includes('make-phone-call') ? `    if capability == "make-phone-call" {
+        // open(tel:) hands the number to the system dialer - the user
+        // presses call, the app never touches the telephony stack.
+        guard let number = opts["number"] as? String, !number.isEmpty,
+              let url = URL(string: "tel:" + number) else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }` : '',
+    native.includes('vibrate') ? `    if capability == "vibrate" {
+        // UIImpactFeedbackGenerator is the haptic the system UI itself
+        // uses; a duration option maps to heavier styles.
+        let style = ((opts["duration"] as? Double) ?? 0) >= 100 ? UIImpactFeedbackGenerator.FeedbackStyle.heavy : UIImpactFeedbackGenerator.FeedbackStyle.medium
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+        return true
+    }` : '',
     native.includes('share') ? `    if capability == "share" {
         // UIActivityViewController is the platform API, but showing the sheet
         // means present(activityVC, animated: true), which only a
@@ -940,9 +996,66 @@ function nativeKit(native: NativeCapability[]): string {
         // Build it from opts["text"] / opts["title"] and present it there.
         return nil
     }` : '',
+    native.includes('toast') ? `    if capability == "toast" {
+        // A UIKit window overlay: shows synchronously (the fire-and-forget
+        // contract) and dismisses itself on a background timer.
+        let frame = UIScreen.main.bounds
+        let window = UIWindow(frame: CGRect(x: frame.midX - 140, y: frame.maxY - 140, width: 280, height: 64))
+        window.windowLevel = .alert + 1
+        let label = UILabel(frame: window.bounds)
+        label.text = (opts["title"] as? String) ?? ""
+        label.textAlignment = .center
+        label.numberOfLines = 2
+        label.textColor = .white
+        label.backgroundColor = UIColor(white: 0.15, alpha: 0.92)
+        label.layer.cornerRadius = 12
+        label.clipsToBounds = true
+        window.addSubview(label)
+        window.makeKeyAndVisible()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            DispatchQueue.main.async { window.isHidden = true }
+        }
+        return true
+    }` : '',
+    native.includes('modal') ? `    if capability == "modal" {
+        // UIAlertController is view-shaped: the cover presents it and the
+        // answer lands in RoseKit.roseModalResult (the same push/poll the
+        // android scan bridge uses).
+        RoseKit.roseModalTitle = (opts["title"] as? String) ?? ""
+        RoseKit.roseModalMessage = (opts["message"] as? String) ?? ""
+        RoseKit.roseModalRequested = true
+        return nil
+    }` : '',
+    native.includes('scan-code') ? `    if capability == "scan-code" {
+        // The await bridge (AGENTS.md 312): the call flips a static flag;
+        // the app layer presents the DataScanner cover and writes the
+        // decoded value into RoseKit.roseScanResult, which views read
+        // reactively - the SwiftUI way to await UI.
+        RoseKit.roseScanRequested = true
+        return nil
+    }` : '',
+    native.includes('get-battery') ? `    if capability == "get-battery" {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = Int(UIDevice.current.batteryLevel * 100)
+        if level < 0 { return nil }
+        let charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
+        return ["level": level, "charging": charging]
+    }` : '',
+    native.includes('get-system-info') ? `    if capability == "get-system-info" {
+        return ["platform": "ios", "system": UIDevice.current.systemName + " " + UIDevice.current.systemVersion]
+    }` : '',
+    native.includes('save-image') ? `    if capability == "save-image" {
+        // UIImageWriteToSavedPhotosAlbum hands the image to the photo library.
+        // NSPhotoLibraryAddUsageDescription in Info.plist is what makes the
+        // system ask once instead of terminating the app.
+        guard let path = opts["filePath"] as? String, !path.isEmpty,
+              let image = UIImage(contentsOfFile: path) else { return false }
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+        return true
+    }` : '',
   ].filter(Boolean).join('\n');
   return `
-${native.includes('clipboard-read') || native.includes('clipboard-write') ? 'import UIKit\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
+${['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'get-battery', 'get-system-info', 'save-image'].some((c) => native.includes(c as NativeCapability)) ? 'import UIKit\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
 /// function because each platform API is shaped its own way and returns its own
 /// value type.
 ///   camera          -> a local image path/URL, or nil when cancelled
@@ -1409,19 +1522,127 @@ channel and action protocol as the web build.
 ${renderWarningSection(warnings)}`;
 }
 
-function renderApp(): string {
-  return `import SwiftUI
-import AVKit
+function renderApp(
+  appSwift: { launch: string | null; show: string | null; hide: string | null; global: string | null },
+  scanState = false,
+): string {
+  const hasApp = Boolean(appSwift.launch || appSwift.show || appSwift.hide || appSwift.global) || scanState;
+  const globalDecl = (appSwift.global || scanState)
+    ? `\n// App-level globalData (src/app.rose): one dictionary, every view's kit reads it.\nenum RoseKit {\n    static var roseScanRequested = false
+    static var roseModalRequested = false
+    static var roseModalTitle = ""
+    static var roseModalMessage = ""
+    static var roseModalResult: Bool? = nil\n    static var roseScanResult: String? = nil\n    static var roseAppGlobal: [String: Any] = [${(appSwift.global ?? '{}').replace(/^[{]/, '').replace(/[}]$/, '').replace(/"([A-Za-z_$][\w$]*)":/g, '"$1": ')}]\n}`
+    : '';
+  // The two covers exist only when a page asked for scan-code or modal: the
+  // views and RoseKit they name ride scanViewBlock, emitted on the same flag.
+  const covers = scanState ? `
+                .fullScreenCover(isPresented: Binding(get: { RoseKit.roseScanRequested }, set: { RoseKit.roseScanRequested = $0 })) {
+                    RoseScannerView { value in
+                        RoseKit.roseScanResult = value
+                        RoseKit.roseScanRequested = false
+                    }
+                }
+                .fullScreenCover(isPresented: Binding(get: { RoseKit.roseModalRequested }, set: { RoseKit.roseModalRequested = $0 })) {
+                    RoseAlertView { answer in
+                        RoseKit.roseModalResult = answer
+                        RoseKit.roseModalRequested = false
+                    }
+                }` : '';
+  const appBody = hasApp ? `@main
+struct rosezmApp: App {
+    @Environment(\\.scenePhase) private var scenePhase: ScenePhase
+    @State private var launched = false
 
-@main
+    init() {
+${appSwift.launch ? indentBlock(appSwift.launch, '        ') : '        // nothing declared'}
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RoseRootView()
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active {
+${appSwift.show ? indentBlock(appSwift.show, '                        ') : '                        // nothing declared'}
+                    }
+                    if phase == .background {
+${appSwift.hide ? indentBlock(appSwift.hide, '                        ') : '                        // nothing declared'}
+                    }
+                }${covers}
+        }
+    }
+}` : `@main
 struct rosezmApp: App {
     var body: some Scene {
         WindowGroup {
             RoseRootView()
         }
     }
-}
+}`;
+  const scanViewBlock = [
+'',
+'// The DataScanner cover: the system scanner view wrapped for SwiftUI -',
+'// iOS 16+; on older OSes the cover still presents but answers nil per',
+"// the contract's empty answer.",
+'struct RoseScannerView: UIViewControllerRepresentable {',
+'    var onDone: (String?) -> Void',
+'',
+'    func makeUIViewController(context: Context) -> DataScannerViewController {',
+'        let vc = DataScannerViewController(',
+'            recognizedDataTypes: [.barcode()],',
+'            qualityMode: .balanced,',
+'            isHighlightingEnabled: true,',
+'        )',
+'        vc.delegate = context.coordinator',
+'        return vc',
+'    }',
+'',
+'    func updateUIViewController(_ vc: DataScannerViewController, context: Context) {}',
+'',
+'    func makeCoordinator() -> Coordinator { Coordinator(onDone: onDone) }',
+'',
+'    class Coordinator: NSObject, DataScannerViewControllerDelegate {',
+'        var onDone: (String?) -> Void',
+"        init(onDone: @escaping (String?) -> Void) { self.onDone = onDone }",
+'',
+'    func dataScanner(_ dataScanner: DataScannerViewController, didAdd added: [RecognizedItem], allItems: [RecognizedItem]) {',
+'            for item in added {',
+'                if case .barcode(let barcode) = item {',
+'                    onDone(barcode.payloadStringValue)',
+'                    return',
+'                }',
+'            }',
+'        }',
+'    }',
+'}',
+'/// The modal cover: UIAlertController presented from the representable -',
+'/// the system alert, the iOS way to ask. OK answers true, Cancel false.',
+'struct RoseAlertView: UIViewControllerRepresentable {',
+'    var onDone: (Bool) -> Void',
+'    func makeUIViewController(context: Context) -> UIViewController {',
+'        let vc = UIViewController()',
+'        vc.view.backgroundColor = .clear',
+'        return vc',
+'    }',
+'    func updateUIViewController(_ vc: UIViewController, context: Context) {',
+'        let alert = UIAlertController(title: RoseKit.roseModalTitle, message: RoseKit.roseModalMessage, preferredStyle: .alert)',
+'        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in onDone(false) })',
+'        alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in onDone(true) })',
+'        vc.present(alert, animated: true)',
+'    }',
+  ].join('\n');
+  return `import SwiftUI
+import AVKit
+${globalDecl}
+
+${appBody}
+${scanState ? scanViewBlock : ''}
 `;
+}
+
+/** Re-indent a translated lifecycle body for its nesting inside the App struct. */
+function indentBlock(src: string, pad: string): string {
+  return src.split('\n').map((l) => (l.trim() ? pad + l : l)).join('\n');
 }
 
 function renderRoot(pages: Array<{ route: string; view: string; params: string[] }>): string {
@@ -1480,6 +1701,7 @@ function renderInfoPlist(app: AppIdentity, native: NativeCapability[], fonts: Ar
   const usage: Record<string, string> = {
     NSCameraUsageDescription: 'This app uses the camera to take the photo you asked for.',
     NSLocationWhenInUseUsageDescription: 'This app uses your location while it is open, when a page asks for it.',
+    NSPhotoLibraryAddUsageDescription: 'This app saves the image you asked for to your photo library.',
   };
   const usageKeys = nativeManifestEntries('xcode', native);
   const uiUsage = usageKeys.length

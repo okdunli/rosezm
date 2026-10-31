@@ -2076,6 +2076,18 @@ export async function compileComponent(filePath: string, publicDir: string, scop
           { file: filePath, hint: `rename your function, or drop the auto setter and write $setState("${s.name}", v) - the explicit form never collides` },
         );
       }
+      // BUG.md BF: a state named like a runtime export (`let state = $state(...)`)
+      // made esbuild alias the import to the same short name as the local
+      // destructuring, producing `let[n,i]=n(...)` - a TDZ self-reference that
+      // 500s every SSR render, on some pages only, depending on what other
+      // identifiers occupy esbuild's alphabet. Detected here, loudly.
+      if (RESERVED_RUNTIME_NAMES.has(s.name)) {
+        throw new RoseError(
+          'E-SCRIPT',
+          `${filePath}: the $state name "${s.name}" collides with the framework's runtime import of the same name`,
+          { file: filePath, hint: `rename the variable (e.g. ${s.name}_status) - a name matching a runtime export (${[...RESERVED_RUNTIME_NAMES].slice(0, 4).join(', ')}...) makes the bundle self-reference and 500 at render` },
+        );
+      }
     }
   }
 
@@ -5220,7 +5232,15 @@ function compileSlot(acc: string): string {
   return `${acc} += String(children);\n`;
 }
 
-const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $store, $udp, $tcp, $listen, $websocket, $mqtt, parseLoRaWAN, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
+const RUNTIME_IMPORTS = `import { state, setState, persistState, $data, hasState, isSeeded, markSeeded, esc, refresh, onMount, onCleanup, $effect, getContext, $query, $t, bestLocale, localeDir, ensureLocale, loadLocale, handlers, directives, $cookies, $sessionCookie, $setCookie, serializeRequestCookies, $store, $udp, $tcp, $listen, $websocket, $mqtt, parseLoRaWAN, ActionError, $actionError, $actionErrorOrThrow, $actionPending, $boundaryFallback, $setBoundaryError, $boundaryError, $append, $prepend, $merge, applyStateDeltas, textMark, attrMark, boolAttrMark, ifMark, eachMark, headMark, rawMark, slotBlockMark, redirect, notFound, aggregate, loader, encodeSdui, decodeSdui } from './runtime.js';`;
+
+// BUG.md BF: a page's $state named like one of these makes esbuild alias the
+// import to the same short name as the local destructuring - a TDZ
+// self-reference that 500s SSR renders on some pages only. Derived from
+// RUNTIME_IMPORTS so the two can never drift.
+const RESERVED_RUNTIME_NAMES: ReadonlySet<string> = new Set(
+  RUNTIME_IMPORTS.replace(/^import\s*\{/, '').replace(/\}\s*from[\s\S]*$/, '').split(',').map((s) => s.trim()).filter(Boolean),
+);
 
 const API_RUNTIME_HELPERS = RUNTIME_IMPORTS
   .replace(/^import\s*\{/, '')
@@ -5981,6 +6001,69 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
     }
   }
 
+  // App-level lifecycle on the web (uniapp's App.vue parity, the mp exports
+  // already consume it): src/app.rose's onLaunch/onShow/onHide/onError and
+  // globalData are stripped of types by esbuild and embedded into the client
+  // entry - onLaunch fires once at boot, onShow/onHide ride visibilitychange,
+  // onError rides window.onerror. The file is not a route: it lives outside
+  // src/pages, so scans never pick it up.
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appClientBlock = '';
+  if (fs.existsSync(appRosePath)) {
+    const appRaw = await fs.promises.readFile(appRosePath, 'utf8');
+    const script = /<script>([\s\S]*?)<\/script>/.exec(appRaw)?.[1] ?? '';
+    if (!script.trim()) {
+      throw new RoseError('E-EXPORT', `${appRosePath}: an app.rose needs a <script> block with its lifecycle exports`, {
+        file: appRosePath,
+        hint: 'export function onLaunch() {...} (and optionally onShow/onHide/onError and a globalData object)',
+      });
+    }
+    const plain = esbuild.transformSync(script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+    const findFn = (name: string): string | null => {
+      const m = new RegExp(`(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`).exec(plain);
+      if (!m) return null;
+      let depth = 0;
+      for (let i = m.index + m[0].length - 1; i < plain.length; i++) {
+        if (plain[i] === '{') depth++;
+        else if (plain[i] === '}') { depth--; if (depth === 0) {
+          const head = /(?:export\s+)?((?:async\s+)?function\s+\w+\s*\([^)]*\))/.exec(m[0])![1];
+          return `${head} {${plain.slice(m.index + m[0].length, i + 1)}`;
+        } }
+      }
+      return null;
+    };
+    const launch = findFn('onLaunch');
+    const show = findFn('onShow');
+    const hide = findFn('onHide');
+    const err = findFn('onError');
+    const gd = /(?:export\s+)?const\s+globalData\s*=\s*(\{[\s\S]*?\n?\})\s*;?/.exec(plain)?.[1] ?? null;
+    if (!launch && !show && !hide && !err && !gd) {
+      throw new RoseError('E-EXPORT', `${appRosePath}: no lifecycle exports found in the script`, {
+        file: appRosePath,
+        hint: 'export function onLaunch() {...} (and optionally onShow/onHide/onError and a globalData object)',
+      });
+    }
+    appClientBlock = `
+// App-level lifecycle from src/app.rose: onLaunch once at boot, onShow/onHide
+// on visibilitychange, onError on window.onerror, globalData on window.__rosezmApp.
+// Guarded on window: the same bundle also runs in Node for SSR, where none of
+// this exists (the same guard the lazy-hydration flag below uses).
+if (typeof window !== 'undefined') {
+window.__rosezmApp = ${gd ? `(${gd})` : '{}'};
+${launch ? `var __appLaunch = ${launch};` : ''}
+${show ? `var __appShow = ${show};` : ''}
+${hide ? `var __appHide = ${hide};` : ''}
+${err ? `var __appErr = ${err};` : ''}
+var __appLaunched = false;
+window.addEventListener('error', function (e) { if (typeof __appErr === 'function') { try { __appErr(e.error || new Error(e.message)); } catch (x) {} } });
+window.addEventListener('unhandledrejection', function (e) { if (typeof __appErr === 'function') { try { __appErr(e.reason instanceof Error ? e.reason : new Error(String(e.reason))); } catch (x) {} } });
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible' && typeof __appShow === 'function') { try { __appShow(); } catch (x) {} }
+  if (document.visibilityState === 'hidden' && typeof __appHide === 'function') { try { __appHide(); } catch (x) {} }
+});
+}`;
+  }
+
 
   const serverRoutes = pages
     .map(({ info, i }) => {
@@ -6027,7 +6110,7 @@ import { renderMarkdown } from './content-md.ts';
 ${appUsesAuth ? "import crypto from 'node:crypto';" : "// no route references __rosezmAuth: the node:crypto auth helpers are omitted, keeping the bundle edge-loadable"}
 ${appUsesNet ? "import * as __rosezmDgram from 'node:dgram';\nimport * as __rosezmNet from 'node:net';" : "// no route opens a network listener ($udp/$tcp/$listen): the node:dgram/node:net imports are omitted, keeping the bundle edge-loadable"}
 ${appUsesWs ? "import * as __rosezmHttp from 'node:http';\nimport * as __rosezmCrypto from 'node:crypto';" : "// no route opens a WebSocket server ($websocket): the node:http/node:crypto imports are omitted, keeping the bundle edge-loadable"}
-import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, getRequestQuery, getContext, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen, $websocket, $mqtt } from './runtime.js';
+import { setState, persistState, clearRequestState, isolateRender, serializeState, resetRequestContext, installContextStore, setRequestQuery, getRequestQuery, getContext, serializeRequestCookies, isLocale, setLocales, localeList, localeDir, setStoreTransport, applyStorePatch, ActionError, StateDelta, setStateDelta, esc, __startNetwork, __stopNetwork, $udp, $tcp, $listen, $websocket, $mqtt } from './runtime.js';
 export { __startNetwork, __stopNetwork };
 ${runtimePlugins.length > 0
     ? `import { hooks as __pluginHooks, hasRequestHooks as __hasRequestHooks, hasResponseHooks as __hasResponseHooks } from './plugins.js';`
@@ -6764,7 +6847,12 @@ async function renderPageIsolated(pathname, form, options) {
       state = '{"__route":' + JSON.stringify(pathname) + (s.length > 2 ? ',' + s.slice(1) : '}');
     }
  // Csr ( auto since #29): false when the compiler found nothing in the route's chain that needs the client (or the route asserted csr = false) .
-      return { html: rendered.html, state, head: rendered.head, status: actionStatus || 200, csr: route.csr !== false, shell: route.shell !== false, lang: docLang, dir: localeDir(docLang) };
+      // AR (BUG.md): cookies a middleware or page collected via $setCookie ride
+      // the render result so every server can merge them into the final
+      // response headers - the seam that makes sliding session expiry work
+      // without short-circuiting the render.
+      const setCookies = (serializeRequestCookies() ?? []) as string[];
+      return { html: rendered.html, state, head: rendered.head, setCookies, status: actionStatus || 200, csr: route.csr !== false, shell: route.shell !== false, lang: docLang, dir: localeDir(docLang) };
   }
   return await notFoundPage(pathname);
 }
@@ -7180,6 +7268,7 @@ const __defLocale = '${defaultLocale}';` : ''}
 ${vitalsOn ? `// the app asked for web-vitals. The import is what keeps\n// reportVitals alive through minification and tree-shaking; the call is one\n// statement at boot, before the first render.\nimport { reportVitals } from './runtime.js';`: ''}
 // Lazy hydration: when the app opts in (export const lazyHydration = true in\n// the root _layout.rose), the bootstrap defers the initial wire() to\n// requestIdleCallback. The flag is set here (module eval runs before the\n// bootstrap's start() call) so the bootstrap can read it without a second channel.
 if (typeof window !== 'undefined') window.__rosezmLazy = ${JSON.stringify(lazyHydrationFlag)};
+${appClientBlock}
 // The two pack doors, re-exported for an app that wants to warm a language before its visitor asks for it (ensureLocale) or to feed a dictionary.
 export { ensureLocale, loadLocale } from './runtime.js';
 ${v.prefetchDoor}
@@ -7472,6 +7561,12 @@ async function __swap(container, html) {
 export async function start(container, pathname, initial, skipGate) {
   clearMounts(); 
   // stale mounts from a failed render never fire
+  // App-level onLaunch (src/app.rose): exactly once per page load, after the
+  // state resumes but before the first render of any route.
+  if (typeof __appLaunch === 'function' && !__appLaunched) {
+    __appLaunched = true;
+    try { await __appLaunch({ path: pathname }); } catch (e) { console.error('rosezm: app onLaunch failed', e); }
+  }
   if (initial) {
     const el = document.getElementById('__rosezm_state');
     if (el) resumeState(el.textContent);

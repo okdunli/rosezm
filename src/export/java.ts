@@ -1808,6 +1808,24 @@ function nativeKit(native: NativeCapability[]): string {
                 return true;
             }
 ` : '',
+    native.includes('modal') ? `            case "modal": {
+                // JOptionPane is the Swing way to ask - the stdlib paints it.
+                Object msgObj = opts.get("message");
+                Object titleObj = opts.get("title");
+                int answer = javax.swing.JOptionPane.showConfirmDialog(null, msgObj == null ? "" : String.valueOf(msgObj), titleObj == null ? "" : String.valueOf(titleObj), javax.swing.JOptionPane.OK_CANCEL_OPTION);
+                return answer == javax.swing.JOptionPane.OK_OPTION;
+            }
+` : '',
+    native.includes('make-phone-call') ? `            case "make-phone-call": {
+                // Desktop.browse on a tel: URI reaches the OS's own dialer
+                // handler - the same desktop stand-in the share branch uses.
+                Object numObj = opts.get("number");
+                String number = numObj == null ? "" : String.valueOf(numObj);
+                if (number.isEmpty()) return false;
+                java.awt.Desktop.getDesktop().browse(new java.net.URI("tel:" + number));
+                return true;
+            }
+` : '',
   ].filter(Boolean).join('');
   return `
     /** The device capabilities this project's pages asked for through

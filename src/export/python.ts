@@ -456,6 +456,18 @@ ${native.includes('camera') ? `    if capability == 'camera':
         # tkinter.filedialog, only picks an EXISTING image file - it cannot
         # capture, so this answers None instead of pretending.
         return None
+` : ''}${native.includes('toast') || native.includes('modal') ? `    if capability in ('toast', 'modal'):
+        # stdlib only: tkinter.messagebox is the Tk way to answer both - the
+        # toast maps to showinfo (one OK button), the modal to askyesno
+        # (True/False). Both block until dismissed, which is the Tk shape.
+        from tkinter import messagebox
+        root = getattr(tk, '_default_root', None) or tk.Tk()
+        title = str(options.get('title', ''))
+        message = str(options.get('message', ''))
+        if capability == 'toast':
+            messagebox.showinfo(title, message, parent=root)
+            return True
+        return messagebox.askyesno(title, message, parent=root)
 ` : ''}${native.includes('geolocation') ? `    if capability == 'geolocation':
         # Tk has no location service. An app would need an OS location API
         # (WinRT Geolocator, CoreLocation) or a web geolocation service.
@@ -479,6 +491,13 @@ ${native.includes('camera') ? `    if capability == 'camera':
         import webbrowser
         target = str(options.get('url') or options.get('text') or '')
         return bool(target) and webbrowser.open(target)
+` : ''}${native.includes('make-phone-call') ? `
+    if capability == 'make-phone-call':
+        # stdlib only: webbrowser.open on a tel: URL reaches the OS dialer
+        # (Windows Dialer, macOS FaceTime, a Linux softphone).
+        import webbrowser
+        number = str(options.get('number', ''))
+        return bool(number) and webbrowser.open('tel:' + number)
 ` : ''}    return None
 ` : '';
   return `"""The exported app's stdlib-only kit: the data channel and server actions.

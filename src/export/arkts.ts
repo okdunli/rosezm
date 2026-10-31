@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
+import { extractAppLifecycle } from './miniprogram.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
@@ -58,6 +59,49 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const out = path.join(opts.outDir, 'arkts');
   const pkgRoot = path.join(out, 'entry', 'src', 'main');
   const etsRoot = path.join(pkgRoot, 'ets');
+  // App-level lifecycle (src/app.rose, uniapp's App.vue parity): onCreate
+  // seeds AppStorage with globalData and runs the translated onLaunch;
+  // onForeground/onBackground carry onShow/onHide.
+  const appRosePath = path.join(root, 'src', 'app.rose');
+  let appArkts: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null };
+  if (fs.existsSync(appRosePath)) {
+    const parsedApp = parseRose(await fs.promises.readFile(appRosePath, 'utf8'), appRosePath, 'arkts');
+    warnings.push(...parsedApp.warnings);
+    if (parsedApp.nodes.length) {
+      warnings.push('arkts: src/app.rose carries template nodes - the app scope has no UI, only the script\'s lifecycle exports are used');
+    }
+    if (parsedApp.script) {
+      const plain = transformSync(parsedApp.script, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      const lifecycle = extractAppLifecycle(plain);
+      const translateLifecycle = (body: string): string | null => {
+        const rewritten = body
+          // AppStorage lives on the page side as a global; on the ability side
+          // the same global works. A globalData WRITE goes through setOrCreate
+          // so a first-write races nothing.
+          // A globalData WRITE becomes setOrCreate with the value consumed up
+          // to the statement's semicolon (the JS `x.y = v;` shape), so the
+          // emitted call closes its own parens.
+          .replace(/getApp\(\)\.globalData\.([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g, "AppStorage.setOrCreate('rosezmAppGlobal.$1', $2);")
+          .replace(/getApp\(\)\.globalData/g, "(AppStorage.get('rosezmAppGlobal') as Record<string, Object>)")
+          .replace(/\bwindow\./g, '')
+          .replace(/\bconsole\.(log|warn|error)\(/g, 'hilog.info(0x0000, \'rosezm\', ');
+        const dart = translateBody(rewritten, appRosePath, [], warnings);
+        return dart.trim() ? dart : null;
+      };
+      if (lifecycle.methods.onLaunch) appArkts.launch = translateLifecycle(lifecycle.methods.onLaunch.body);
+      if (lifecycle.methods.onShow) appArkts.show = translateLifecycle(lifecycle.methods.onShow.body);
+      if (lifecycle.methods.onHide) appArkts.hide = translateLifecycle(lifecycle.methods.onHide.body);
+      if (lifecycle.globalData) {
+        try {
+          appArkts.global = JSON.stringify(JSON.parse(lifecycle.globalData
+            .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+            .replace(/'/g, '"')), null, 0);
+        } catch {
+          warnings.push('arkts: src/app.rose globalData is not a plain literal - it is emitted empty');
+        }
+      }
+    }
+  }
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
 
@@ -174,7 +218,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     // already named by the fixed header above, so they stay excluded.
     await fs.promises.writeFile(path.join(etsRoot, 'pages', page.struct + '.ets'), pageSrc.replace(KIT_IMPORT_SLOT, kitImportLine(pageSrc, kitExports, new Set(['roseData', 'roseAction', 'roseKv']))), 'utf8');
   }
-  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(app.scheme), 'utf8');
+  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(app.scheme, appArkts), 'utf8');
   await fs.promises.writeFile(path.join(pkgRoot, 'resources', 'base', 'profile', 'main_pages.json'), JSON.stringify({
     src: pages.map((p) => `pages/${p.struct}`),
   }, null, 2) + '\n', 'utf8');
@@ -575,6 +619,13 @@ export function roseContentGet(coll: string, slug: string): Object | null {
     native.includes('camera') ? "import { photoAccessHelper } from '@kit.MediaLibraryKit';" : '',
     native.includes('geolocation') ? "import { geoLocationManager } from '@kit.LocationKit';" : '',
     native.includes('share') ? "import { systemShare } from '@kit.ShareKit';\nimport { uniformTypeDescriptor as utd } from '@kit.ArkData';\nimport { common } from '@kit.AbilityKit';" : '',
+    native.includes('make-phone-call') ? "import { call } from '@kit.TelephonyKit';" : '',
+    native.includes('vibrate') ? "import vibrator from '@ohos.vibrator';" : '',
+    native.includes('scan-code') ? "import { scanBarcode } from '@kit.ScanKit';" : '',
+    native.includes('toast') || native.includes('modal') ? "import { promptAction } from '@kit.ArkUI';" : '',
+    native.includes('get-battery') ? "import batteryInfo from '@ohos.batteryInfo';" : '',
+    native.includes('get-network-type') ? "import { radio } from '@kit.TelephonyKit';" : '',
+    native.includes('get-system-info') ? "import deviceInfo from '@ohos.deviceInfo';" : '',
   ].filter(Boolean).join('\n');
   const nativeBranches = [
     native.includes('camera') ? `    if (capability === 'camera') {
@@ -609,6 +660,50 @@ export function roseContentGet(coll: string, slug: string): Object | null {
       const data = new systemShare.SharedData({ utd: utd.UniformDataType.TEXT, content: String(options['text'] ?? '') });
       await new systemShare.ShareController(data).show(context, { previewMode: systemShare.SharePreviewMode.DEFAULT, selectionMode: systemShare.SelectionMode.SINGLE });
       return true;
+    }` : '',
+    native.includes('make-phone-call') ? `    if (capability === 'make-phone-call') {
+      // call.makeCall opens the dialer with the number filled in - the
+      // system telephony sheet, no CALL permission (the user presses dial).
+      const number = String(options['number'] ?? '');
+      if (!number) return false;
+      call.makeCall(number);
+      return true;
+    }` : '',
+    native.includes('vibrate') ? `    if (capability === 'vibrate') {
+      // ohos.permission.VIBRATE rides module.json5 when a page asks.
+      const ms = typeof options['duration'] === 'number' ? options['duration'] : 200;
+      vibrator.startVibration({ count: 1, duration: ms }, { id: 0, usage: vibrator.EffectUsageType.UNKNOWN });
+      return true;
+    }` : '',
+    native.includes('toast') ? `    if (capability === 'toast') {
+      promptAction.showToast({ message: String(options['title'] ?? ''), duration: typeof options['duration'] === 'number' ? options['duration'] : 2000 });
+      return true;
+    }` : '',
+    native.includes('modal') ? `    if (capability === 'modal') {
+      const answer = await promptAction.showDialog({
+        title: String(options['title'] ?? ''),
+        message: String(options['message'] ?? ''),
+        buttons: [{ text: 'Cancel', color: '#666666' }, { text: 'OK', color: '#e91e63' }],
+      });
+      return answer.index === 1;
+    }` : '',
+    native.includes('get-battery') ? `    if (capability === 'get-battery') {
+      // @ohos.batteryInfo is a sync property bag - the one-call contract fits.
+      return { 'level': batteryInfo.batterySOC, 'charging': batteryInfo.chargingStatus === batteryInfo.BatteryChargeState.ENABLE } as Record<string, Object>;
+    }` : '',
+    native.includes('get-network-type') ? `    if (capability === 'get-network-type') {
+      const type = radio.getDataNetworkType();
+      return { 'type': type === 1 ? 'wifi' : type > 0 ? 'mobile' : 'none' } as Record<string, Object>;
+    }` : '',
+    native.includes('get-system-info') ? `    if (capability === 'get-system-info') {
+      return { 'platform': 'harmonyos', 'system': deviceInfo.marketName } as Record<string, Object>;
+    }` : '',
+      native.includes('scan-code') ? `    if (capability === 'scan-code') {
+      // The system scanner UI: one call, the OS renders the viewfinder and
+      // returns the decoded string. No camera pipeline of our own.
+      const options: scanBarcode.ScanOptions = { scanTypes: [scanBarcode.ScanType.ALL], enableMultiMode: false };
+      const result = await scanBarcode.launchScanner(options);
+      return result ? result.originalValue : null;
     }` : '',
   ].filter(Boolean).join('\n');
   const nativeKit = native.length ? `
@@ -1282,7 +1377,18 @@ function renderBuildProfile(): string {
   }, null, 2) + '\n';
 }
 
-function renderAbility(scheme: string): string {
+function renderAbility(
+  scheme: string,
+  appArkts: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null },
+): string {
+  const seedGlobal = appArkts.global
+    ? `    AppStorage.setOrCreate('rosezmAppGlobal', JSON.parse(${JSON.stringify(appArkts.global)}) as Record<string, Object>);`
+    : '';
+  const launchBody = appArkts.launch
+    ? appArkts.launch.split('\n').map((l) => `    ${l}`).join('\n')
+    : '';
+  const indented = (body: string | null): string =>
+    body ? body.split('\n').map((l) => `      ${l}`).join('\n') : '      // nothing declared';
   return `import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
 import hilog from '@ohos.hilog';
@@ -1292,6 +1398,8 @@ import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(0x0000, 'rosezm', 'EntryAbility onCreate');
+${seedGlobal}
+${launchBody}
     // A deep link (${scheme ? scheme : 'myscheme'}://blog/7) arrives as want.uri, which the
     // system parses as scheme + host + path - the route is the host joined
     // onto the path, the same rule the Android and iOS shells follow. The
@@ -1311,6 +1419,14 @@ export default class EntryAbility extends UIAbility {
         hilog.error(0x0000, 'rosezm', 'loadContent failed: %{public}s', JSON.stringify(err));
       }
     });
+  }
+
+  onForeground(): void {
+${indented(appArkts.show)}
+  }
+
+  onBackground(): void {
+${indented(appArkts.hide)}
   }
 
   onDestroy(): void {

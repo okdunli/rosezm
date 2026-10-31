@@ -210,13 +210,12 @@ export async function createEdgeHandler(
       const split = target.indexOf('?');
       const targetPath = canonicalTarget(split < 0 ? target : target.slice(0, split));
       const targetUrl = targetPath + (split < 0 ? '' : target.slice(split));
-      const headers: Record<string, string> = { 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'content-type': 'application/json; charset=utf-8' };
+      const headers = new Headers({ 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'content-type': 'application/json; charset=utf-8' });
       if (!mod.middleware) return new Response(null, { status: 204, headers });
       try {
         const mw = await mod.runMiddleware(new Request(new URL(targetUrl, request.url), { method: 'GET', headers: request.headers }));
         if (!mw) return new Response(null, { status: 204, headers });
-        const setCookie = mw.headers.get('set-cookie');
-        if (setCookie) headers['set-cookie'] = setCookie;
+        for (const c of mw.headers.getSetCookie?.() ?? []) headers.append('set-cookie', c);
         return new Response(JSON.stringify({ redirect: mw.headers.get('location') || '', status: mw.status }), { status: 200, headers });
       } catch (err) {
         return new Response(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }), { status: 500, headers });
@@ -316,9 +315,14 @@ export async function createEdgeHandler(
     }
     let html = buildShell(page.html, page.state, clientFor(pathname), page.head, styles, page.csr !== false, page.lang, page.dir, nonce, page.shell !== false);
     if (request.headers.get('x-pjax')) html = pjaxFragment(html);
+    // AR: cookies a middleware or page collected via $setCookie merge into the
+    // rendered response. Each cookie appends: set-cookie is a list header, and
+    // a joined single value would collapse two cookies into one malformed one.
+    const bufferedHeaders = new Headers({ 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) });
+    for (const c of (page as { setCookies?: string[] }).setCookies ?? []) bufferedHeaders.append('set-cookie', c);
     const buffered = new Response(html, {
       status: page.status ?? 200,
-      headers: { 'content-type': 'text/html; charset=utf-8', ...pageHeaders(pathname, nonce) }
+      headers: bufferedHeaders
     });
     return hookCtx ? mod.runResponseHooks(hookCtx, buffered) : buffered;
     });

@@ -2990,6 +2990,28 @@ export function $sessionCookie(
   ].filter(Boolean).join('; ');
 }
 
+/**
+ * Collect a Set-Cookie for THIS request's response. A middleware can call it
+ * and still return undefined (the normal render continues), and the server
+ * merges everything collected into the final response headers - the seam that
+ * lets a wall-less middleware refresh a session cookie (sliding expiry)
+ * without short-circuiting the render. Cleared with the request context.
+ */
+export function $setCookie(name: string, value: string, opts: { path?: string; maxAge?: number; sameSite?: 'Strict' | 'Lax' | 'None'; secure?: boolean; httpOnly?: boolean } = {}): void {
+  const header = $sessionCookie(name, value, opts);
+  const ctx = getContext() as Record<string, unknown>;
+  const bag = (ctx.__rosezmSetCookies ??= []) as string[];
+  if (!bag.includes(header)) bag.push(header);
+}
+
+/** The Set-Cookie values $setCookie collected for this request, or null.
+ *  The server merges these into the final response headers. */
+export function serializeRequestCookies(): string[] | null {
+  const ctx = getContext() as Record<string, unknown>;
+  const bag = ctx.__rosezmSetCookies as string[] | undefined;
+  return bag && bag.length ? bag : null;
+}
+
 export function reportVitals(): void {
   if (typeof window === 'undefined' || typeof performance === 'undefined') return;
   const live: Record<string, number> = {};
