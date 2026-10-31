@@ -65,6 +65,10 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
+/** R471: the prefers-color-scheme dark half, kept apart from the light rows. */
+let swiftDarkClasses = new Map<string, StyleModel>();
+let swiftDarkTags = new Map<string, StyleModel>();
+let swiftDarkRules = 0;
 
 export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
@@ -73,6 +77,9 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
   const app = appIdentity(opts.projectRoot);
   tagStyles = new Map<string, StyleModel>();
+  swiftDarkClasses = new Map<string, StyleModel>();
+  swiftDarkTags = new Map<string, StyleModel>();
+  swiftDarkRules = 0;
   const appDir = path.join(out, APP);
   // App-level lifecycle (src/app.rose, uniapp's App.vue parity): onLaunch runs
   // once at app init, onShow/onHide ride SwiftUI's scenePhase, globalData is a
@@ -397,6 +404,18 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
     if (last.unsupported.includes(':hover') && !rule.hover) {
       warnings.push(`xcode: :hover has no SwiftUI equivalent on "${rule.selector}" - dropped`);
     }
+    if (rule.dark) {
+      swiftDarkRules++;
+      if (!last.classes.length && last.tag) {
+        swiftDarkTags.set(last.tag, mergeModels(swiftDarkTags.get(last.tag) ?? null, rule.model));
+      } else {
+        for (const cls of last.classes) {
+          const key = scope ? `${cls}__${scope}` : cls;
+          swiftDarkClasses.set(key, mergeModels(swiftDarkClasses.get(key) ?? null, rule.model));
+        }
+      }
+      continue;
+    }
     if (rule.media) {
       const guarded = rule.media.min !== undefined || rule.media.max !== undefined;
       if (guarded) {
@@ -621,6 +640,8 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
 function renderTheme(styles: Map<string, StyleModel>, fontMap: Map<string, string>): string {
   const rows = [...styles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no style rules';
   const tagRows = [...tagStyles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no element selector rules';
+  const darkRows = [...swiftDarkClasses].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no dark rules';
+  const darkTagRows = [...swiftDarkTags].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no dark element rules';
 
 
   return `import SwiftUI
@@ -740,13 +761,34 @@ let roseTagStyles: [String: RoseStyle] = [
 ${tagRows}
 ]
 
+/// R471: the prefers-color-scheme dark half. roseDark is flipped by the page's
+/// body from SwiftUI's colorScheme, and roseResolve merges these on top only
+/// then - a light device never sees them.
+var roseDark = false
+
+func roseSetDark(_ on: Bool) { roseDark = on }
+
+let roseDarkStyles: [String: RoseStyle] = [
+${darkRows}
+]
+
+let roseDarkTagStyles: [String: RoseStyle] = [
+${darkTagRows}
+]
+
 /// The cascade at runtime: the element's tag rule first, then every class
 /// merged in order, then props.
 func roseResolve(_ tag: String, _ classes: [String], _ scope: String, inline: RoseStyle? = nil, props: [String: Any]? = nil) -> RoseStyle {
     var out = RoseStyle()
     out = out.merged(roseTagStyles[tag])
+    if roseDark { out = out.merged(roseDarkTagStyles[tag]) }
     for c in classes where !c.isEmpty {
         out = out.merged(roseStyles[c + "__" + scope] ?? roseStyles[c])
+    }
+    if roseDark {
+        for c in classes where !c.isEmpty {
+            out = out.merged(roseDarkStyles[c + "__" + scope] ?? roseDarkStyles[c])
+        }
     }
     out = out.merged(inline)
     if let p = props, !p.isEmpty { out = out.merged(rosePropsOf(p)) }
@@ -2168,6 +2210,8 @@ ${compImports}
 struct ${page.view}: View {
     var route: String
     var onNavigate: (String) -> Void = { _ in }
+    // R471: the system appearance, read where every roseResolve below sees it.
+    @Environment(\\.colorScheme) private var roseScheme
 ${paramsDecl}${bindFields}
 ${stateFields}
 ${hoverDecls}
@@ -2177,13 +2221,14 @@ ${detailsDecls}
 ${activeDecls}
 
     var body: some View {
+        let _ = roseSetDark(roseScheme == .dark)
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
 ${layout}
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
-        }${pull ? '\n        .refreshable { await onPullDownRefresh() }' : ''}
+        }${pull ? '\n        .refreshable { await onPullDownRefresh() }' : ''}${swiftDarkRules > 0 ? '\n        .roseBox(roseResolve("body", [], ""))' : ''}
         .task { await loadData()${ctx.awaits.map((a, i) => `; await __runAwait${i}()`).join('')}${ctx.deferred.map((d, i) => `; await __runDefer${i}()`).join('')}${kvSeedLines ? `; __seedKv()` : ''} }
 ${persistMirrors}
     }
@@ -2658,7 +2703,9 @@ function swiftStyleOf(
     const key = `__active_${c}__${ctx.file}`;
     if (ctx.activeKeys?.has(key)) { activeKey = key; break; }
   }
-  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey) return { expr: null, model, hoverKey, focusKey, activeKey };
+  // R471: a project with a dark half resolves every class at runtime, so the
+  // system appearance can switch the colours; inlined ones could not.
+  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey && swiftDarkRules === 0) return { expr: null, model, hoverKey, focusKey, activeKey };
   const classParts = [
     ...binding.staticClasses.map((c) => JSON.stringify(c)),
     ...binding.dynamicClassExprs.map((e) => swiftExpr(e, ctx)),
@@ -3142,8 +3189,11 @@ function emitElementStyled(
   const cross = dir === 'row' ? (crossRow[model.align ?? ''] ?? '.center') : (crossCol[model.align ?? ''] ?? '.leading');
   const gap = model.gap !== undefined ? n(model.gap) : (dir === 'row' ? '8' : '6');
   const frameAlign = swiftFrameAlignOf(model.justify, dir);
+  // R471: a runtime-resolved container carries the text half too - SwiftUI
+  // inherits foregroundColor/font to its children, which is what CSS does, so
+  // a colour that flips with the appearance reaches the bare text inside.
   const chain = (styleExpr
-    ? `.frame(maxWidth: .infinity, alignment: ${frameAlign}).roseBox(${styleExpr})`
+    ? `.frame(maxWidth: .infinity, alignment: ${frameAlign}).roseText(${styleExpr}).roseBox(${styleExpr})`
     : (fullBox ?? []).join('')) + variantMods.join('');
   emit(`${dir === 'row' ? 'HStack' : 'VStack'}(alignment: ${cross}, spacing: ${gap}) {`, ctx);
   ctx.depth++;

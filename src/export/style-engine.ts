@@ -97,6 +97,8 @@ export interface StyleModel {
   aspectRatio?: number;
   /* colour and box */
   background?: Color;
+  /** R473: `background-image: url(...)` - the URL as authored (`/hero.png`). */
+  backgroundImage?: string;
   gradient?: Gradient;
   padding?: Edge;
   margin?: Edge;
@@ -158,6 +160,10 @@ export interface StyleRule {
   order: number;
   /** The `@media (min|max)-width` guard, when the rule had one. */
   media?: { min?: number; max?: number };
+  /** R467: the rule came from a `prefers-color-scheme: dark` block - it applies
+   *  only to a target that follows the system appearance, and then after the
+   *  light rules of the same specificity. */
+  dark?: boolean;
 }
 
 export interface StyleSheet {
@@ -638,8 +644,23 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       return true;
     }
     /* ---- box ---- */
+    case 'background-image': {
+      // R473: a hero image is a URL, not a colour - the targets that can draw a
+      // background picture read this; the rest still get the raw URL in the model.
+      const m = /url\(\s*(['"]?)([^'")]+)\1\s*\)/i.exec(v);
+      if (m) model.backgroundImage = m[2].trim();
+      return true;
+    }
     case 'background':
     case 'background-color': {
+      const img = /url\(\s*(['"]?)([^'")]+)\1\s*\)/i.exec(v);
+      if (img) {
+        model.backgroundImage = img[2].trim();
+        const rest = v.replace(img[0], '').trim();
+        const c = parseColor(rest);
+        if (c) model.background = c;
+        return true;
+      }
       if (/gradient\(/i.test(v)) {
         const g = parseGradient(v);
         if (g) { model.gradient = g; return true; }
@@ -1058,11 +1079,11 @@ function parseStylesheetUncached(css: string): StyleSheet {
   /** A block frame: `@media` pushes a width guard, `@keyframes`/`@font-face` push a skip. */
   interface Frame { sel: string; skip: boolean; pushedMedia: boolean }
   const stack: Frame[] = [];
-  const media: Array<{ min?: number; max?: number }> = [];
+  const media: Array<{ min?: number; max?: number; dark?: boolean }> = [];
   let skipDepth = 0;
   let cur = '';
 
-  const emitRules = (selectorList: string, body: string, guard: { min?: number; max?: number } | undefined): void => {
+  const emitRules = (selectorList: string, body: string, guard: { min?: number; max?: number; dark?: boolean } | undefined): void => {
     for (const sel of selectorList.split(',')) {
       const trimmed = sel.trim();
       if (!trimmed) continue;
@@ -1096,7 +1117,8 @@ function parseStylesheetUncached(css: string): StyleSheet {
         active,
         specificity: specificityOf(parsedSel.parts),
         order: order++,
-        media: guard ? { ...guard } : undefined,
+        media: guard && (guard.min || guard.max) ? { min: guard.min, max: guard.max } : undefined,
+        dark: guard?.dark || undefined,
       });
     }
   };
@@ -1111,6 +1133,15 @@ function parseStylesheetUncached(css: string): StyleSheet {
     }
     if (sel.startsWith('@')) {
       if (sel.startsWith('@media')) {
+        // R467: the dark half is KEPT and marked, so a target that follows the
+        // system appearance can apply it; one that cannot still gets told.
+        if (/prefers-color-scheme/i.test(sel)) {
+          const dark = /prefers-color-scheme\s*:\s*dark/i.test(sel);
+          warnings.push(`@media ${/\(\s*prefers-color-scheme[^)]*\)/i.exec(sel)?.[0] ?? '(prefers-color-scheme)'} is kept for targets that follow the system appearance; the rest ignore it`);
+          stack.push({ sel, skip: false, pushedMedia: true });
+          media.push({ dark });
+          return;
+        }
         const guard = mediaGuardOf(sel, warnings);
         stack.push({ sel, skip: false, pushedMedia: true });
         media.push(guard);
@@ -1233,6 +1264,8 @@ export function ruleMatches(rule: StyleRule, el: StyleSubject, ancestors: StyleS
 export interface ResolveOptions {
   /** Evaluate `@media (max|min)-width` rules against this width (px). 0 disables them. */
   viewport?: number;
+  /** R467: apply the `prefers-color-scheme: dark` half (a system in dark mode). */
+  dark?: boolean;
 }
 
 /**
@@ -1323,6 +1356,7 @@ export function cascadeFor(
 ): { model: StyleModel; hover: StyleModel | null; focus: StyleModel | null; active: StyleModel | null } {
   const viewport = opts.viewport ?? 0;
   const matched = sheet.rules.filter((r) => {
+    if (r.dark && !opts.dark) return false;
     if (r.media) {
       const guarded = r.media.min !== undefined || r.media.max !== undefined;
       if (guarded) {

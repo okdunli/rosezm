@@ -267,6 +267,11 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const allActiveKeys = new Set<string>();
   for (const s of scopedStyles) for (const k of s.activeKeys) allActiveKeys.add(k);
   const styles = scopedStyles.flatMap((s) => s.rules);
+  // R467: the dark half of every sheet, in one table - applied only when the
+  // device is dark, so a light device never sees it.
+  const darkStyles = scopedStyles.flatMap((s) => s.darkRules);
+  const darkTags = new Map<string, StyleModel>();
+  for (const sc of scopedStyles) for (const [t, m] of sc.darkTags) darkTags.set(t, mergeModels(darkTags.get(t) ?? null, m));
   const allCss = [globalCss, ...pages.map((pg) => pg.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
   const content = bakeContent(root);
   // useNative(...) calls: the plugins and the kit helper the project needs.
@@ -275,7 +280,22 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
   assetMap = await copyDartAssets(root, path.join(out, 'assets', 'images'), warnings);
-  await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles), 'utf8');
+  // R473: a background-image in a <style> block is copied exactly like an <img>
+  // src - the stylesheet names the same public/ file the page could.
+  for (const m of allCss.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\s*\)/gi)) {
+    const url = m[2];
+    if (assetMap.has(url)) continue;
+    const src = path.join(root, 'public', url.replace(/^\//, ''));
+    if (!fs.existsSync(src)) {
+      warnings.push(`flutter: background-image ${url} is not in public/ - the box keeps its colour`);
+      continue;
+    }
+    const dest = path.join(out, 'assets', 'images', path.basename(src));
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    await fs.promises.copyFile(src, dest);
+    assetMap.set(url, 'assets/images/' + path.basename(src));
+  }
+  await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles, darkStyles, darkTags), 'utf8');
   const nativeDeps = nativeDependencies('flutter', native);
   if (hasExternalLinks && !nativeDeps.includes('url_launcher')) nativeDeps.push('url_launcher');
   // R435: a <video>/<audio> needs the video_player plugin; the widgets land in
@@ -350,11 +370,15 @@ function substituteSlot(nodes: IrNode[], content: IrNode[]): IrNode[] {
  * against the reference phone width at emit time) and `:hover`, which is
  * reported because a touch target has none.
  */
-function compileStyles(css: string, warnings: string[], scope?: string): { rules: StyleRule[]; hoverKeys: Set<string>; focusKeys: Set<string>; activeKeys: Set<string> } {
-  if (!css.trim()) return { rules: [], hoverKeys: new Set<string>(), focusKeys: new Set<string>(), activeKeys: new Set<string>() };
+function compileStyles(css: string, warnings: string[], scope?: string): { rules: StyleRule[]; hoverKeys: Set<string>; focusKeys: Set<string>; activeKeys: Set<string>; darkRules: StyleRule[]; darkTags: Map<string, StyleModel> } {
+  if (!css.trim()) return { rules: [], hoverKeys: new Set<string>(), focusKeys: new Set<string>(), activeKeys: new Set<string>(), darkRules: [], darkTags: new Map<string, StyleModel>() };
   const sheet = parseStylesheet(css);
   for (const w of sheet.warnings) warnings.push(`flutter: ${w}`);
   const merged = new Map<string, StyleModel>();
+  // R467: the prefers-color-scheme half compiles into its own table - applied
+  // only when the device is dark, never merged into the light one.
+  const darkMerged = new Map<string, StyleModel>();
+  const darkTags = new Map<string, StyleModel>();
   // R257: focus rows register in a second pass (after every base row), so a
   // recolor-only half can borrow the base border width whatever the sheet order.
   const focusRules: Array<{ last: { classes: string[] }; focus: StyleModel }> = [];
@@ -381,6 +405,17 @@ function compileStyles(css: string, warnings: string[], scope?: string): { rules
     if (rule.active && last.classes.length) activeRules.push({ last, active: rule.active });
     if (last.unsupported.includes(':hover') && !rule.hover) {
       warnings.push(`flutter: :hover has no Flutter equivalent on "${rule.selector}" - dropped`);
+    }
+    if (rule.dark) {
+      if (!last.classes.length && last.tag) {
+        darkTags.set(last.tag, mergeModels(darkTags.get(last.tag) ?? null, rule.model));
+      } else {
+        for (const cls of last.classes) {
+          const key = scope ? `${cls}__${scope}` : cls;
+          darkMerged.set(key, mergeModels(darkMerged.get(key) ?? null, rule.model));
+        }
+      }
+      continue;
     }
     // A width-guarded rule is evaluated against the same reference width the
     // emitter cascades with, so the runtime map and export-time output agree.
@@ -444,7 +479,8 @@ function compileStyles(css: string, warnings: string[], scope?: string): { rules
   // R267: same exposure for the `:active` half.
   const activeKeys = new Set<string>();
   for (const f of activeRules) for (const cls of f.last.classes) activeKeys.add(scope ? `__active_${cls}__${scope}` : `__active_${cls}`);
-  return { rules: out, hoverKeys, focusKeys, activeKeys };
+  const darkOut = [...darkMerged.entries()].map(([className, model]) => ({ className, model }));
+  return { rules: out, hoverKeys, focusKeys, activeKeys, darkRules: darkOut, darkTags };
 }
 
 /** A Dart double literal: `6` stays `6`, `6.5` stays `6.5`. */
@@ -513,6 +549,12 @@ function styleArgsOf(model: StyleModel): string[] {
   if (model.underline) args.push('underline: true');
   if (model.strike) args.push('strike: true');
   if (model.background) args.push(`background: ${dartColor(model.background)}`);
+  if (model.backgroundImage) {
+    // R473: the URL the stylesheet wrote, mapped to the copied asset (or kept
+    // as-is for a remote picture).
+    const mapped = assetMap.get(model.backgroundImage) ?? model.backgroundImage;
+    args.push(`image: ${JSON.stringify(mapped)}`);
+  }
   if (model.gradient && model.gradient.stops.length >= 2) {
     args.push(`gradient: <Color>[${model.gradient.stops.map((s) => dartColor(s.color)).join(', ')}]`);
     args.push(`gradientAngle: ${n(model.gradient.angle)}`);
@@ -562,7 +604,7 @@ function styleArgsOf(model: StyleModel): string[] {
  * exported app carries the same merge the browser would do - look up every
  * class, merge in order, let an inline style and a `style:prop={expr}` win.
  */
-function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>): string {
+function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>, darkRules: StyleRule[] = [], darkTags: Map<string, StyleModel> = new Map()): string {
   const rows = rules.map((r) => {
     const args = styleArgsOf(r.model);
     return `  '${r.className}': RoseStyle(${args.join(', ')}),`;
@@ -573,6 +615,17 @@ function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>): string
   const mergedTags = new Map(uaBaselineRows());
   for (const [tag, model] of tags) mergedTags.set(tag, mergeModels(mergedTags.get(tag) ?? null, model));
   const tagRows = [...mergedTags.entries()].map(([tag, model]) => {
+    const args = styleArgsOf(model);
+    return `  '${tag}': RoseStyle(${args.join(', ')}),`;
+  });
+  // R467: the dark half of every sheet, one table each. The page sets roseDark
+  // from the platform brightness before building, and roseResolve merges these
+  // on top of the light rows only then.
+  const darkRows = darkRules.map((r) => {
+    const args = styleArgsOf(r.model);
+    return `  '${r.className}': RoseStyle(${args.join(', ')}),`;
+  });
+  const darkTagRows = [...darkTags.entries()].map(([tag, model]) => {
     const args = styleArgsOf(model);
     return `  '${tag}': RoseStyle(${args.join(', ')}),`;
   });
@@ -589,7 +642,7 @@ class RoseStyle {
     this.color, this.fontSize, this.weight, this.fontFamily, this.italic,
     this.letterSpacing, this.lineHeight, this.align, this.transform,
     this.underline, this.strike,
-    this.background, this.gradient, this.gradientAngle,
+    this.background, this.gradient, this.gradientAngle, this.image,
     this.padding, this.margin, this.gap,
     this.border,
     this.radius, this.shadow, this.opacity,
@@ -615,6 +668,7 @@ class RoseStyle {
   final Color? background;
   final List<Color>? gradient;
   final double? gradientAngle;
+  final String? image;
   final EdgeInsets? padding;
   final EdgeInsets? margin;
   final double? gap;
@@ -699,9 +753,10 @@ class RoseStyle {
   }
 
   Decoration? get decoration {
-    if (background == null && gradient == null && border == null && radius == null && shadow == null) return null;
+    if (background == null && gradient == null && image == null && border == null && radius == null && shadow == null) return null;
     return BoxDecoration(
       color: background,
+      image: image == null ? null : DecorationImage(image: image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!), fit: BoxFit.cover),
       gradient: gradient == null || gradient!.length < 2
           ? null
           : LinearGradient(
@@ -755,6 +810,19 @@ ${rows.join('\n') || '  // no style rules'}
 /// that is the same precedence a browser keeps.
 const Map<String, RoseStyle> roseTagStyles = {
 ${tagRows.join('\n') || '  // no element selector rules'}
+};
+
+/// R467: the prefers-color-scheme dark half. roseDark is set by the page
+/// build from the platform brightness, and roseResolve merges these on top of
+/// the light rows only then - a light device never sees them.
+bool roseDark = false;
+
+const Map<String, RoseStyle> roseDarkStyles = {
+${darkRows.join('\n') || '  // no dark rules'}
+};
+
+const Map<String, RoseStyle> roseDarkTagStyles = {
+${darkTagRows.join('\n') || '  // no dark element rules'}
 };
 
 /// Parse a colour a user could have written in a style:prop binding.
@@ -823,10 +891,19 @@ RoseStyle roseResolve(List<String> classes, String scope, String tag, {RoseStyle
   // The element's own tag rule (button {}, a {}) sits at the base: a class rule
   // applied later overrides it, exactly as a browser does.
   out = out.merge(roseTagStyles[tag]);
+  if (roseDark) out = out.merge(roseDarkTagStyles[tag]);
   for (final c in classes) {
     // A false class:cond binding contributes an empty name; nothing looks it up.
     if (c.isEmpty) continue;
     out = out.merge(roseStyles[c + '__' + scope] ?? roseStyles[c]);
+  }
+  if (roseDark) {
+    // R467: the dark rows override the light ones, the way a later stylesheet
+    // block does on the web.
+    for (final c in classes) {
+      if (c.isEmpty) continue;
+      out = out.merge(roseDarkStyles[c + '__' + scope] ?? roseDarkStyles[c]);
+    }
   }
   out = out.merge(inline);
   if (props != null && props.isNotEmpty) out = out.merge(rosePropsOf(props));
@@ -1242,6 +1319,8 @@ class RoseScannerPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // R467: the one appearance signal every roseResolve below reads.
+    roseDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
     return Scaffold(
       appBar: AppBar(title: const Text('Scan')),
       body: MobileScanner(
@@ -2174,7 +2253,7 @@ ${paramsField}  @override
   State<${page.className}> createState() => _${page.className}State();
 }
 
-class _${page.className}State extends State<${page.className}> {
+class _${page.className}State extends State<${page.className}> with WidgetsBindingObserver {
 ${stateFields}
 ${dataAccessors}
 ${bindFields}
@@ -2215,6 +2294,10 @@ ${ctx.deferred.map((d) => `  bool ${d.name} = false;`).join('\n')}
   @override
   void initState() {
     super.initState();
+    // R468: the system appearance can flip while the page is open; the observer
+    // repaints now instead of on the next incidental rebuild.
+    WidgetsBinding.instance.addObserver(this);
+    roseDark = WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
     __params = ${page.params.length ? 'widget.params' : 'const <String, String>{}'};
 ${translated.mounts.map((m) => '    ' + m).join('\n')}
     __loadData();
@@ -2223,6 +2306,18 @@ ${ctx.deferred.map((d, i) => `    __runDefer${i}();`).join('\n')}
     // A kv field has no server to compute it here, so the page seeds it: the
     // value is memoized for its TTL window, exactly like the web build's memo.
 ${kvSeedLines}
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    roseDark = WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> __loadData() async {
@@ -2279,6 +2374,8 @@ ${formFields.map((f) => `    fields[${JSON.stringify(f)}] = ${f};`).join('\n')}
 ${methods}
   @override
   Widget build(BuildContext context) {
+    // R467: the one appearance signal every roseResolve below reads.
+    roseDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;
     return Scaffold(
       appBar: AppBar(title: const Text(${JSON.stringify(page.title || appName)})),
       // R431: the AppBar owns the top inset; SafeArea keeps the scrolling body

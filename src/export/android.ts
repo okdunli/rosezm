@@ -64,6 +64,11 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
+/** R474: the drawable name of every public image this export copied, by URL. */
+let androidMedia = new Map<string, string>();
+/** R469: the prefers-color-scheme dark half, kept apart from the light rows. */
+let darkClasses = new Map<string, StyleModel>();
+let darkTagStyles = new Map<string, StyleModel>();
 
 export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
@@ -78,6 +83,9 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   const versionCode = app.version.split(/[.-]/).slice(0, 3).map((p) => Number(p) || 0).reduce((acc, n) => acc * 1000 + n, 0);
   const out = path.join(opts.outDir, 'android');
   tagStyles = new Map<string, StyleModel>();
+  darkClasses = new Map<string, StyleModel>();
+  darkTagStyles = new Map<string, StyleModel>();
+  androidMedia = new Map<string, string>();
   const javaRoot = path.join(out, 'app', 'src', 'main', 'java', PKG_PATH);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
@@ -172,6 +180,7 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   await fs.promises.mkdir(drawable, { recursive: true });
 
   const media = await copyMedia(root, drawable, pages.map((p) => p.nodes), warnings);
+  androidMedia = media;
   await fs.promises.writeFile(path.join(drawable, 'ic_launcher.png'), appIcon(root, 'android', warnings));
   // Styles: every page compiles its own <style> block under its own scope -
   // two pages may both define .rcard (the demo does), and a merged table
@@ -181,6 +190,19 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // still come from the site's stylesheet, and a family with no bundled file is
   // a silent fall back to the system default.
   const allCss = [globalCss, ...pages.map((p) => p.style ?? ''), SHELL_STYLES].join('\n');
+  // R474: a background-image in a <style> block is copied like an <img> src.
+  for (const m of allCss.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\1\s*\)/gi)) {
+    const url = m[2];
+    if (media.has(url)) continue;
+    const src = path.join(root, 'public', url.replace(/^\//, ''));
+    if (!fs.existsSync(src)) {
+      warnings.push(`android: background-image ${url} is not in public/ - the box keeps its colour`);
+      continue;
+    }
+    const name = path.basename(src).replace(/\.[^.]+$/, '').replace(/[^\w]/g, '_').toLowerCase();
+    await fs.promises.copyFile(src, path.join(drawable, name + path.extname(src).toLowerCase()));
+    media.set(url, name);
+  }
   const fontMap = await copyFonts(root, path.join(out, 'app', 'src', 'main', 'res', 'font'), allCss, warnings);
   // The scope is the page's class name: two pages may both define `.rcard`
   // (the demo does - pink on home, green on about) and a merged table would
@@ -529,6 +551,17 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
     if (last.unsupported.includes(':hover') && !rule.hover) {
       warnings.push(`android: :hover has no Compose equivalent on "${rule.selector}" - dropped`);
     }
+    if (rule.dark) {
+      if (!last.classes.length && last.tag) {
+        darkTagStyles.set(last.tag, mergeModels(darkTagStyles.get(last.tag) ?? null, rule.model));
+      } else {
+        for (const cls of last.classes) {
+          const key = scope ? `${cls}__${scope}` : cls;
+          darkClasses.set(key, mergeModels(darkClasses.get(key) ?? null, rule.model));
+        }
+      }
+      continue;
+    }
     if (rule.media) {
       const guarded = rule.media.min !== undefined || rule.media.max !== undefined;
       if (guarded) {
@@ -652,6 +685,15 @@ function composeModifiersOf(model: StyleModel): string[] {
   const shape = composeShapeOf(model);
   if (model.margin) out.push(`.padding(${composeEdgeInsets(model.margin)})`);
   if (shape) out.push(`.clip(${shape})`);
+  if (model.backgroundImage) {
+    // R474: a background picture is a painter, not a colour. A local file is a
+    // drawable; anything remote goes through Coil's painter.
+    const local = androidMedia.get(model.backgroundImage);
+    const painter = local
+      ? `painterResource(id = R.drawable.${local})`
+      : `rememberAsyncImagePainter(${JSON.stringify(model.backgroundImage)})`;
+    out.push(`.paint(${painter}, contentScale = ContentScale.Crop)`);
+  }
   if (model.gradient && model.gradient.stops.length >= 2) {
     const colors = model.gradient.stops.map((s) => composeColor(s.color)).join(', ');
     out.push(`.background(Brush.verticalGradient(colors = listOf(${colors})))`);
@@ -772,6 +814,15 @@ function renderRoseTheme(styles: Map<string, StyleModel>, fontMap: Map<string, s
     return `    "${name}" to RoseStyle(${args.join(', ')}),`;
   });
   const tagRows = [...tagStyles.entries()].map(([name, model]) => {
+    const args = roseThemeArgs(model, fontMap);
+    return `    "${name}" to RoseStyle(${args.join(', ')}),`;
+  });
+  // R469: the dark half, its own tables - merged only while roseDarkState is true.
+  const darkRows = [...darkClasses.entries()].map(([name, model]) => {
+    const args = roseThemeArgs(model, fontMap);
+    return `    "${name}" to RoseStyle(${args.join(', ')}),`;
+  });
+  const darkTagRows = [...darkTagStyles.entries()].map(([name, model]) => {
     const args = roseThemeArgs(model, fontMap);
     return `    "${name}" to RoseStyle(${args.join(', ')}),`;
   });
@@ -1017,9 +1068,18 @@ fun roseDateMillis(iso: String): Long? = roseDateOf(iso)?.timeInMillis
 fun roseResolve(tag: String, classes: List<String>, scope: String, inline: RoseStyle? = null, props: Map<String, Any?>? = null): RoseStyle {
     var out = RoseStyle()
     out = out.merge(roseTagStyles[tag])
+    // R469: reading the state here subscribes the calling composable - a system
+    // theme flip recomposes every element that resolved a style.
+    if (roseDarkState.value) out = out.merge(roseDarkTagStyles[tag])
     for (c in classes) {
         if (c.isEmpty()) continue
         out = out.merge(roseStyles[c + "__" + scope] ?: roseStyles[c])
+    }
+    if (roseDarkState.value) {
+        for (c in classes) {
+            if (c.isEmpty()) continue
+            out = out.merge(roseDarkStyles[c + "__" + scope] ?: roseDarkStyles[c])
+        }
     }
     out = out.merge(inline)
     if (props != null && props.isNotEmpty()) out = out.merge(rosePropsOf(props))
@@ -1130,6 +1190,19 @@ ${rows.join('\n') || '    // no style rules'}
  * applied later overrides the tag rule, the same precedence a browser keeps. */
 val roseTagStyles: Map<String, RoseStyle> = mapOf(
 ${tagRows.join('\n') || '    // no element selector rules'}
+)
+
+/// R469: the prefers-color-scheme dark half. roseDarkState is a Compose state, so
+/// every roseResolve call that reads it subscribes the calling composable to a
+/// theme flip - the system switch repaints the whole page, no observer needed.
+val roseDarkState = mutableStateOf(false)
+
+val roseDarkStyles: Map<String, RoseStyle> = mapOf(
+${darkRows.join('\n') || '    // no dark rules'}
+)
+
+val roseDarkTagStyles: Map<String, RoseStyle> = mapOf(
+${darkTagRows.join('\n') || '    // no dark element rules'}
 )
 `;
 }
@@ -2268,6 +2341,8 @@ function renderPage(
   const useFocusReq = /FocusRequester/.test(layout);
   // R451: a <details> header is a clickable row - imported only when one exists.
   const useClickable = /\.clickable\s*\{/.test(layout);
+  // R474: Coil's painter only rides in for a remote background picture.
+  const useAsyncPainter = /rememberAsyncImagePainter\(/.test(layout);
   const handlers = [translateHandlers(pageScript, facts, page, knownBinds, warnings, formFields), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
   // The kit's useNative dispatch: imported only when a handler on this page
   // actually calls it, so a page with no device capability imports nothing.
@@ -2355,6 +2430,7 @@ package ${PKG}.pages
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -2375,10 +2451,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.draw.paint
+import ${PKG}.R
 ${remoteImg ? 'import coil.compose.AsyncImage\n' : ''}${remoteImg || useScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${useFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp
+${useAsyncPainter ? 'import coil.compose.rememberAsyncImagePainter\n' : ''}${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${useFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ${PKG}.kit.roseData
 import ${PKG}.kit.roseAction
@@ -2388,6 +2466,10 @@ ${compImports}
 @Composable
 fun ${page.cls}Page(onNavigate: (String) -> Unit, route: String = ${JSON.stringify('')}, params: Map<String, String> = emptyMap()) {
     val scope = rememberCoroutineScope()
+    // R469: this read subscribes the page to the system appearance; the guarded
+    // write hands it to every roseResolve call below (and in child components).
+    val __roseDark = isSystemInDarkTheme()
+    if (roseDarkState.value != __roseDark) roseDarkState.value = __roseDark
     var __loaded by remember { mutableStateOf(false) }
 ${ctx.deferred.map((d) => `    var ${d.name} by remember { mutableStateOf(false) }`).join('\n')}
 ${hoverDecls}
@@ -2803,7 +2885,10 @@ function emitNode(node: IrNode, ctx: AndroidCtx): void {
 
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: AndroidCtx): void {
   const binding = elementStyleBinding(node);
-  const resolved = composeStyleOf(node, binding, ctx);
+  // R469: a project with a dark half resolves its styles at runtime, so the
+  // system appearance can switch them. Inlined light modifiers could not.
+  const useRuntimeStyle = darkClasses.size > 0 || darkTagStyles.size > 0;
+  const resolved = composeStyleOf(node, binding, ctx, useRuntimeStyle);
   // The element chain feeds the cascade for the children: `.a .b` needs `.a`
   // above it. Pushed after this element resolved its own style, so the chain
   // holds ancestors only - exactly what the combinator walk expects.
@@ -4023,6 +4108,8 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   // R416: a component that renders a remote image imports Coil itself.
   const compRemoteImg = /\bAsyncImage\(/.test(compBody);
   const compUseScale = /\bContentScale\./.test(compBody);
+  // R474: a remote background picture needs Coil's painter in the component.
+  const compUseAsyncPainter = /rememberAsyncImagePainter\(/.test(compBody);
   const compUseAudio = /Icons\.Filled\.Pause/.test(compBody);
   const compUseFocusReq = /FocusRequester/.test(compBody);
   // R246: the component's own hover halves, declared like the page's.
@@ -4053,8 +4140,11 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable
 ` : ''}import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.paint
 import androidx.compose.ui.graphics.Color
-${compRemoteImg ? 'import coil.compose.AsyncImage\n' : ''}${compRemoteImg || compUseScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.painterResource
+import ${PKG}.R
+${compUseAsyncPainter ? 'import coil.compose.rememberAsyncImagePainter\n' : ''}${compRemoteImg ? 'import coil.compose.AsyncImage\n' : ''}${compRemoteImg || compUseScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 ${compUseAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${compUseFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp

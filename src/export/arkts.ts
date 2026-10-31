@@ -188,21 +188,31 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const compStyleRows: string[] = [];
   const pageTagRows: string[] = [];
   const compTagRows: string[] = [];
+  // R470: the dark half of every sheet, one set per scope.
+  arkDarkRules = 0;
+  const pageDarkRows: string[] = [];
+  const compDarkRows: string[] = [];
+  const pageDarkTagRows: string[] = [];
+  const compDarkTagRows: string[] = [];
   // CF: the site's sheet goes first, and into EVERY page's and component's
   // compile - the way SHELL_STYLES already does. RoseStyles.ets is this target's
   // only style table and every row in it is scoped, so a theme rule that rode in
   // one scope only would miss all the others.
   for (const page of pages) {
-    const { rows, tagRows } = compileArkStyles([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), page.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), page.struct, allFonts);
     if (rows) pageStyleRows.push(rows);
     if (tagRows) pageTagRows.push(tagRows);
+    if (darkRows) { pageDarkRows.push(darkRows); arkDarkRules++; }
+    if (darkTagRows) { pageDarkTagRows.push(darkTagRows); arkDarkRules++; }
   }
   for (const comp of components) {
-    const { rows, tagRows } = compileArkStyles([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), comp.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), comp.struct, allFonts);
     if (rows) compStyleRows.push(rows);
     if (tagRows) compTagRows.push(tagRows);
+    if (darkRows) { compDarkRows.push(darkRows); arkDarkRules++; }
+    if (darkTagRows) { compDarkTagRows.push(darkTagRows); arkDarkRules++; }
   }
-  await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseStyles.ets'), renderArkStyles(pageStyleRows, compStyleRows, pageTagRows, compTagRows), 'utf8');
+  await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseStyles.ets'), renderArkStyles(pageStyleRows, compStyleRows, pageTagRows, compTagRows, pageDarkRows, compDarkRows, pageDarkTagRows, compDarkTagRows), 'utf8');
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseModifier.ets'), renderRoseModifier(), 'utf8');
 
   for (const comp of components) {
@@ -498,12 +508,23 @@ function modifierOf(m: StyleModel, fonts: Set<string>): string[] {
  * Element/tag rules (button {}, a {}) fold into the tag table so roseResolve can
  * apply them without a selector engine - the same precedence the other targets keep.
  */
-function compileArkStyles(css: string, scope: string, fonts: Set<string>): { rows: string; tagRows: string } {
+function compileArkStyles(css: string, scope: string, fonts: Set<string>): { rows: string; tagRows: string; darkRows: string; darkTagRows: string } {
   const sheet = parseStylesheet(css);
   const classes = new Map<string, StyleModel>();
   const tags = new Map<string, StyleModel>();
+  // R470: the prefers-color-scheme dark half, its own tables.
+  const darkClasses = new Map<string, StyleModel>();
+  const darkTags = new Map<string, StyleModel>();
   for (const rule of sheet.rules) {
     const last = rule.parts[rule.parts.length - 1];
+    if (rule.dark) {
+      if (!last.classes.length && last.tag) darkTags.set(last.tag, mergeModels(darkTags.get(last.tag) ?? null, rule.model));
+      else for (const cls of last.classes) {
+        const key = `${cls}__${scope}`;
+        darkClasses.set(key, mergeModels(darkClasses.get(key) ?? null, rule.model));
+      }
+      continue;
+    }
     if (!last.classes.length && last.tag) {
       tags.set(last.tag, mergeModels(tags.get(last.tag) ?? null, rule.model));
       continue;
@@ -552,7 +573,21 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   }
   const rows = [...classes.entries()].map(([k, m]) => `  '${k}': (it: RoseModifier) => {${mods(m)}}`).join(',\n');
   const tagRows = [...tags.entries()].map(([k, m]) => `  '${k}': (it: RoseModifier) => {${mods(m)}}`).join(',\n');
-  return { rows, tagRows };
+  const darkRows = [...darkClasses.entries()].map(([k, m]) => `  '${k}': (it: RoseModifier) => {${mods(m)}}`).join(',\n');
+  const darkTagRows = [...darkTags.entries()].map(([k, m]) => `  '${k}': (it: RoseModifier) => {${mods(m)}}`).join(',\n');
+  return { rows, tagRows, darkRows, darkTagRows };
+}
+
+/** R470: a text node inherits its colour from the nearest classed ancestor. With
+ *  a dark half present that colour must resolve at runtime, so the static one is
+ *  dropped and the ancestor's roseModifier carries it - the closest a tree
+ *  without CSS inheritance gets to the browser's cascade. */
+function textModsFor(ctx: ArkCtx): string {
+  if (arkDarkRules === 0) return arkTextMods(ctx.inherited, ctx.fonts).join('');
+  const anc = [...ctx.ancestors].reverse().find((a) => a.classes.length);
+  if (!anc) return arkTextMods(ctx.inherited, ctx.fonts).join('');
+  const mods = arkTextMods({ ...ctx.inherited, color: undefined }, ctx.fonts).join('');
+  return `${mods}.attributeModifier(roseModifier('${anc.tag}', [${anc.classes.map((c) => `'${c}'`).join(', ')}], '${ctx.scope}'))`;
 }
 
 /** The text properties a container passes down - CSS inheritance, made explicit. */
@@ -1227,6 +1262,9 @@ function kitImportLine(body: string, kitExports: { values: Set<string>; types: S
  *  import is derived from the final artifact - nothing can be forgotten. */
 const KIT_IMPORT_SLOT = '__rosezm_KIT_IMPORT__';
 
+/** R470: how many dark rows this export compiled - 0 keeps the static path. */
+let arkDarkRules = 0;
+
 /**
  * The compiled style tables + the runtime `roseResolve`/`roseModifier`. A native
  * ArkUI tree has no selector engine, so `roseResolve(tag, classes, scope)` walks
@@ -1237,9 +1275,11 @@ const KIT_IMPORT_SLOT = '__rosezm_KIT_IMPORT__';
  * turns the result into an `AttributeModifier` the component applies via
  * `.attributeModifier()`, the same channel a static `.backgroundColor(...)` uses.
  */
-function renderArkStyles(pageRows: string[], compRows: string[], pageTags: string[], compTags: string[]): string {
+function renderArkStyles(pageRows: string[], compRows: string[], pageTags: string[], compTags: string[], pageDark: string[] = [], compDark: string[] = [], pageDarkTags: string[] = [], compDarkTags: string[] = []): string {
   const rows = [...pageRows, ...compRows].join(',\n');
   const tagRows = [...pageTags, ...compTags].join(',\n');
+  const darkRows = [...pageDark, ...compDark].join(',\n');
+  const darkTagRows = [...pageDarkTags, ...compDarkTags].join(',\n');
   return `import { RoseModifier } from './RoseModifier.ets';
 import type { AttributeModifier } from '@kit.ArkUI';
 import type { CommonAttribute } from '@kit.ArkUI';
@@ -1254,12 +1294,34 @@ export const roseTagStyles: Record<string, (it: RoseModifier) => void> = {
 ${tagRows}
 };
 
+/// R470: the prefers-color-scheme dark half. roseDark comes from AppStorage,
+/// which EntryAbility keeps in sync with the system configuration; the page's
+/// @StorageLink makes a flip rebuild it.
+export const roseDarkStyles: Record<string, (it: RoseModifier) => void> = {
+${darkRows}
+};
+
+export const roseDarkTagStyles: Record<string, (it: RoseModifier) => void> = {
+${darkTagRows}
+};
+
+function roseIsDark(): boolean {
+  return AppStorage.get<boolean>('rosezmDark') === true;
+}
+
 /// The cascade at runtime: tag rule, then every class in order, then props/inline.
 export function roseResolve(tag: string, classes: string[], scope: string, props?: Record<string, string>, inline?: string[]): RoseModifier {
   const m = new RoseModifier();
+  const dark = roseIsDark();
   roseTagStyles[tag]?.(m);
+  if (dark) roseDarkTagStyles[tag]?.(m);
   for (const c of classes) {
     if (c.length) (roseStyles[c + '__' + scope] ?? roseStyles[c])?.(m);
+  }
+  if (dark) {
+    for (const c of classes) {
+      if (c.length) (roseDarkStyles[c + '__' + scope] ?? roseDarkStyles[c])?.(m);
+    }
   }
   if (inline) {
     for (const decl of inline) {
@@ -1454,11 +1516,16 @@ import window from '@ohos.window';
 import hilog from '@ohos.hilog';
 import type Want from '@ohos.app.ability.Want';
 import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
+import type Configuration from '@ohos.app.ability.Configuration';
+import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(0x0000, 'rosezm', 'EntryAbility onCreate');
 ${seedGlobal}
+    // R470: seed the appearance the pages' dark tables read, before any page
+    // builds. A later system flip arrives through onConfigurationUpdate.
+    AppStorage.setOrCreate('rosezmDark', this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
 ${launchBody}
     // A deep link (${scheme ? scheme : 'myscheme'}://blog/7) arrives as want.uri, which the
     // system parses as scheme + host + path - the route is the host joined
@@ -1471,6 +1538,11 @@ ${launchBody}
       const deepLinkPath = slash >= 0 ? '/' + rest.substring(0, slash) + rest.substring(slash) : '/' + rest;
       AppStorage.setOrCreate('rosezmDeepLink', deepLinkPath);
     }` : '// no scheme declared - no deep links'}
+  }
+
+  // R470: the system appearance, kept where every page's dark tables read it.
+  onConfigurationUpdate(newConfig: Configuration): void {
+    AppStorage.setOrCreate('rosezmDark', newConfig.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
@@ -1713,6 +1785,9 @@ ${fontMap.size ? "import { font } from '@kit.ArkUI';" : ''}${imports}
 struct ${page.struct} {
 ${routeInit}
 ${bindFieldsOut}
+  // R470: a theme flip republishes this link, which rebuilds the page; every
+  // roseResolve below then reads the dark tables.
+  @StorageLink('rosezmDark') rosezmDark: boolean = false;
 ${stateFields}
 ${ctx.vectorRenderers.map((r) => `  private ${r} = new CanvasRenderingContext2D();`).join('\n')}
 
@@ -1768,8 +1843,11 @@ function wrapPage(body: string, ctx: ArkCtx): string {
   // padding only fired when the template produced no container at all, and a
   // single-root page returned unwrapped with nothing.
   const mods = arkBoxMods(cascadeFor(ctx.sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model).join('');
-  if (trimmed.startsWith('Column(') || trimmed.startsWith('Row(') || trimmed.startsWith('Text(') || trimmed.startsWith('Scroll(')) return trimmed + mods;
-  return `Column() {\n${'    ' + body.trim().split('\n').join('\n    ')}\n  }\n  .width('100%')${mods}`;
+  // R470: the page root is `body`; with a dark half its colour has to come from
+  // the runtime resolve, not the light value baked above.
+  const darkBody = arkDarkRules > 0 ? `.attributeModifier(roseModifier('body', [], '${ctx.scope}'))` : '';
+  if (trimmed.startsWith('Column(') || trimmed.startsWith('Row(') || trimmed.startsWith('Text(') || trimmed.startsWith('Scroll(')) return trimmed + mods + darkBody;
+  return `Column() {\n${'    ' + body.trim().split('\n').join('\n    ')}\n  }\n  .width('100%')${mods}${darkBody}`;
 }
 
 function emitNodes(nodes: IrNode[], ctx: ArkCtx): void {
@@ -1781,7 +1859,7 @@ function emitNodes(nodes: IrNode[], ctx: ArkCtx): void {
     // properties (CSS inheritance); the styled <p>/<span> branch at
     // emitElementStyled already applies arkTextMods(ctx.inherited) - the bare
     // run is the same text and was the one hole that dropped color/font-size.
-    if (text && !/^`\s*`$/.test(text)) emit(`Text(${text})${arkTextMods(ctx.inherited, ctx.fonts).join('')}`, ctx);
+    if (text && !/^`\s*`$/.test(text)) emit(`Text(${text})${textModsFor(ctx)}`, ctx);
     run.length = 0;
   };
   for (const node of nodes) {
@@ -2030,7 +2108,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
   // runtime through roseResolve; ArkTS now does too, so the style re-applies when
   // the state changes instead of being dropped.
   let dynamicMods = '';
-  if (binding.hasDynamic) {
+  // R470: a project with a dark half resolves every class at runtime, so a
+  // system theme flip reaches the elements (an inlined colour could not).
+  if (binding.hasDynamic || arkDarkRules > 0) {
     const classes = [
       ...binding.staticClasses.map((c) => `'${c}'`),
       ...binding.dynamicClassExprs.map((e) => `(${etsExpr(e, ctx)})`),
@@ -2043,11 +2123,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
       : 'undefined';
     dynamicMods = `.attributeModifier(roseModifier('${tag}', [${classes.join(', ')}], '${ctx.scope}', ${props}${inline ? ', ' + inline : ''}))`;
   }
+  // R470: the runtime modifier carries the colours when a dark half exists;
+  // leaving the inlined ones on the chain would fight it in unspecified order.
+  const staticModel = arkDarkRules > 0 && binding.staticClasses.length && dynamicMods
+    ? { ...model, color: undefined, background: undefined }
+    : model;
   ctx.ancestors.push(subject);
   const outerInherited = ctx.inherited;
   ctx.inherited = mergeModels(outerInherited, textCarry(model));
   try {
-    emitElementStyled(node, ctx, model, dynamicMods, hoverTail);
+    emitElementStyled(node, ctx, staticModel, dynamicMods, hoverTail);
   } finally {
     ctx.ancestors.pop();
     ctx.inherited = outerInherited;
@@ -2151,13 +2236,13 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     // not a Column of separate Text widgets.
     const runs = arkInlineRuns(node.children, ctx, []);
     if (runs && runs.length) {
-      emit(box(`Text() {\n${runs.map((r) => '  ' + r).join('\n')}\n}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      emit(box(`Text() {\n${runs.map((r) => '  ' + r).join('\n')}\n}${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
       return;
     }
   }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = templateOf(node.children, ctx);
-    emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+    emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
     return;
   }
   // R452: <details>/<summary> folds on a @State flag - the header toggles it and
@@ -2242,10 +2327,10 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     // the system browser (or mail app) through a viewData want.
     const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
     if (/^(https?:\/\/|mailto:|tel:)/i.test(hrefText)) {
-      emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${color}.onClick(() => { const __ctx = getContext(this) as common.UIAbilityContext; __ctx.startAbility({ action: 'ohos.want.action.viewData', uri: ${JSON.stringify(hrefText)} }); })`), ctx);
+      emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${textModsFor(ctx)}${color}.onClick(() => { const __ctx = getContext(this) as common.UIAbilityContext; __ctx.startAbility({ action: 'ohos.want.action.viewData', uri: ${JSON.stringify(hrefText)} }); })`), ctx);
       return;
     }
-    emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${color}.onClick(() => { router.pushUrl({ url: ${target} }); })`), ctx);
+    emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${textModsFor(ctx)}${color}.onClick(() => { router.pushUrl({ url: ${target} }); })`), ctx);
     return;
   }
   if (tag === 'input' || tag === 'textarea') {
@@ -2333,7 +2418,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       // R440: rows is the textarea's visible line count (24px per line).
       const rowsAttr = node.attrs.find((a) => a.name === 'rows');
       const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? Number(rowsAttr.value.text.trim()) : 4;
-      emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : `.height(${rows * 24})`}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : `.height(${rows * 24})`}${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
       return;
     }
     else {
@@ -2350,7 +2435,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
         : '';
       const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
       const maxMod = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? `.maxLength(${maxAttr.value.text.trim()})` : '';
-      emit(box(`TextInput({ placeholder: ${hint} })${inputType}${disabledMod}${maxMod}${onChange}${autoMod}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      emit(box(`TextInput({ placeholder: ${hint} })${inputType}${disabledMod}${maxMod}${onChange}${autoMod}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
     }
     return;
   }
@@ -2366,7 +2451,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       : '';
     const enabledMod = disabled ? `.enabled(!(${disabled}))` : '';
     const label = templateOf(node.children, ctx);
-    emit(box(`Button(${label || "'Button'"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${enabledMod}.onClick(${handler})`), ctx);
+    emit(box(`Button(${label || "'Button'"})${arkBoxMods(model).join('')}${textModsFor(ctx)}${enabledMod}.onClick(${handler})`), ctx);
     return;
   }
   if (tag === 'select') {

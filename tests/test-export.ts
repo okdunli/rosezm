@@ -28,7 +28,7 @@ import { createContext, runInContext, Script } from 'vm';
 import { exportProject, TARGETS } from '../src/export/index.js';
 import { NATIVE_TARGETS, NATIVE_CAPABILITIES } from '../src/export/native-api.js';
 import { buildProject } from '../src/compiler/index.js';
-import { parseStylesheet, sanitizeFor } from '../src/export/style-engine.js';
+import { parseStylesheet, sanitizeFor, cascadeFor } from '../src/export/style-engine.js';
 import { forgetAppIdentity } from '../src/export/app-identity.js';
 import { icnsFromPng } from '../src/export/app-icon.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
@@ -5543,6 +5543,76 @@ h2 { font-size: 40px; }
     assert(/:nth-child/.test(p.warnings.join('\n')), ':nth-child is named too');
     assert(/:first-child|:nth-child/.test(p.warnings.join('\n')) && !/\.item:first-child.*bold/.test(p.warnings.join('\n')), 'the warning explains it would otherwise style every match');
     assert(parseStylesheet('.memo { color: red }') === parseStylesheet('.memo { color: red }'), 'a stylesheet is parsed once per exact text (export all reuses it)');
+  }
+  // R467: the dark half is kept and marked, so a target that follows the system
+  // appearance can apply it while the light resolve never sees it.
+  {
+    const dark = parseStylesheet('.card { color: #111111; }\n@media (prefers-color-scheme: dark) { .card { color: #eeeeee; } }');
+    assert(dark.rules.length === 2 && dark.rules[0].dark === undefined && dark.rules[1].dark === true, 'a prefers-color-scheme block is kept and marked');
+    assert(/kept for targets that follow the system appearance/.test(dark.warnings.join('\n')), 'the kept dark block is named');
+    const subject = { tag: 'div', classes: ['card'] };
+    assert(cascadeFor(dark, subject, [], { viewport: 390 }).model.color === '#111111', 'a light resolve never sees the dark half');
+    assert(cascadeFor(dark, subject, [], { viewport: 390, dark: true }).model.color === '#eeeeee', 'a dark resolve applies the dark half over the light one');
+    const dproj2 = join(scratch, 'dark-flutter');
+    mkdirSync(join(dproj2, 'src/pages'), { recursive: true });
+    writeFileSync(join(dproj2, 'src/pages/index.rose'), '<style>\n.card { color: #111111; background: #ffffff; }\n@media (prefers-color-scheme: dark) { .card { color: #eeeeee; background: #10131a; } body { background: #10131a; } }\n</style>\n<div class="card">hi</div>\n');
+    const df = await exportProject('flutter', dproj2, { apiBase: 'x', outRoot: join(scratch, 'dark-flutter-out') });
+    const dfStyles = readFileSync(join(df.outDir, 'lib', 'styles.dart'), 'utf8');
+    const lightRow = dfStyles.indexOf("'card__index': RoseStyle(color: Color(0xFF111111)");
+    const darkTable = dfStyles.indexOf('roseDarkStyles = {');
+    assert(lightRow >= 0 && darkTable > lightRow, 'flutter: the light row stays in the base table');
+    assert(/roseDarkStyles = \{\s*'card__index': RoseStyle\(color: Color\(0xFFEEEEEE\), background: Color\(0xFF10131A\)\)/.test(dfStyles), 'flutter: the dark half gets its own table');
+    assert(/roseDarkTagStyles = \{\s*'body': RoseStyle\(background: Color\(0xFF10131A\)\)/.test(dfStyles), 'flutter: a dark body rule lands in its own tag table');
+    const dfPage = readFileSync(join(df.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(dfPage.includes('roseDark = MediaQuery.platformBrightnessOf(context) == Brightness.dark;'), 'flutter: the page reads the platform brightness');
+    assert(dfPage.includes('with WidgetsBindingObserver') && dfPage.includes('void didChangePlatformBrightness()'), 'flutter: a theme flip repaints the page');
+    assert(dfPage.includes('WidgetsBinding.instance.addObserver(this)') && dfPage.includes('removeObserver(this)'), 'flutter: the observer is registered and removed');
+    const dk = await exportProject('android', dproj2, { apiBase: 'x', outRoot: join(scratch, 'dark-android') });
+    const dkTheme = readFileSync(join(dk.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseTheme.kt'), 'utf8');
+    assert(dkTheme.includes('val roseDarkState = mutableStateOf(false)') && /"card__Index" to RoseStyle\(color = Color\(0xFFEEEEEE\)/.test(dkTheme), 'android: the dark half gets its own table behind a Compose state');
+    assert(dkTheme.includes('if (roseDarkState.value) {') && dkTheme.includes('out.merge(roseDarkStyles[c + "__" + scope]'), 'android: resolve merges the dark table while dark');
+    const dkPage = readFileSync(join(dk.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(dkPage.includes('val __roseDark = isSystemInDarkTheme()') && dkPage.includes('roseDarkState.value = __roseDark'), 'android: the page hands the system appearance to the state');
+    assert(dkPage.includes('roseResolve("div", listOf("card"), "Index")'), 'android: a page with dark rules resolves at runtime');
+    const dka = await exportProject('arkts', dproj2, { apiBase: 'x', outRoot: join(scratch, 'dark-arkts') });
+    const dkStyles = readFileSync(join(dka.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseStyles.ets'), 'utf8');
+    assert(dkStyles.includes('roseDarkStyles') && dkStyles.includes("'card__IndexPage': (it: RoseModifier) => {.backgroundColor('#10131a')"), 'arkts: the dark half gets its own table');
+    assert(dkStyles.includes("AppStorage.get<boolean>('rosezmDark')") && dkStyles.includes('if (dark) {') && dkStyles.includes("roseDarkStyles[c + '__' + scope]"), 'arkts: resolve reads the system appearance');
+    const dkPage2 = readFileSync(join(dka.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(dkPage2.includes("@StorageLink('rosezmDark') rosezmDark: boolean = false;"), 'arkts: the page re-renders on a theme flip');
+    assert(dkPage2.includes(".attributeModifier(roseModifier('body', [], 'IndexPage'))"), 'arkts: the page root repaints from the dark table');
+    assert(dkPage2.includes("attributeModifier(roseModifier('div', ['card'], 'IndexPage'))"), 'arkts: a classed element resolves at runtime');
+    const dkAb = readFileSync(join(dka.outDir, 'entry', 'src', 'main', 'ets', 'entryability', 'EntryAbility.ets'), 'utf8');
+    assert(dkAb.includes('onConfigurationUpdate') && dkAb.includes("setOrCreate('rosezmDark'"), 'arkts: the ability keeps the appearance in AppStorage');
+    const dkx = await exportProject('xcode', dproj2, { apiBase: 'x', outRoot: join(scratch, 'dark-xcode2') });
+    const dxTheme = readFileSync(join(dkx.outDir, 'rosezmApp', 'Kit', 'RoseTheme.swift'), 'utf8');
+    assert(dxTheme.includes('var roseDark = false') && dxTheme.includes('"card__IndexView": RoseStyle(color: "#eeeeee", background: "#10131a")'), 'xcode: the dark half gets its own table');
+    assert(dxTheme.includes('if roseDark {') && dxTheme.includes('out.merged(roseDarkStyles[c + "__" + scope]'), 'xcode: resolve merges the dark table while dark');
+    const dxView = readFileSync(join(dkx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(dxView.includes('@Environment(\\.colorScheme) private var roseScheme') && dxView.includes('let _ = roseSetDark(roseScheme == .dark)'), 'xcode: the page hands the system appearance to the kit');
+    assert(dxView.includes('.roseText(roseResolve("div", ["card"], "IndexView"))') && dxView.includes('.roseBox(roseResolve("div", ["card"], "IndexView"))'), 'xcode: a classed container resolves both halves at runtime');
+    assert(dxView.includes('.roseBox(roseResolve("body", [], ""))'), 'xcode: the page root paints the body rule');
+  }
+  // R473: a background-image is a picture, not a colour - it was parsed as an
+  // unknown declaration and the box stayed empty on every target.
+  {
+    const bgproj = join(scratch, 'bg-proj');
+    mkdirSync(join(bgproj, 'src/pages'), { recursive: true });
+    mkdirSync(join(bgproj, 'public'), { recursive: true });
+    writeFileSync(join(bgproj, 'public/rose.png'), readFileSync(join(example, 'public', 'rose.png')));
+    writeFileSync(join(bgproj, 'src/pages/index.rose'), '<style>\n.hero { background-image: url(/rose.png); height: 120px; }\n.remote { background-image: url(https://example.com/a.png); }\n</style>\n<div class="hero">hi</div><div class="remote">r</div>\n');
+    const bf = await exportProject('flutter', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-flutter') });
+    const bfStyles = readFileSync(join(bf.outDir, 'lib', 'styles.dart'), 'utf8');
+    assert(bfStyles.includes("'hero__index': RoseStyle(image: \"assets/images/rose.png\""), 'flutter: a background-image becomes the copied asset');
+    assert(bfStyles.includes("image: \"https://example.com/a.png\""), 'flutter: a remote background-image keeps its URL');
+    assert(readFileSync(join(bf.outDir, 'pubspec.yaml'), 'utf8').includes('assets/images/rose.png'), 'flutter: the background picture rides the pubspec');
+    assert(bfStyles.includes('DecorationImage(image: image!.startsWith') && existsSync(join(bf.outDir, 'assets', 'images', 'rose.png')), 'flutter: the box draws it and the file shipped');
+    const ba = await exportProject('android', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-android') });
+    const baPage = readFileSync(join(ba.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(baPage.includes('.paint(painterResource(id = R.drawable.rose), contentScale = ContentScale.Crop)'), 'android: a background-image becomes a painter');
+    assert(baPage.includes('rememberAsyncImagePainter("https://example.com/a.png")'), 'android: a remote background-image uses Coil');
+    assert(baPage.includes('import dev.rosezm.app.R'), 'android: the page imports the resource class it names');
+    assert(existsSync(join(ba.outDir, 'app', 'src', 'main', 'res', 'drawable', 'rose.png')), 'android: the background picture is copied');
   }
   // R242: ArkTS was the only target that neither applied :hover nor said so.
   {
