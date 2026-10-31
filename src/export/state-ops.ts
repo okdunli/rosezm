@@ -1335,7 +1335,6 @@ export function rewriteArrayMutations(
     const close = matchParen(body, open);
     if (close < 0) continue;
     const args = splitTopLevel(body.slice(open + 1, close)).map((a) => a.trim());
-    const call = body.slice(m.index ?? 0, close + 1);
     if (method === 'splice') {
       // The IR's filter takes ONE parameter (no index), so the "drop a range"
       // mutation is spelled as two slices joined. `slice` is already in the

@@ -1286,6 +1286,9 @@ try {
   assert(!/not translated \(web-only API\)/.test(xIndex.split('func signGuestbook')[1] ?? ''), 'the guestbook handler is no longer a web-only stub on SwiftUI');
   assert(xIndex.includes('.font(.system(size: 20))'), 'a <style> rule becomes a SwiftUI font modifier');
   assert(existsSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/rose.imageset/rose.png')) && xIndex.includes('Image("rose")'), 'SwiftUI copies the image into an asset catalog and renders it');
+  assert(existsSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png')), 'xcode: the app iconset exists (Xcode fails without it)');
+  const xIcon = JSON.parse(readFileSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json'), 'utf8'));
+  assert(xIcon.images?.[0]?.size === '1024x1024' && xIcon.images[0].platform === 'ios' && xIcon.images[0].idiom === 'universal', 'xcode: the iconset declares the universal 1024 icon');
   const bindSwift = xread('rosezmApp/Pages/BindDemoView.swift');
   assert(bindSwift.includes('Toggle(isOn: Binding(get: { subscribed }, set: { subscribed = $0 }))') && bindSwift.includes('Picker("select", selection: Binding(get: { plan }') && bindSwift.includes('largecircle.fill.circle'), 'SwiftUI wires checkbox, radio group and select two-way');
   assert(!/\{#|\{\/|\{@|\$state\(|on:click/.test(walk(join(xdir, 'rosezmApp')).filter((f) => f.endsWith('.swift')).map((f) => readFileSync(f, 'utf8')).join('\n')), 'no Rose syntax survives into Swift');
@@ -1619,7 +1622,7 @@ try {
   {
     const elp = join(scratch, 'elements-proj');
     mkdirSync(join(elp, 'src/pages'), { recursive: true });
-    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><video src="https://example.com/clip.mp4" autoplay muted loop controls></video><audio src="https://example.com/beat.mp3" autoplay loop muted></audio><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><input readonly value="fixed"><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
+    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><video src="https://example.com/clip.mp4" autoplay muted loop controls></video><audio src="https://example.com/beat.mp3" autoplay loop muted></audio><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><input readonly value="fixed"><input autofocus placeholder="search"><textarea rows="6" placeholder="notes"></textarea><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
     const elf = await exportProject('flutter', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-flutter') });
     assert((elf.warnings ?? []).some((w: string) => /<canvas> \(dropped\)/.test(w) && /<iframe> \(dropped\)/.test(w)), 'flutter: canvas and iframe gaps are named');
     assert(!(elf.warnings ?? []).some((w: string) => /<table>/.test(w)), 'flutter: a table is not a gap - it renders as rows');
@@ -1717,6 +1720,144 @@ try {
     assert(elaSrc.includes('setDataSource(roseAssetUrl("https://example.com/beat.mp3"))') && elaSrc.includes('Icons.Filled.Pause') && elaSrc.includes('import androidx.compose.material.icons.filled.Pause'), 'android: audio autoplay, loop and mute reach the player');
     assert(elaSrc.includes('setMediaController(android.widget.MediaController('), 'android: video controls get a MediaController');
     assert(elhSrc.includes('.autoPlay(true).loop(true).muted(true).controls(true)'), 'arkts: video attributes reach the Video component');
+    assert(elnSrc.includes('multiline: true, minLines: 6'), 'dotnet: a textarea is multiline with its rows');
+    assert(elcSrc.includes('rose_textarea(') && elcSrc.includes(', 6)'), 'cpp: a textarea is a QTextEdit with its rows');
+    assert(elxSrc.includes('TextEditor(text: .constant("")).frame(minHeight: 144)'), 'xcode: a textarea is a multiline editor');
+    assert(elfSrc.includes('lines: 6'), 'flutter: a textarea keeps its rows');
+    assert(elaSrc.includes('minLines = 6'), 'android: a textarea keeps its rows');
+    assert(elpSrc.includes('tk.Text(') && elpSrc.includes('height=6'), 'python: a textarea keeps its rows');
+    assert(elhSrc.includes('.height(144)'), 'arkts: a textarea keeps its rows');
+    assert(eljSrc.includes('RoseTheme.textArea(') && eljSrc.includes(', 6)'), 'java: a textarea keeps its rows');
+    assert(elfSrc.includes('autofocus: true'), 'flutter: autofocus reaches the field');
+    assert(elnSrc.includes('autofocus: true'), 'dotnet: autofocus reaches the field');
+    assert(elcSrc.includes(', 0, false, false, true)'), 'cpp: autofocus reaches the field');
+    assert(elpSrc.includes(', autofocus=True'), 'python: autofocus reaches the field');
+    assert(elhSrc.includes('.defaultFocus(true)'), 'arkts: autofocus reaches the field');
+    assert(elaSrc.includes('val focus') && elaSrc.includes('.then(Modifier.focusRequester(') && elaSrc.includes('import androidx.compose.ui.focus.FocusRequester'), 'android: autofocus reaches the field');
+    assert(elxSrc.includes('@FocusState private var __autoFocus0: Bool') && elxSrc.includes('.focused($__autoFocus0).onAppear { __autoFocus0 = true }'), 'xcode: autofocus reaches the field');
+  }
+
+  // R444: <input type="date"> is the platform's own picker on the native ends,
+  // and the state keeps the ISO day the web input writes - a text box that
+  // silently accepts "next tuesday" was not a date field.
+  {
+    const dproj = join(scratch, 'date-proj');
+    mkdirSync(join(dproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(dproj, 'src/pages/index.rose'), '<script>\n  let day = $state(\'2026-10-31\');\n</script>\n<div><input type="date" bind:value={day}><input type="date" min="2020-01-01" max="2030-12-31" bind:value={day}><input type="date" value="2026-01-01"></div>\n');
+    const dpx = await exportProject('xcode', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-xcode') });
+    const dpxSrc = readFileSync(join(dpx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(dpxSrc.includes('DatePicker("", selection: Binding(get: { roseDate(day) }, set: { day = roseIso($0) }), displayedComponents: .date)'), 'xcode: a date input is the platform picker');
+    assert(dpxSrc.includes('in: roseDateBounds("2020-01-01", "2030-12-31")'), 'xcode: min and max bound the picker');
+    assert(dpxSrc.includes('.onAppear { if day.isEmpty { day = roseIso(Date()) } }'), 'xcode: an empty date adopts today, so the chip never lies');
+    const dpxKit = readFileSync(join(dpx.outDir, 'rosezmApp', 'Kit', 'RoseKit.swift'), 'utf8');
+    assert(dpxKit.includes('func roseIso(_ date: Date) -> String') && dpxKit.includes('yyyy-MM-dd'), 'xcode: the kit formats the ISO day');
+    assert((dpx.warnings ?? []).some((w: string) => /date.*inert/.test(w)), 'xcode: an unbound date input is named, not silent');
+    const dpf = await exportProject('flutter', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-flutter') });
+    const dpfSrc = readFileSync(join(dpf.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(/day, \(value\) => __set\('day', value\), first: DateTime\.parse\('2020-01-01'\), last: DateTime\.parse\('2030-12-31'\)\)/.test(dpfSrc), 'flutter: a date input opens the calendar');
+    const dpfKit = readFileSync(join(dpf.outDir, 'lib', 'styles.dart'), 'utf8');
+    assert(dpfKit.includes('Widget roseDateField(') && dpfKit.includes('showDatePicker('), 'flutter: the kit ships the calendar');
+    const dpa = await exportProject('android', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-android') });
+    const dpaSrc = readFileSync(join(dpa.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(dpaSrc.includes('android.app.DatePickerDialog(') && dpaSrc.includes('day = roseIsoDay(y, m + 1, d)'), 'android: a date input opens the calendar');
+    assert(dpaSrc.includes('roseDateMillis("2020-01-01")?.let { dlg.datePicker.minDate = it }') && dpaSrc.includes('roseDateMillis("2030-12-31")?.let { dlg.datePicker.maxDate = it }'), 'android: min and max bound the calendar');
+    const dpaKit = readFileSync(join(dpa.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseTheme.kt'), 'utf8');
+    assert(dpaKit.includes('fun roseIsoDay(') && dpaKit.includes('fun roseDateOf('), 'android: the kit formats the ISO day');
+    const dpk = await exportProject('arkts', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-arkts') });
+    const dpkSrc = readFileSync(join(dpk.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(dpkSrc.includes('DatePicker({ start: new Date("2020-01-01"), end: new Date("2030-12-31"), selected: roseDateOf(this.day) })'), 'arkts: a date input is the system calendar');
+    assert(dpkSrc.includes('this.day = roseIsoDay(value.year, value.month, value.day)'), 'arkts: the picked day lands in the state');
+    const dpkKit = readFileSync(join(dpk.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseKit.ets'), 'utf8');
+    assert(dpkKit.includes('export function roseIsoDay('), 'arkts: the kit formats the ISO day');
+    const dpw = await exportProject('dotnet', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-dotnet') });
+    const dpwSrc = readFileSync(join(dpw.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(dpwSrc.includes('RoseTheme.DateField(') && dpwSrc.includes('"2020-01-01", "2030-12-31"'), 'dotnet: a date input is the DatePicker');
+    const dpwTheme = readFileSync(join(dpw.outDir, 'RoseTheme.cs'), 'utf8');
+    assert(dpwTheme.includes('public static DatePicker DateField(') && dpwTheme.includes('public static string IsoDay('), 'dotnet: the theme builds the picker and writes the ISO day');
+    const dpc = await exportProject('cpp', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-cpp') });
+    const dpcSrc = readFileSync(join(dpc.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
+    assert(/"2020-01-01", "2030-12-31"\)/.test(dpcSrc) && dpcSrc.includes('rose_date('), 'cpp: a date input is the QDateEdit');
+    const dpcKit = readFileSync(join(dpc.outDir, 'src', 'rose.cpp'), 'utf8');
+    assert(dpcKit.includes('QDateEdit* rose_date(') && dpcKit.includes('setCalendarPopup(true)'), 'cpp: the kit ships the calendar popup');
+    const dpw2 = await exportProject('weapp', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-weapp') });
+    const dpw2Tpl = readFileSync(join(dpw2.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    assert(dpw2Tpl.includes('<picker mode="date" value="{{day}}" bindchange="__dt0"><view') && dpw2Tpl.includes('{{day ? day : \'Select date\'}}'), 'weapp: a date input is the platform calendar sheet');
+    assert(dpw2Tpl.includes('start="2020-01-01" end="2030-12-31"'), 'weapp: min and max bound the calendar sheet');
+    const dpw2Js = readFileSync(join(dpw2.outDir, 'pages', 'index', 'index.js'), 'utf8');
+    assert(dpw2Js.includes('__dt0: function (e) { this.__set("day", e.detail.value); }'), 'weapp: the picked day lands in the state');
+    const dpj = await exportProject('java', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-java') });
+    const dpjSrc = readFileSync(join(dpj.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(/RoseTheme\.dateField\([^,]+, app, "day", "2020-01-01", "2030-12-31"\)/.test(dpjSrc), 'java: a date input is a day spinner');
+    const dpjTheme = readFileSync(join(dpj.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'RoseTheme.java'), 'utf8');
+    assert(dpjTheme.includes('public static JSpinner dateField(') && dpjTheme.includes('JSpinner.DateEditor'), 'java: the theme builds the spinner');
+    const dpp = await exportProject('python', dproj, { apiBase: 'x', outRoot: join(scratch, 'date-python') });
+    const dppSrc = readFileSync(join(dpp.outDir, 'pages', 'index.py'), 'utf8');
+    assert(dppSrc.includes("rose_date(__f1_0, 'day', st, app.render, '2020-01-01', '2030-12-31')"), 'python: a date input is the day spinner');
+    const dppKit = readFileSync(join(dpp.outDir, 'rosezm.py'), 'utf8');
+    assert(dppKit.includes('def rose_date(') && dppKit.includes('tk.Spinbox'), 'python: the kit builds the spin boxes');
+    const dppc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'date-python')], { encoding: 'utf8' });
+    assert(dppc.status === 0, `python: the date page compiles (${(dppc.stderr ?? '').slice(0, 120)})`);
+  }
+
+  // R450: <details>/<summary> is a fold-out panel on the web; the native ends
+  // used to show every body permanently open, with the summary as a row.
+  {
+    const det = join(scratch, 'details-proj');
+    mkdirSync(join(det, 'src/pages'), { recursive: true });
+    writeFileSync(join(det, 'src/pages/index.rose'), '<div><details><summary>More</summary><p>Hidden body</p></details><details open><summary><strong>Shown</strong> title</summary><p>Visible</p></details></div>\n');
+    const detF = await exportProject('flutter', det, { apiBase: 'x', outRoot: join(scratch, 'details-flutter') });
+    const detFSrc = readFileSync(join(detF.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(detFSrc.includes('ExpansionTile(title: Text("More"), initiallyExpanded: false, children: ['), 'flutter: details folds into an ExpansionTile');
+    assert(detFSrc.includes('initiallyExpanded: true'), 'flutter: the open attribute starts the tile expanded');
+    const detW = await exportProject('dotnet', det, { apiBase: 'x', outRoot: join(scratch, 'details-dotnet') });
+    const detWSrc = readFileSync(join(detW.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(detWSrc.includes('new Expander { Header = "More" }') && detWSrc.includes('.Content = body'), 'dotnet: details becomes an Expander with its summary as the header');
+    assert(detWSrc.includes('IsExpanded = true'), 'dotnet: the open attribute starts the expander open');
+    assert(/var hdr\d+ = new System\.Windows\.Controls\.StackPanel\(\);/.test(detWSrc), 'dotnet: a rich summary gets a real header panel');
+    const detX = await exportProject('xcode', det, { apiBase: 'x', outRoot: join(scratch, 'details-xcode') });
+    const detXSrc = readFileSync(join(detX.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(detXSrc.includes('@State private var __open0 = false') && detXSrc.includes('@State private var __open1 = true'), 'xcode: a details panel folds on its own state');
+    assert(detXSrc.includes('DisclosureGroup(isExpanded: $__open0)') && detXSrc.includes('} label: {'), 'xcode: details renders as a DisclosureGroup');
+    const detA = await exportProject('android', det, { apiBase: 'x', outRoot: join(scratch, 'details-android') });
+    const detASrc = readFileSync(join(detA.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(/clickable \{ open\d+ = !open\d+ \}/.test(detASrc) && /if \(open\d+\) \{/.test(detASrc), 'android: the header toggles and the body renders while open');
+    assert(detASrc.includes('import androidx.compose.foundation.clickable'), 'android: the fold imports clickable');
+    const detK = await exportProject('arkts', det, { apiBase: 'x', outRoot: join(scratch, 'details-arkts') });
+    const detKSrc = readFileSync(join(detK.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(detKSrc.includes('@State __open0: boolean = false') && detKSrc.includes('@State __open1: boolean = true'), 'arkts: a details panel folds on its own state');
+    assert(detKSrc.includes('.onClick(() => { this.__open0 = !this.__open0; })') && detKSrc.includes('if (this.__open0) {'), 'arkts: the header toggles and the body renders while open');
+    const detWp = await exportProject('weapp', det, { apiBase: 'x', outRoot: join(scratch, 'details-weapp') });
+    const detWpTpl = readFileSync(join(detWp.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    assert(detWpTpl.includes('bindtap="__op0"') && detWpTpl.includes('wx:if="{{__open0}}"'), 'weapp: the fold is a tap toggle with a conditional body');
+    const detWpJs = readFileSync(join(detWp.outDir, 'pages', 'index', 'index.js'), 'utf8');
+    assert(detWpJs.includes('__open1: true') && detWpJs.includes('this.setData({ __open0: !this.data.__open0 })'), 'weapp: the panel state rides in page data');
+    const detJ = await exportProject('java', det, { apiBase: 'x', outRoot: join(scratch, 'details-java') });
+    const detJSrc = readFileSync(join(detJ.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(/foldBody\d+\.setVisible\(false\);/.test(detJSrc) && /RoseTheme\.clickOn\(foldHead\d+, \(\) -> \{ foldBody\d+\.setVisible\(!foldBody\d+\.isVisible\(\)\)/.test(detJSrc), 'java: the fold header toggles a hidden body');
+    assert(/foldBody\d+\.setVisible\(true\);/.test(detJSrc), 'java: the open attribute starts the body visible');
+    const detP = await exportProject('python', det, { apiBase: 'x', outRoot: join(scratch, 'details-python') });
+    const detPSrc = readFileSync(join(detP.outDir, 'pages', 'index.py'), 'utf8');
+    assert(detPSrc.includes('__OPENED = {}') && /rose_button\(__det\d+, "More", __toggle_det\d+\)/.test(detPSrc), 'python: the fold header toggles a body frame');
+    assert(/if __OPENED\.get\('det\d+', True\):/.test(detPSrc), 'python: the open attribute starts the body packed');
+    const detPc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'details-python')], { encoding: 'utf8' });
+    assert(detPc.status === 0, `python: the details page compiles (${(detPc.stderr ?? '').slice(0, 120)})`);
+  }
+
+  // R454: a mini-program input has no keydown - Enter rides the confirm event,
+  // and the adapter puts the key back so an Enter guard still works.
+  {
+    const kproj = join(scratch, 'key-proj');
+    mkdirSync(join(kproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(kproj, 'src/pages/index.rose'), '<script>\n  let q = $state(\'\');\n  function go() { q = q + \'!\'; }\n</script>\n<div><input bind:value={q} on:keydown={go} placeholder="search"><textarea on:keydown={go}></textarea></div>\n');
+    const kw = await exportProject('weapp', kproj, { apiBase: 'x', outRoot: join(scratch, 'key-weapp') });
+    const kwTpl = readFileSync(join(kw.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    assert(kwTpl.includes('confirm-type="send"') && kwTpl.includes('bindconfirm="__k0"'), 'weapp: an Enter handler rides the confirm event');
+    const kwJs = readFileSync(join(kw.outDir, 'pages', 'index', 'index.js'), 'utf8');
+    assert(kwJs.includes("function __k0(e) { const ev = __domEvent(e); ev.key = 'Enter'; return go(ev); }"), 'weapp: the adapter puts the key back');
+    assert(!(kw.warnings ?? []).some((w: string) => /keydown/.test(w)), 'weapp: keydown is no longer reported as dropped');
+    const kb = await exportProject('baidu', kproj, { apiBase: 'x', outRoot: join(scratch, 'key-baidu') });
+    const kbTpl = readFileSync(join(kb.outDir, 'pages', 'index', 'index.swan'), 'utf8');
+    assert(/bindconfirm="__k0"/.test(kbTpl) && kbTpl.includes('confirm-type="send"'), 'baidu: the same Enter mapping holds for its dialect');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.

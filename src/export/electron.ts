@@ -24,7 +24,6 @@ import * as path from 'node:path';
 import { buildProject, scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { nativeUsage, NATIVE_TARGETS, type NativeCapability } from './native-api.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
-import { appIcon } from './app-icon.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { DOM_BRIDGE_BRANCHES } from './desktop-shell.js';
 

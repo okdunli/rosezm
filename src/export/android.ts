@@ -447,12 +447,6 @@ async function copyFonts(root: string, fontDir: string, css: string, warnings: s
   return map;
 }
 
-interface AndroidStyle {
-  className: string;
-  textParams: string[];
-  modifiers: string[];
-}
-
 /** The element's resolved style at export time: what to render, and how. */
 interface ComposeResolved {
   /** The model the cascade produced (classes + inline), or null when unstyled. */
@@ -992,6 +986,19 @@ fun roseFloatOf(v: Any?): Float? {
     return m.value.toFloatOrNull()
 }
 
+/// R445: the ISO day a date input writes, and the reverse for its picker.
+fun roseIsoDay(y: Int, m: Int, d: Int): String = "%04d-%02d-%02d".format(y, m, d)
+fun roseDateOf(iso: String): java.util.Calendar? {
+    val parts = iso.take(10).split("-")
+    if (parts.size != 3) return null
+    val y = parts[0].toIntOrNull() ?: return null
+    val m = parts[1].toIntOrNull() ?: return null
+    val d = parts[2].toIntOrNull() ?: return null
+    if (m !in 1..12 || d !in 1..31) return null
+    return java.util.Calendar.getInstance().apply { set(y, m - 1, d) }
+}
+fun roseDateMillis(iso: String): Long? = roseDateOf(iso)?.timeInMillis
+
 /** The cascade at runtime: the element's tag rule first, then every class,
  * then the inline style, then props. */
 fun roseResolve(tag: String, classes: List<String>, scope: String, inline: RoseStyle? = null, props: Map<String, Any?>? = null): RoseStyle {
@@ -1236,11 +1243,6 @@ function composeColor(v: string): string {
   if (!hex) return 'Color.Black';
   const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6);
   return `Color(0xFF${full.toUpperCase()})`;
-}
-
-function sizeOf(v: string): string {
-  const n = Number(/(-?\d+(?:\.\d+)?)/.exec(v)?.[1] ?? '0');
-  return String(Math.round((/rem\b/.test(v) ? n * 16 : n) * 10) / 10);
 }
 
 /**
@@ -2245,6 +2247,9 @@ function renderPage(
   const remoteImg = /\bAsyncImage\(/.test(layout);
   const useScale = /\bContentScale\./.test(layout);
   const useAudio = /Icons\.Filled\.Pause/.test(layout);
+  const useFocusReq = /FocusRequester/.test(layout);
+  // R451: a <details> header is a clickable row - imported only when one exists.
+  const useClickable = /\.clickable\s*\{/.test(layout);
   const handlers = [translateHandlers(pageScript, facts, page, knownBinds, warnings, formFields), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
   // The kit's useNative dispatch: imported only when a handler on this page
   // actually calls it, so a page with no device capability imports nothing.
@@ -2340,7 +2345,7 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable` : ''}
 ${(ctx.activeKeys?.size ?? 0) ? `import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.clickable` : ''}
+import androidx.compose.foundation.clickable` : useClickable ? 'import androidx.compose.foundation.clickable' : ''}
 ${(ctx.focusKeys?.size ?? 0) ? `import androidx.compose.ui.focus.onFocusChanged` : ''}
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -2351,7 +2356,7 @@ import androidx.compose.ui.res.painterResource
 ${remoteImg ? 'import coil.compose.AsyncImage\n' : ''}${remoteImg || useScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}import androidx.compose.ui.unit.dp
+${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${useFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ${PKG}.kit.roseData
 import ${PKG}.kit.roseAction
@@ -2869,6 +2874,33 @@ function emitElementStyled(
     emit(`Text(${text || '""'}${textParams}${trunc}${box})`, ctx);
     return;
   }
+  // R451: <details>/<summary> as a collapsible column - the header toggles, the
+  // body renders only while open; `open` starts it expanded.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const flag = `open${ctx.lines.length}`;
+      emit(`var ${flag} by remember { mutableStateOf(${node.attrs.some((a) => a.name === 'open') ? 'true' : 'false'}) }`, ctx);
+      const boxParts = resolved.expr ? [`.roseBox(${resolved.expr})`] : (resolved.model ? composeModifiersOf(resolved.model) : []);
+      emit(`Column(modifier = Modifier${boxParts.join('')}) {`, ctx);
+      ctx.depth++;
+      emit(`Row(modifier = Modifier.fillMaxWidth().clickable { ${flag} = !${flag} }) {`, ctx);
+      ctx.depth++;
+      emitNodes(summary.children, ctx);
+      ctx.depth--;
+      emit('}', ctx);
+      emit(`if (${flag}) {`, ctx);
+      ctx.depth++;
+      emitNodes(body, ctx);
+      ctx.depth--;
+      emit('}', ctx);
+      ctx.depth--;
+      emit('}', ctx);
+      return;
+    }
+    ctx.warnings.push('android: <details> without <summary> renders permanently open (the header needs a summary)');
+  }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
@@ -3053,7 +3085,50 @@ function emitElementStyled(
       : '';
     // R429: a readonly field keeps its value and selectable text, no caret edits.
     const readOnly = node.attrs.some((a) => a.name === 'readonly') ? ', readOnly = true' : '';
-    emit(`TextField(${valueExpr}${onChange}${keyboard}${visual}${inputEnabled}${readOnly}, label = { Text(${labelBody}) }, modifier = ${baseMod})`, ctx);
+    // R440: a <textarea> is multiline; rows is its minimum visible line count.
+    const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+    const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
+    const areaArg = tag === 'textarea' ? `, minLines = ${rows}` : '';
+    // R442: autofocus is the browser's focus-on-mount, via a FocusRequester.
+    const autoFocus = node.attrs.some((a) => a.name === 'autofocus');
+    let fieldMod = baseMod;
+    if (autoFocus) {
+      const fr = `focus${ctx.lines.length}`;
+      emit(`val ${fr} = remember { FocusRequester() }`, ctx);
+      emit(`LaunchedEffect(Unit) { ${fr}.requestFocus() }`, ctx);
+      fieldMod = `${baseMod}.then(Modifier.focusRequester(${fr}))`;
+    }
+    // R445: a date input opens the platform calendar instead of a keyboard;
+    // the state keeps the ISO yyyy-MM-dd day the web input writes.
+    if (type === 'date') {
+      const dateState = propName || boundName || formKey;
+      if (!dateState) {
+        ctx.warnings.push('android: <input type="date"> without bind:value is inert');
+        emit('Text("[date]")', ctx);
+        return;
+      }
+      const read = propName ? `(${propName} as? String ?: "")` : dateState;
+      const write = (v: string): string => (propName ? `${propChangeHandler(propName)}(${v})` : `${dateState} = ${v}`);
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? JSON.stringify(attr.value.text.trim()) : '');
+      const minDay = literal(minAttr);
+      const maxDay = literal(maxAttr);
+      const ctxVar = `__dateCtx${ctx.lines.length}`;
+      emit(`val ${ctxVar} = LocalContext.current`, ctx);
+      emit('Button(onClick = {', ctx);
+      ctx.depth++;
+      emit('val cal = java.util.Calendar.getInstance()', ctx);
+      emit(`roseDateOf(${read})?.let { cal.time = it }`, ctx);
+      emit(`val dlg = android.app.DatePickerDialog(${ctxVar}, { _, y, m, d -> ${write('roseIsoDay(y, m + 1, d)')} }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH))`, ctx);
+      if (minDay) emit(`roseDateMillis(${minDay})?.let { dlg.datePicker.minDate = it }`, ctx);
+      if (maxDay) emit(`roseDateMillis(${maxDay})?.let { dlg.datePicker.maxDate = it }`, ctx);
+      emit('dlg.show()', ctx);
+      ctx.depth--;
+      emit(`}, modifier = ${fieldMod}${inputEnabled}) { Text(if (${read}.isEmpty()) "Select date" else ${read}) }`, ctx);
+      return;
+    }
+    emit(`TextField(${valueExpr}${onChange}${keyboard}${visual}${inputEnabled}${readOnly}${areaArg}, label = { Text(${labelBody}) }, modifier = ${fieldMod})`, ctx);
     return;
   }
   if (tag === 'button') {
@@ -3186,7 +3261,6 @@ function emitElementStyled(
     // after that axis, not after the container.
     cross ? `${isRow ? 'verticalAlignment' : 'horizontalAlignment'} = ${cross}` : null,
   ].filter(Boolean);
-  const extra = layoutArgs.length ? `, ${layoutArgs.join(', ')}` : '';
   // R223: a wrapping row is FlowRow in Compose (androidx.compose.foundation.layout
   // since 1.4) - the same thing CSS flex-wrap does, instead of one overflowing
   // row. The API was experimental through the pinned BOM, so the opt-in rides
@@ -3216,12 +3290,6 @@ function attrOf(attr: Extract<IrNode, { kind: 'element' }>['attrs'][number], ctx
   if (attr.value.kind === 'expr') return ktExpr(attr.value.code, ctx);
   if (attr.value.kind === 'text') return JSON.stringify(attr.value.text);
   return '""';
-}
-
-function handlerRef(code: string, ctx: AndroidCtx): string {
-  if (!code) return '{}';
-  if (/^[A-Za-z_$][\w$]*$/.test(code)) return code;
-  return `${registerInlineHandler(code, ctx)}()`;
 }
 
 function handlerCall(code: string, ctx: AndroidCtx): string {
@@ -3913,6 +3981,7 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   const compRemoteImg = /\bAsyncImage\(/.test(compBody);
   const compUseScale = /\bContentScale\./.test(compBody);
   const compUseAudio = /Icons\.Filled\.Pause/.test(compBody);
+  const compUseFocusReq = /FocusRequester/.test(compBody);
   // R246: the component's own hover halves, declared like the page's.
   const compHoverDecls = [...(ctx.hoverKeys ?? [])].map((key) => {
     const v = hoverVarName(key);
@@ -3945,7 +4014,7 @@ import androidx.compose.ui.graphics.Color
 ${compRemoteImg ? 'import coil.compose.AsyncImage\n' : ''}${compRemoteImg || compUseScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-${compUseAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}import androidx.compose.ui.unit.dp
+${compUseAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${compUseFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 ${compKitImports ? compKitImports + '\n' : ''}
 @Composable

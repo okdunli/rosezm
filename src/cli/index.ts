@@ -9,12 +9,11 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { AsyncLocalStorage } from 'async_hooks';
 import { Worker } from 'worker_threads';
-import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadPlugins, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
-import { prunePrerendered, rmTreeParallel } from '../compiler/rm-fast.js';
+import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
+import { prunePrerendered } from '../compiler/rm-fast.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode, setExtraCsp } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
 import { AI_PROMPT } from './prompt.js';
-import { Readable } from 'stream';
 import { createEdgeHandler } from './edge.js';
 import { runShutdownHooks } from './shutdown.js';
 import { requestOrigin } from './origin.js';
@@ -1055,7 +1054,6 @@ function devWrap(inner: (req: any, res: any) => void): (req: any, res: any) => v
     if (url.startsWith('/__rosezm_reload')) return devReload(req, res);
     if (url.startsWith('/__rosezm_state') && req.method === 'POST') return devSaveState(req, res);
     if (url.startsWith('/__rosezm_store')) return storeStream(req, res);
-    let injected = false;
     // The resumed snapshot belongs to the NEXT request, whatever it turns out to be: a document that answers 304 (nothing changed) consumes it too.
     const seed = devResume;
     devResume = null;

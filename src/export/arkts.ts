@@ -26,10 +26,10 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , pageTitle} from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
+import { rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 
@@ -44,7 +44,6 @@ export interface EmitArkTsOptions {
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
 const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
-const BOX_TAGS = new Set(['div', 'section', 'main', 'article', 'header', 'footer', 'nav', 'aside', 'ul', 'ol', 'li', 'form', 'fieldset', 'details', 'summary', 'figure', 'figcaption', 'dl', 'dt', 'dd', 'table', 'thead', 'tbody', 'tr', 'block', 'slot', 'web-view']);
 
 export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
@@ -917,6 +916,18 @@ export function roseBool(value: Object): boolean {
   return value !== null && value !== undefined;
 }
 
+/// R445: the ISO day a date input writes, from the picker's 0-based month.
+export function roseIsoDay(year: number, month: number, day: number): string {
+  const pad = (n: number): string => (n < 10 ? '0' + n : '' + n);
+  return year + '-' + pad(month + 1) + '-' + pad(day);
+}
+
+/// R445: the Date a picker opens on, from the state's ISO day (today when the
+/// state is still empty).
+export function roseDateOf(iso: string): Date {
+  return iso.length >= 10 ? new Date(iso.substring(0, 10)) : new Date();
+}
+
 export function roseListOf(value: Object): Object[] {
   // ArkTS has no Array.isArray: an array is recognised by instanceof.
   return value instanceof Array ? (value as Object[]) : [];
@@ -1345,6 +1356,7 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     awaits: [],
     deferred: [],
     hoverStates: [],
+    detailsStates: [],
     scriptConsts: new Map(),
     componentProps: new Set(propNames),
     vectorRenderers: [],
@@ -1519,6 +1531,8 @@ interface ArkCtx {
   deferred: Array<{ name: string; hold: number }>;
   /** R243: one @State flag per element that has a `:hover` rule. */
   hoverStates: Array<{ name: string; mods: string[] }>;
+  /** R452: one @State flag per <details>, seeded by its `open` attribute. */
+  detailsStates: Array<{ name: string; open: boolean }>;
   /** Inline handlers registered for this page: code -> generated method name. */
   inline: Map<string, string>;
   /** The generated methods themselves, appended to the page struct. */
@@ -1575,7 +1589,7 @@ function renderPage(
   // nothing and every page rendered edge to edge; resolve the body rule once
   // here and paint it on the page root (python/dotnet seed the same rule).
   const bodyModel = cascadeFor(sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model;
-  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
+  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], detailsStates: [], scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
   emitNodes(page.nodes, ctx);
   const body = ctx.lines.join('\n');
   const knownBinds = new Set(binds.map((b) => b.name));
@@ -1610,6 +1624,7 @@ function renderPage(
     ...ctx.deferred.map((d) => `  @State ${d.name}: boolean = false;`),
     // R243: a `:hover` rule becomes a flag + the hover model's own modifiers.
     ...ctx.hoverStates.map((h) => `  @State ${h.name}: boolean = false;`),
+    ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
   ].join('\n');
   const persistSeeds = persist.map((k) => `    if (__rosezmP.hasSync(${JSON.stringify('rosezm:' + k)})) this.${k} = String(__rosezmP.getSync(${JSON.stringify('rosezm:' + k)}, this.${k}));`).join('\n');
   const persistWatchers = persist.map((k) => `
@@ -2128,6 +2143,32 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
     return;
   }
+  // R452: <details>/<summary> folds on a @State flag - the header toggles it and
+  // the body renders only while open.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const flag = `__open${ctx.detailsStates.length}`;
+      ctx.detailsStates.push({ name: flag, open: node.attrs.some((a) => a.name === 'open') });
+      emit('Column() {', ctx);
+      ctx.depth++;
+      emit('Row() {', ctx);
+      ctx.depth++;
+      emitNodes(summary.children, ctx);
+      ctx.depth--;
+      emit(`}.width('100%').onClick(() => { this.${flag} = !this.${flag}; })`, ctx);
+      emit(`if (this.${flag}) {`, ctx);
+      ctx.depth++;
+      emitNodes(body, ctx);
+      ctx.depth--;
+      emit('}', ctx);
+      ctx.depth--;
+      emit(`}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}`, ctx);
+      return;
+    }
+    ctx.warnings.push(`arkts: <details> without <summary> renders permanently open (the fold needs a header)`);
+  }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
@@ -2247,12 +2288,37 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
     const formKey = field ? formFieldKey(ctx.forms, field) : null;
     const bound = boundName || formKey || '';
+    // R445: a date input is HarmonyOS's own calendar sheet, and the state keeps
+    // the ISO yyyy-MM-dd day the web input writes.
+    if (type === 'date') {
+      const dateState = bound;
+      if (!dateState) {
+        ctx.warnings.push('arkts: <input type="date"> without bind:value is inert');
+        emit("Text('[date]')", ctx);
+        return;
+      }
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const day = (attr: typeof minAttr, fallback: string): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? `new Date(${JSON.stringify(attr.value.text.trim())})` : `new Date(${JSON.stringify(fallback)})`);
+      const selected = `roseDateOf(this.${dateState})`;
+      emit(box(`DatePicker({ start: ${day(minAttr, '1900-01-01')}, end: ${day(maxAttr, '2100-12-31')}, selected: ${selected} })` +
+        `.onChange((value: DatePickerResult) => { this.${dateState} = roseIsoDay(value.year, value.month, value.day); })`), ctx);
+      return;
+    }
     const onChange = propName
       ? `.onChange((value: string) => { this.${propChangeHandler(propName)}(value); })`
       : (bound
         ? `.onChange((value: string) => { this.${bound} = value; })`
         : '.onChange((value: string) => {})');
-    if (tag === 'textarea') emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : '.height(96)'}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+    // R441: autofocus is the browser's focus-on-mount.
+    const autoMod = node.attrs.some((a) => a.name === 'autofocus') ? '.defaultFocus(true)' : '';
+    if (tag === 'textarea') {
+      // R440: rows is the textarea's visible line count (24px per line).
+      const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+      const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? Number(rowsAttr.value.text.trim()) : 4;
+      emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : `.height(${rows * 24})`}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      return;
+    }
     else {
       // The element's type= carries through: a password field masks, and a
       // number/email/tel field opens the keyboard that fits it.
@@ -2267,7 +2333,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
         : '';
       const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
       const maxMod = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? `.maxLength(${maxAttr.value.text.trim()})` : '';
-      emit(box(`TextInput({ placeholder: ${hint} })${inputType}${disabledMod}${maxMod}${onChange}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      emit(box(`TextInput({ placeholder: ${hint} })${inputType}${disabledMod}${maxMod}${onChange}${autoMod}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
     }
     return;
   }

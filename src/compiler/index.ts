@@ -54,7 +54,6 @@ const STYLE_RE = /<style>([\s\S]*?)<\/style>/;
 const DECL_RE = /(?<=^|[;}{\n])[ \t]*(?:let|const|var)\s+(\w+)[^\n;{}=]*=\s*\$(state|data|kv|persist|derived)\b/g;
 const DECL_CAST_RE = /^\s+as\s+[^;\n]+/;
 const SETSTATE_RE = /\$setState\(([^,]+),\s*([^)]+)\)/g;
-const EVENT_RE = /on:(\w+)=\{([^}]+)\}/g;
 const SLOT_RE = /<slot\s*\/>|<slot>([\s\S]*?)<\/slot>/g;
 const SLOT_NAMED_RE = /<slot\s+((?=[^>]*\bname\s*=)[^>]*?)(?:\/>|>([\s\S]*?)<\/slot>)/g;
 
@@ -3804,7 +3803,6 @@ function expandAwaitBlocks(template: string, filePath: string): { template: stri
       i++;
     }
     if (brace !== 0) break;
-    const openLen = i - openAt;
     const expr = template.slice(openAt + 7, i - 1).trim();
     if (!expr) {
       throw new RoseError('E-TEMPLATE', `${filePath}: {#await} needs a promise expression`, {
@@ -4518,7 +4516,7 @@ function compileTemplate(
       const [, name, params, content] = earliest.match;
       const before = src.slice(cursor, earliest.index);
       if (before) result += emitChunk(before, acc, closes, scope);
-      const id = nextId();
+      nextId();
       const paramList = params ? params.split(',').map(p => p.trim()).filter(Boolean).join(',') : '';
       const inner = compileTemplate(content.trim(), 'h', '__c', '__s', depth + 1, effMarkers, comps, islandDepth);
       result += `__snip.${name} = (__s, __c${paramList ? ',' + paramList : ''}) => { let h = ''; ${inner} return h; };\n`;
@@ -5118,7 +5116,7 @@ const INLINE_IMG_MAX = 8192;
 const INLINE_SVG_MAX = 16384;
 
 import { readImageSize } from "../cli/image-size";
-import { scanContentDir, renderMarkdown, buildRss } from "../cli/content";
+import { scanContentDir } from "../cli/content";
 
 /**
  * in public/) become a sorted srcset on the URL-kept <img>. Zero-dependency
@@ -5914,7 +5912,6 @@ export const hasResponseHooks = hooks.some((p) => p.onResponse);
   const chainOf = (idx: number): number[] => [idx, ...layoutsOf(infos, idx)];
   const loaderInner = (idx: number): string =>
     `load: () => loadChain([${chainOf(idx).map((i) => `() => import('./comp-${i}.client.js')`).join(', ')}])`;
-  const loaderOf = (idx: number): string => `{ ${loaderInner(idx)} }`;
 
   const routeNoJs = (i: number): boolean => routeShipsNoJs(infos, compiled, i);
 

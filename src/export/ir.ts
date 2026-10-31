@@ -289,7 +289,7 @@ class Parser {
   /** >0 while parsing the children of a <pre>; its text nodes keep whitespace. */
   private preDepth = 0;
 
-  constructor(private src: string, private file: string, private warnings: string[], private platform?: string) {}
+  constructor(private src: string, private file: string, private warnings: string[], platform?: string) {}
 
   parseNodes(stop: Term): Node[] {
     const nodes: Node[] = [];

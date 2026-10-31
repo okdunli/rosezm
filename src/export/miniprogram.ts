@@ -20,10 +20,10 @@ import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type AttrValue , pageTitle} from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode, type AttrValue , pageTitle} from './ir.js';
 import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
-import { inlineFontFaces, kvDeclarations, kvCallable, serverOnlyGlobals, bakeContent, rewriteThrowNew, renderWarningSection, callifyBareReads, rewriteNullish } from './state-ops.js';
+import { inlineFontFaces, kvDeclarations, kvCallable, bakeContent, rewriteThrowNew, renderWarningSection, callifyBareReads, rewriteNullish } from './state-ops.js';
 import { objectEntriesOf, literalTruth, cssLiteralValue, cssPropOf, sanitizeFor } from './style-engine.js';
 import { rewriteStateWrites, setStateSpell } from '../compiler/state-writes.js';
 import { appIdentity } from './app-identity.js';
@@ -921,7 +921,11 @@ class EmitContext {
   loopStack: string[] = [];
   /** A named script function bound to an event: original name -> adapter. */
   namedHandlers = new Map<string, string>();
-  bindHandlers: Array<{ name: string; kind: 'value' | 'checked' | 'radio' | 'checkboxGroup' | 'checkboxBool' | 'picker' | 'formGet'; state: string; values?: string[]; trigger?: string; action?: string }> = [];
+  bindHandlers: Array<{ name: string; kind: 'value' | 'checked' | 'radio' | 'checkboxGroup' | 'checkboxBool' | 'picker' | 'formGet' | 'toggleOpen'; state: string; values?: string[]; trigger?: string; action?: string }> = [];
+  /** R452: the `<details>` panels this template folds: data flag -> initial open. */
+  openFlags: Array<{ name: string; open: boolean }> = [];
+  /** R454: Enter-to-submit adapters: generated name -> the script function it wraps. */
+  keyHandlers = new Map<string, string>();
   /** Options discovered for a checkbox group: state -> values. */
   groupOptions = new Map<string, string[]>();
   /** Select bindings: state -> { labels, values }. */
@@ -1194,6 +1198,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     else compDataEntries.push(`    ${s.name}: null,`);
   }
   for (const a of ctx.awaits) compDataEntries.push(`    ${a.done}: false,`, `    ${a.value}: null,`, `    ${a.err}: null,`, `    ${a.failed}: false,`);
+  for (const o of ctx.openFlags) compDataEntries.push(`    ${o.name}: ${o.open ? 'true' : 'false'},`);
   for (const b of ctx.boundaryFlags) compDataEntries.push(`    ${b.field}: true,`);
   for (const d of ctx.deferred) compDataEntries.push(`    ${d.name}: false,`);
   // The page path returns both handler kinds from its definitions factory;
@@ -1214,6 +1219,10 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
   });
   const namedFns = [...ctx.namedHandlers.entries()].map(([original, adapter]) =>
     `  function ${adapter}(e) { return ${original}(__domEvent(e)); }`);
+  // R454: a keydown Enter handler arrives as bindconfirm, whose event carries no
+  // key; the adapter puts the key back before the page's own handler sees it.
+  const keyFns = [...ctx.keyHandlers.entries()].map(([adapter, original]) =>
+    `  function ${adapter}(e) { const ev = __domEvent(e); ev.key = 'Enter'; return ${original}(ev); }`);
   const { body: compBody } = await transformScript(comp.script ?? '', facts, ctx);
   const compKitImports = ['__rosezmNative', '__rosezmConfirm', '__rosezmAlert', '__rosezmPrompt', '__rosezmOpen']
     .filter((h) => new RegExp(`\\b${h}\\s*\\(`).test(compBody));
@@ -1241,10 +1250,12 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     indent(compBody.trim(), 2),
     ...inlineFns,
     ...namedFns,
+    ...keyFns,
     ...[...ctx.computed.entries()].map(([field, code]) =>
       `  __computed.${field} = function () { return (${rewriteRunes(rewriteStateReads(code, compStateNames))}); };`),
     '    return {',
     ...[...ctx.inlineHandlers.values(), ...ctx.namedHandlers.values()].map((n) => `      ${n}: ${n},`),
+    ...[...ctx.keyHandlers.keys()].map((n) => `      ${n}: ${n},`),
     '      __computed: __computed,',
     '      __effects: __effects,',
     '    };',
@@ -1272,6 +1283,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
         return `    ${b.name}: function (e) { this.setData({ ${b.state}: e.detail.value }); this.triggerEvent(${JSON.stringify(b.trigger)}, e.detail.value); },`;
       }
       if (b.kind === 'value' || b.kind === 'radio') return `    ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
+      if (b.kind === 'toggleOpen') return `    ${b.name}: function (e) { this.setData({ ${b.state}: !this.data.${b.state} }); },`;
       return `    ${b.name}: function (e) {},`;
     }),
     // R259: named handlers and inline arrows bound with on:xxx live in the
@@ -1279,6 +1291,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     // forwards are what the WXML bindings reach.
     ...[...ctx.namedHandlers.values()].map((n) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(__domEvent(e)); },`),
     ...[...ctx.inlineHandlers.values()].map((n) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(e); },`),
+    ...[...ctx.keyHandlers.keys()].map((n) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(e); },`),
     '    __rosezmSync() {',
     '      const defs = this.__rosezmDefs || {};',
     '      const computed = defs.__computed || {};',
@@ -1496,6 +1509,22 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     if (url && svgShapes.has(url)) return emitVectorCanvas(url, ctx);
   }
+  // R452: <details>/<summary> as a page-data fold - the header toggles the flag
+  // and the body is hidden while closed, exactly like the browser.
+  if (node.tag.toLowerCase() === 'details' && !isComponent) {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const flag = `__open${ctx.openFlags.length}`;
+      ctx.openFlags.push({ name: flag, open: node.attrs.some((a) => a.name === 'open') });
+      const handler = `__op${ctx.bindHandlers.length}`;
+      ctx.bindHandlers.push({ name: handler, kind: 'toggleOpen', state: flag });
+      const head = emitNodes(summary.children, ctx, dialect, usingComponents, compFiles);
+      const rest = emitNodes(body, ctx, dialect, usingComponents, compFiles);
+      return `<view><view ${eventAttrOf(dialect.prefix, 'tap')}="${handler}">${head}</view><view ${directiveOf(dialect.prefix, 'if')}="{{${flag}}}">${rest}</view></view>`;
+    }
+    ctx.warnings.push(`${ctx.file}: <details> without <summary> renders permanently open (the fold needs a header)`);
+  }
   // Two-way props: a call-site `bind:x={state}` passes the prop AND binds the
   // component's change event to a page handler that writes the state back.
   if (isComponent) {
@@ -1671,6 +1700,25 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
       ctx.bindHandlers.push({ name: handler, kind: 'checkboxBool', state: checkedState, ...(ctx.componentProps.has(checkedState) ? { trigger: `${checkedState}change` } : {}) });
       return `<checkbox-group ${eventAttrOf(dialect.prefix, 'change')}="${handler}"><checkbox checked="{{${checkedState}}}" color="#e91e63"></checkbox></checkbox-group>`;
     }
+    // R447: a date input is the platform's own calendar sheet. The state keeps
+    // the ISO day the web input writes, so nothing downstream changes.
+    if (type === 'date') {
+      const bindValue = node.attrs.find((a) => a.name === 'bind:value');
+      const state = bindValue && bindValue.value.kind === 'expr' ? bindValue.value.code.trim() : '';
+      if (!state) {
+        ctx.warnings.push(`${ctx.file}: <input type="date"> without bind:value is inert`);
+        return `<view>[date]</view>`;
+      }
+      const handler = `__dt${ctx.bindHandlers.length}`;
+      ctx.bindHandlers.push({ name: handler, kind: 'value', state, ...(ctx.componentProps.has(state) ? { trigger: `${state}change` } : {}) });
+      const literal = (name: string): string => {
+        const attr = node.attrs.find((a) => a.name === name);
+        return attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? ` ${name}="${escapeAttr(attr.value.text.trim())}"` : '';
+      };
+      const styleOnly = { ...node, attrs: node.attrs.filter((a) => ['class', 'style'].includes(a.name.toLowerCase())) };
+      const styleAttrs = styleOnly.attrs.length ? emitAttrs(styleOnly, ctx, dialect, isComponent, 'view', 'view') : '';
+      return `<picker mode="date" value="{{${state}}}"${literal('min').replace('min=', 'start=')}${literal('max').replace('max=', 'end=')} ${eventAttrOf(dialect.prefix, 'change')}="${handler}"><view${styleAttrs}>{{${state} ? ${state} : 'Select date'}}</view></picker>`;
+    }
   }
   const attrs = emitAttrs(node, ctx, dialect, isComponent, tag, semanticTag);
   const inner = emitNodes(node.children, ctx, dialect, usingComponents, compFiles);
@@ -1776,6 +1824,19 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       const evt = low.slice(3).replace(/\|.*$/, '');
       const mapped = EVENT_MAP[evt];
       if (!mapped) {
+        // R454: a mini-program input has no keydown - Enter arrives as the
+        // confirm event, which carries the value but no key. A named handler is
+        // wrapped by an adapter that puts `key = 'Enter'` back before it runs.
+        const named = attr.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(attr.value.code.trim());
+        if (evt === 'keydown' && ['input', 'textarea'].includes(node.tag.toLowerCase()) && named) {
+          // One adapter per script function, however many fields listen for Enter.
+          const code = attr.value.kind === 'expr' ? attr.value.code.trim() : '';
+          const existing = [...ctx.keyHandlers.entries()].find(([, orig]) => orig === code);
+          const adapter = existing ? existing[0] : `__k${ctx.keyHandlers.size}`;
+          if (!existing) ctx.keyHandlers.set(adapter, code);
+          out.push(`confirm-type="send" ${eventAttrOf(dialect.prefix, 'confirm')}="${adapter}"`);
+          continue;
+        }
         ctx.warnings.push(`${ctx.file}: on:${evt} has no mini-program event - dropped (${node.tag})`);
         continue;
       }
@@ -2276,10 +2337,6 @@ function hoist(code: string, ctx: EmitContext): string {
   return field;
 }
 
-function isPlainName(name: string): boolean {
-  return !/^(if|for|while|switch|catch|function|return|typeof|new|await|async|true|false|null|undefined)$/.test(name);
-}
-
 /** A `$state` initial value that is a literal can live in `data`; anything else
  *  (a store read, a call) must be evaluated where the script's scope exists. */
 function isLiteralInit(init: string): boolean {
@@ -2531,6 +2588,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
       deferred.push({ name: s.name, init });
     }
   }
+  for (const o of ctx.openFlags) dataEntries.push(`    ${o.name}: ${o.open ? 'true' : 'false'},`);
   for (const a of ctx.awaits) {
     dataEntries.push(`    ${a.done}: false,`);
     dataEntries.push(`    ${a.value}: null,`);
@@ -2589,6 +2647,9 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
   });
   const namedFns = [...ctx.namedHandlers.entries()].map(([original, adapter]) =>
     `  function ${adapter}(e) { return ${original}(__domEvent(e)); }`);
+  // R454: same Enter adapter as the component path.
+  const keyFns = [...ctx.keyHandlers.entries()].map(([adapter, original]) =>
+    `  function ${adapter}(e) { const ev = __domEvent(e); ev.key = 'Enter'; return ${original}(ev); }`);
   const deferredFns = deferred.map((d) => `  __data[${JSON.stringify(d.name)}] = (${d.init});`);
   // A checkbox group renders one checkbox per value; each needs its own boolean
   // in data (WXML has no method calls, so membership cannot be computed there).
@@ -2609,6 +2670,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
     if (b.kind === 'formGet') return `  ${b.name}: function (e) { __rosezmNavigate(${JSON.stringify(b.action ?? '')}, (e && e.detail && e.detail.value) || {}); },`;
     if (b.trigger) return `  ${b.name}: function (e) { this.setData({ ${b.state}: e.detail.value }); this.triggerEvent(${JSON.stringify(b.trigger)}, e.detail.value); },`;
     if (b.kind === 'value') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
+    if (b.kind === 'toggleOpen') return `  ${b.name}: function (e) { this.setData({ ${b.state}: !this.data.${b.state} }); },`;
     if (b.kind === 'radio') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
     if (b.kind === 'picker') return `  ${b.name}: function (e) { var index = Number(e.detail.value) || 0; this.__set(${JSON.stringify(b.state)}, ${JSON.stringify(b.values)}[index]); this.setData({ __sel_${b.state}: index }); },`;
     if (b.kind === 'checkboxBool') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, (e.detail.value || []).length > 0); },`;
@@ -2650,7 +2712,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
     );
   };
   const body = rewriteEffects(rawBody, effectPrelude);
-  const returned = [...new Set([...names, ...ctx.inlineHandlers.values(), ...ctx.namedHandlers.values()])]
+  const returned = [...new Set([...names, ...ctx.inlineHandlers.values(), ...ctx.namedHandlers.values(), ...ctx.keyHandlers.keys()])]
     .map((n) => `    ${n}: ${n},`);
 
   const lines = [
@@ -2774,6 +2836,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
     indent(body.trim(), 2),
     ...inlineFns,
     ...namedFns,
+    ...keyFns,
     ...computedFns,
     ...deferredFns,
     ...ctx.vectorDrawJs,

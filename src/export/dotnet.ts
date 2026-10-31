@@ -26,10 +26,10 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, wpfFill, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, type StringMethodSpell, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
@@ -1749,14 +1749,24 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return box;
     }
 
-    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0, bool readOnly = false)
+    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0, bool readOnly = false, bool multiline = false, int minLines = 1, bool autofocus = false)
     {
         var box = new TextBox { Text = RoseTheme.Str(app.V(stateKey)), MinWidth = 220 };
         if (style != null) Apply(box, style);
         if (!enabled) box.IsEnabled = false;
         if (maxLength > 0) box.MaxLength = maxLength;
+        // R441: autofocus is the browser's focus-on-mount.
+        if (autofocus) box.Loaded += (_, _) => box.Focus();
         // R430: a readonly field keeps its text selectable but refuses edits.
         if (readOnly) box.IsReadOnly = true;
+        // R439: a <textarea> accepts returns and shows at least its rows.
+        if (multiline)
+        {
+            box.AcceptsReturn = true;
+            box.TextWrapping = TextWrapping.Wrap;
+            box.MinLines = Math.Max(1, minLines);
+            box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        }
         box.TextChanged += (_, _) => app.Set(stateKey, box.Text);
         parent.Children.Add(box);
         return box;
@@ -1767,6 +1777,25 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         var line = new Separator();
         parent.Children.Add(line);
         return line;
+    }
+
+    /// R446: the ISO day a date input writes, and the Date a picker opens on.
+    public static string IsoDay(DateTime? day) => day?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
+    public static DateTime? DateOf(string iso) => DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : (DateTime?)null;
+
+    /// R446: a date input is WPF's own DatePicker; the state keeps the ISO day
+    /// the web input writes, not a localized string.
+    public static DatePicker DateField(Panel parent, RoseApp app, string stateKey, RoseStyle? style = null, string min = "", string max = "")
+    {
+        var picker = new DatePicker { SelectedDate = DateOf(Str(app.V(stateKey))), MinWidth = 220 };
+        if (style != null) Apply(picker, style);
+        var lo = DateOf(min);
+        if (lo != null) picker.DisplayDateStart = lo;
+        var hi = DateOf(max);
+        if (hi != null) picker.DisplayDateEnd = hi;
+        picker.SelectedDateChanged += (_, e) => app.Set(stateKey, IsoDay(e.NewValue));
+        parent.Children.Add(picker);
+        return picker;
     }
 
     public static void Spacer(Panel parent, double height)
@@ -3258,7 +3287,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         const attr = given.find((a) => a.name === p.name);
         return attr ? csAttr(attr, ctx) : csLiteral(p.init);
       });
-    for (const [prop, state] of binds) {
+    for (const [, state] of binds) {
       args.push(`${ctx.app}.V("${state}")`);
       args.push(`v => { ${ctx.app}.Set("${state}", v); ${ctx.app}.Render(); }`);
     }
@@ -3475,6 +3504,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
     // R430: a readonly field keeps its text selectable but refuses edits.
     const readOnly = node.attrs.some((a) => a.name === 'readonly');
+    // R439: a <textarea> is multiline; rows is its minimum visible line count.
+    const isArea = tag === 'textarea';
+    const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+    const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
+    const areaArgs = isArea ? `, multiline: true, minLines: ${rows}` : '';
+    const areaInit = isArea ? ', AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinLines = ' + rows : '';
+    // R441: autofocus is the browser's focus-on-mount.
+    const autoFocus = node.attrs.some((a) => a.name === 'autofocus');
+    const autoArg = autoFocus ? ', autofocus: true' : '';
     if (type === 'range') {
       // A range is a Slider - falling through emitted a text box for a number.
       const minAttr = node.attrs.find((a) => a.name === 'min');
@@ -3482,6 +3520,34 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       const num = (a: typeof minAttr, d: string): string => (a && a.value.kind === 'text' ? a.value.text : d);
       const key = stateOf(bindValue) || propName;
       emit(`RoseTheme.Slider(${ctx.parent}, ${ctx.app}, "${key}", ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
+      return;
+    }
+    // R446: a date input is the WPF calendar, not a text box that accepts
+    // "next tuesday"; the state keeps the ISO day the web input writes.
+    if (type === 'date') {
+      const key = bound || propName;
+      if (!key) {
+        ctx.warnings.push('dotnet: <input type="date"> without bind:value is inert');
+        raw('new TextBlock { Text = "[date]" }');
+        return;
+      }
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? JSON.stringify(attr.value.text.trim()) : '""');
+      if (propName) {
+        // A component prop writes through its own callback, not app state.
+        const handler = propChangeHandler(propName);
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`var picker = new DatePicker { SelectedDate = RoseTheme.DateOf(${propName}?.ToString() ?? "") };`, ctx);
+        if (style) emit(`RoseTheme.Apply(picker, ${style});`, ctx);
+        emit(`picker.SelectedDateChanged += (_, e) => ${handler}(RoseTheme.IsoDay(e.NewValue));`, ctx);
+        emit(`${ctx.parent}.Children.Add(picker);`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        return;
+      }
+      emit(`RoseTheme.DateField(${ctx.parent}, ${ctx.app}, "${key}"${style ? `, ${style}` : ', null'}, ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
       return;
     }
     const isPassword = type.trim().toLowerCase() === 'password';
@@ -3495,9 +3561,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
         emit(`box.PasswordChanged += (s, e) => ${handler}(box.Password);`, ctx);
       } else {
-        emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''} };`, ctx);
+        emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''}${areaInit} };`, ctx);
         if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
         emit(`box.TextChanged += (s, e) => ${handler}(box.Text);`, ctx);
+        if (autoFocus) emit('box.Loaded += (_, _) => box.Focus();', ctx);
       }
       emit(`${ctx.parent}.Children.Add(box);`, ctx);
       ctx.depth--;
@@ -3509,7 +3576,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       const key = field ? formFieldKey(ctx.forms, field) : (bound || null);
       const call = isPassword
         ? `RoseTheme.Password(${ctx.parent}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`
-        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''}${readOnly ? ', readOnly: true' : ''})`;
+        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''}${readOnly ? ', readOnly: true' : ''}${areaArgs}${autoArg})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const c = `input${++ctx.counter.c}`;
       emit(`var ${c} = ${call};`, ctx);
@@ -3601,6 +3668,41 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   }
   if (tag === 'hr') { emit(`RoseTheme.Separator(${ctx.parent});`, ctx); return; }
   if (tag === 'br') { emit(`RoseTheme.Spacer(${ctx.parent}, 8);`, ctx); return; }
+  // R450: a <details>/<summary> is WPF's own Expander - the browser collapses it,
+  // and a native build used to show every panel permanently open.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const open = node.attrs.some((a) => a.name === 'open');
+      const exp = `exp${++ctx.counter.c}`;
+      let header = '';
+      if (summary.children.every((c) => c.kind === 'text' || c.kind === 'expr')) {
+        header = csText(summary.children, ctx) || '""';
+      } else {
+        const hdr = `hdr${ctx.counter.c}`;
+        emit(`var ${hdr} = new System.Windows.Controls.StackPanel();`, ctx);
+        const saved = ctx.parent;
+        ctx.parent = hdr;
+        emitNodes(summary.children, ctx);
+        ctx.parent = saved;
+        header = hdr;
+      }
+      emit(`var ${exp} = new Expander { Header = ${header}${open ? ', IsExpanded = true' : ''} };`, ctx);
+      const style = withStyle(own);
+      if (style) emit(`RoseTheme.Apply(${exp}, ${style.slice(2)});`, ctx);
+      emit(`${ctx.parent}.Children.Add(${exp});`, ctx);
+      const inner = `body${ctx.counter.c}`;
+      emit(`var ${inner} = new System.Windows.Controls.StackPanel();`, ctx);
+      emit(`${exp}.Content = ${inner};`, ctx);
+      const savedBody = ctx.parent;
+      ctx.parent = inner;
+      emitNodes(body, ctx);
+      ctx.parent = savedBody;
+      return;
+    }
+    ctx.warnings.push('dotnet: <details> without <summary> renders permanently open (WPF needs a header)');
+  }
   // Every remaining element is a container: the panel paints its own surface
   // (fill, radius, border, shadow) and lays its children out with the CSS flex
   // rules. A class no longer turns a bare StackPanel into a "card" - the design

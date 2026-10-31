@@ -23,11 +23,11 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type Color, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
+import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type Color, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, qtFill, type SvgOp, type SvgShape } from './svg-path.js';
 import { literalOptions, nativeUsage, rewriteNativeCalls, type NativeCapability } from './native-api.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, type StringMethodSpell, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads, effectBodies, effectDropWarning } from './state-ops.js';
+import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue } from './state-ops.js';
 
@@ -571,6 +571,7 @@ ${video || audio ? `#include <QMediaPlayer>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QSlider>
+#include <QDateEdit>
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -580,6 +581,7 @@ ${video || audio ? `#include <QMediaPlayer>
 #include <QStandardPaths>
 #include <QSysInfo>
 #include <QString>
+#include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVariant>
@@ -898,8 +900,10 @@ QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::str
 QLabel* rose_rich_label(QWidget* parent, const std::vector<RoseRun>& runs, const RoseStyle& style = RoseStyle{});
 QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{}, bool enabled = true);
 QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{});
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false, bool readOnly = false);
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false, bool readOnly = false, bool autofocus = false);
+QTextEdit* rose_textarea(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int rows = 4);
 QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int min, int max);
+QDateEdit* rose_date(QWidget* parent, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, const std::string& min = "", const std::string& max = "");
 QWidget* rose_spacer(QWidget* parent, int height);
 QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& style = RoseStyle{});
 QLabel* rose_remote_image(QWidget* parent, const std::string& url, const RoseStyle& style = RoseStyle{});
@@ -2195,7 +2199,39 @@ QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int 
     return slider;
 }
 
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int maxLength, bool password, bool readOnly) {
+/// R446: a date input is Qt's own calendar popup; the state keeps the ISO day
+/// the web input writes, never a localized string.
+QDateEdit* rose_date(QWidget* parent, RoseApp& app, const std::string& key, const RoseStyle& style, const std::string& min, const std::string& max) {
+    auto* edit = new QDateEdit;
+    edit->setCalendarPopup(true);
+    edit->setDisplayFormat("yyyy-MM-dd");
+    QDate day = QDate::fromString(QString::fromStdString(rose_str(app.v(key))), "yyyy-MM-dd");
+    if (!day.isValid()) day = QDate::currentDate();
+    edit->setDate(day);
+    const QDate lo = QDate::fromString(QString::fromStdString(min), "yyyy-MM-dd");
+    if (lo.isValid()) edit->setMinimumDate(lo);
+    const QDate hi = QDate::fromString(QString::fromStdString(max), "yyyy-MM-dd");
+    if (hi.isValid()) edit->setMaximumDate(hi);
+    if (style.fontSize != 14 || style.bold || style.italic || !style.color.empty() || style.padding != 0) {
+        std::string sheet;
+        if (!style.color.empty()) sheet += "color: " + rose_css_color(style.color) + ";";
+        sheet += "padding: " + std::to_string(style.inset_top()) + "px " + std::to_string(style.inset_right()) + "px "
+            + std::to_string(style.inset_bottom()) + "px " + std::to_string(style.inset_left()) + "px;";
+        edit->setStyleSheet(QString::fromStdString(sheet));
+        QFont font = edit->font();
+        font.setPixelSize(style.fontSize);
+        font.setBold(style.bold);
+        font.setItalic(style.italic);
+        edit->setFont(font);
+    }
+    QObject::connect(edit, &QDateEdit::dateChanged, edit, [&app, key](const QDate& d) {
+        app.set(key, d.toString("yyyy-MM-dd").toStdString());
+    });
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(edit);
+    return edit;
+}
+
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int maxLength, bool password, bool readOnly, bool autofocus) {
     auto* input = new QLineEdit;
     input->setPlaceholderText(QString::fromStdString(placeholder));
     // A stylesheet the cascade resolved paints the field; a bare one keeps the
@@ -2229,7 +2265,22 @@ QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& 
     if (password) input->setEchoMode(QLineEdit::Password);
     // R430: a readonly field keeps its text selectable but refuses edits.
     if (readOnly) input->setReadOnly(true);
+    // R441: autofocus is the browser's focus-on-mount; defer until shown.
+    if (autofocus) QTimer::singleShot(0, input, [input]() { input->setFocus(); });
     return input;
+}
+
+/// R439: a <textarea> is a QTextEdit - multiline by nature, rows is its minimum
+/// visible height. The same state key carries every edit back to the app.
+QTextEdit* rose_textarea(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int rows) {
+    auto* edit = new QTextEdit;
+    edit->setPlaceholderText(QString::fromStdString(placeholder));
+    edit->setMinimumHeight((rows > 0 ? rows : 4) * 22);
+    if (!style.color.empty()) edit->setStyleSheet("color: " + rose_css_color(style.color) + ";");
+    QObject::connect(edit, &QTextEdit::textChanged, edit, [&app, key, edit]() { app.set(key, edit->toPlainText().toStdString()); });
+    if (!enabled) edit->setEnabled(false);
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(edit);
+    return edit;
 }
 
 bool rose_contains(const RoseValue& list, const std::string& value) {
@@ -3085,7 +3136,6 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       styleExpr = `rose_apply_prop(${styleExpr}, "${s.prop}", rose_str(${cppExpr(s.code, ctx)}))`;
     }
   }
-  const className = styleBinding.staticClasses[0] ?? '';
   // R251: one of the element's classes carrying a `:hover` half names the entry
   // the RoseHoverFilter applies while the pointer is inside the widget.
   const hoverKey = styleBinding.staticClasses.map((c) => `__hover_${c}__${ctx.scope}`).find((k) => ctx.styles.has(k));
@@ -3106,7 +3156,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
         const attr = given.find((a) => a.name === p.name);
         return `RoseValue(${attr ? cppExpr(attr.value.kind === 'expr' ? attr.value.code : JSON.stringify(attr.value.kind === 'text' ? attr.value.text : ''), ctx) : cppLiteral(p.init)})`;
       });
-    for (const [prop, state] of binds) {
+    for (const [, state] of binds) {
       args.push(`${ctx.app}.v("${state}")`);
       args.push(`[&app = ${ctx.app}](const RoseValue& v) { app.set("${state}", v); app.render(); }`);
     }
@@ -3245,6 +3295,18 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       return;
     }
     const bound = bindValue && bindValue.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(bindValue.value.code.trim()) ? bindValue.value.code.trim() : '';
+    if (tag === 'textarea') {
+      // R439: a textarea is a QTextEdit, not a single-line field.
+      const nameAttr = node.attrs.find((a) => a.name === 'name');
+      const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
+      const key = field ? formFieldKey(ctx.forms, field) : bound;
+      const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+      const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
+      const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+      const enableExpr = disabledAttr ? `!(${disabledAttr.value.kind === 'expr' ? cppExpr(disabledAttr.value.code, ctx) : 'true'})` : 'true';
+      emit(`rose_textarea(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${hasStyle ? `, ${styleExpr}` : ''}, ${enableExpr}, ${rows});`, ctx);
+      return;
+    }
     if (type === 'range') {
       // A range is a QSlider - falling through emitted a line edit for a number.
       const minAttr = node.attrs.find((a) => a.name === 'min');
@@ -3255,6 +3317,38 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
     }
     const propName = ctx.componentProps.has(bound) ? bound
       : (valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '');
+    // R446: a date input is Qt's calendar popup, and the state keeps the ISO day
+    // the web input writes.
+    if (type === 'date') {
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? JSON.stringify(attr.value.text.trim()) : '""');
+      if (propName) {
+        const handler = propChangeHandler(propName);
+        emit('{', ctx);
+        ctx.depth++;
+        emit('auto* date = new QDateEdit;', ctx);
+        emit('date->setCalendarPopup(true);', ctx);
+        emit('date->setDisplayFormat("yyyy-MM-dd");', ctx);
+        emit(`const QDate day = QDate::fromString(QString::fromStdString(rose_str(${propName})), "yyyy-MM-dd");`, ctx);
+        emit('date->setDate(day.isValid() ? day : QDate::currentDate());', ctx);
+        emit(`QObject::connect(date, &QDateEdit::dateChanged, [${handler}](const QDate& d) { ${handler}(RoseValue(d.toString("yyyy-MM-dd").toStdString())); });`, ctx);
+        emit(`${ctx.parent}->layout()->addWidget(date);`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        return;
+      }
+      const nameAttr = node.attrs.find((a) => a.name === 'name');
+      const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
+      const key = field ? formFieldKey(ctx.forms, field) : bound;
+      if (!key) {
+        ctx.warnings.push('cpp: <input type="date"> without bind:value is inert');
+        emit(`rose_label(${ctx.parent}, "[date]", "");`, ctx);
+        return;
+      }
+      emit(`rose_date(${ctx.parent}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
+      return;
+    }
     if (propName) {
       const handler = propChangeHandler(propName);
       emit(`{`, ctx);
@@ -3287,6 +3381,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       // R430: a readonly field keeps its text selectable but refuses edits.
       const readOnly = node.attrs.some((a) => a.name === 'readonly');
       const roArg = readOnly ? `${maxArg || ', 0'}${pwArg || ', false'}, true` : '';
+      // R441: autofocus is the browser's focus-on-mount.
+      const autoFocus = node.attrs.some((a) => a.name === 'autofocus');
+      const autoArg = autoFocus ? `${roArg || ', 0, false, false'}, true` : '';
       // R256/R266: rose_input RETURNS the widget, so the focus and active
       // halves wrap the call - one emit each, the Swing wrap trick.
       const wrap = (expr: string): string => {
@@ -3294,8 +3391,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
         if (activeKey) expr = `rose_active(${expr}, ${isEmptyModel(model) ? 'RoseStyle{}' : cppStyleLiteral(model)}, rose_style_of("${activeKey}") ? *rose_style_of("${activeKey}") : RoseStyle{})`;
         return expr;
       };
-      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg})`)};`, ctx);
-      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg})`)};`, ctx);
+      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg}${autoArg})`)};`, ctx);
+      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg}${autoArg})`)};`, ctx);
     }
     return;
   }

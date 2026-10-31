@@ -31,7 +31,7 @@ import { extractAppLifecycle } from './miniprogram.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
+import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
@@ -40,12 +40,10 @@ import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from 
 import { parseSvg, type SvgShape } from './svg-path.js';
 import {
   parseStylesheet,
-  parseInlineStyle,
   cascadeFor,
   mergeModels,
   elementStyleBinding,
   uaBaselineRows,
-  flexDirectionOf,
   isFlexModel,
   sanitizeFor,
   type StyleModel,
@@ -916,7 +914,7 @@ Text roseText(String text, RoseStyle? s, {TextStyle? base, bool nowrap = false, 
 /// cascade an input inherits on the web. The decoration carries the background,
 /// border and radius; the style carries the typed text colour and font.
 Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChanged,
-    {int? lines, TextEditingController? controller, String keyboard = 'text', bool obscure = false, bool enabled = true, bool readOnly = false, int? maxLength}) {
+    {int? lines, TextEditingController? controller, String keyboard = 'text', bool obscure = false, bool enabled = true, bool readOnly = false, bool autofocus = false, int? maxLength}) {
   final deco = s?.decoration;
   final cons = s?.constraints;
   final pad = s?.padding;
@@ -931,6 +929,7 @@ Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChange
       maxLines: lines ?? 1,
       enabled: enabled,
       readOnly: readOnly,
+      autofocus: autofocus,
       maxLength: maxLength,
       onChanged: onChanged,
       // The element's type= carries through: a password field masks, and a
@@ -968,6 +967,38 @@ Widget roseSlider(RoseStyle? s, double value, double min, double max,
     onChanged: onChanged == null ? null : (next) => onChanged(next.clamp(min, max)),
   );
 }
+
+/// R444: a date input opens the platform calendar and hands back the same ISO
+/// yyyy-MM-dd day the web input writes. An empty day shows a hint instead of a
+/// date nobody chose.
+Widget roseDateField(RoseStyle? s, String value, void Function(String)? onChanged,
+    {DateTime? first, DateTime? last}) {
+  final lo = first ?? DateTime(1900);
+  final hi = last ?? DateTime(2100);
+  var current = DateTime.tryParse(value) ?? DateTime.now();
+  if (current.isBefore(lo)) current = lo;
+  if (current.isAfter(hi)) current = hi;
+  final label = value.isEmpty ? 'Select date' : value;
+  if (onChanged == null) return roseText(label, s);
+  return Builder(builder: (context) {
+    return GestureDetector(
+      onTap: () async {
+        final picked = await showDatePicker(
+          context: context,
+          initialDate: current,
+          firstDate: lo,
+          lastDate: hi,
+        );
+        if (picked != null) onChanged(roseIsoDay(picked));
+      },
+      child: roseText(label, s),
+    );
+  });
+}
+
+/// The ISO day a date input carries, zero padded the way \`yyyy-MM-dd\` is.
+String roseIsoDay(DateTime d) =>
+    '\${d.year.toString().padLeft(4, '0')}-\${d.month.toString().padLeft(2, '0')}-\${d.day.toString().padLeft(2, '0')}';
 
 /// A flex container driven by the style: direction, main/cross alignment, gap
 /// and wrap. Used only when the element actually asked for a layout.
@@ -2679,6 +2710,18 @@ function emitElementStyled(
     const all = [props, ...bindArgs, ...slotArgs].filter(Boolean).join(', ');
     return `${comp.className}(${all})`;
   }
+  // R450: <details>/<summary> is Flutter's ExpansionTile - collapsed until the
+  // reader taps the header, exactly like the browser; `open` starts it expanded.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const open = node.attrs.some((a) => a.name === 'open');
+      const tile = `ExpansionTile(title: ${emitChildren(summary.children, ctx)}, initiallyExpanded: ${open ? 'true' : 'false'}, children: [${emitChildren(body, ctx)}])`;
+      return styleExpr ? `roseBox(${styleExpr}, ${tile})` : tile;
+    }
+    ctx.warnings.push('flutter: <details> without <summary> renders permanently open (ExpansionTile needs a title)');
+  }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
@@ -2809,7 +2852,10 @@ function emitElementStyled(
     // field is the control a browser styles most, and until now it came out
     // bare - the "native widget bolted together" look. The box half becomes the
     // decoration, the text half becomes the typed text style.
-    const lines = tag === 'textarea' ? 4 : 1;
+    // R440: rows is the textarea's minimum visible line count.
+    const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+    const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? Number(rowsAttr.value.text.trim()) : 4;
+    const lines = tag === 'textarea' ? rows : 1;
     // R229: a range is a Slider. Falling through emitted a text field bound to
     // the number, so the value could only be typed.
     if (type === 'range') {
@@ -2825,6 +2871,21 @@ function emitElementStyled(
       const current = state ? state : num(valueAttr, min);
       return `roseSlider(${styleExpr ?? 'null'}, ${current}, ${min}, ${max}, ${set})`;
     }
+    // R444: a date input is the platform calendar, not a text field that
+    // silently accepts "next tuesday".
+    if (type === 'date') {
+      const bound = bindValue && bindValue.value.kind === 'expr' ? bindValue.value.code.trim() : '';
+      if (!bound) {
+        ctx.warnings.push('flutter: <input type="date"> without bind:value is inert');
+        return 'const SizedBox.shrink()';
+      }
+      const set = propWrite(bound) ?? `(value) => __set('${bound}', value)`;
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const day = (a: typeof minAttr): string => (a && a.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(a.value.text.trim()) ? `DateTime.parse('${a.value.text.trim()}')` : 'null');
+      const bounds = `first: ${day(minAttr)}, last: ${day(maxAttr)}`;
+      return `roseDateField(${styleExpr ?? 'null'}, ${bound}, ${set}, ${bounds})`;
+    }
     const keyboard = type === 'number' || type === 'tel' || type === 'email' ? type : 'text';
     const disabledInput = node.attrs.find((a) => a.name === 'disabled');
     const inputEnabled = disabledInput
@@ -2834,7 +2895,9 @@ function emitElementStyled(
     const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
     // R429: a readonly field keeps its value and selectable text, no caret edits.
     const readOnly = node.attrs.some((a) => a.name === 'readonly');
-    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines}, keyboard: '${keyboard}', obscure: ${type === 'password'}, enabled: ${inputEnabled}, readOnly: ${readOnly}${maxLen ? `, maxLength: ${maxLen}` : ''})`;
+    // R441: autofocus is the browser's focus-on-mount.
+    const autoFocus = node.attrs.some((a) => a.name === 'autofocus');
+    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines}, keyboard: '${keyboard}', obscure: ${type === 'password'}, enabled: ${inputEnabled}, readOnly: ${readOnly}, autofocus: ${autoFocus}${maxLen ? `, maxLength: ${maxLen}` : ''})`;
     // R257: the input IS the widget :focus was written for, and this branch
     // returns before the generic tail - so the Focus gate wraps it here (the
     // button-branch lesson, applied where the caret actually lands).

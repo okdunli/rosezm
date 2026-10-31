@@ -357,7 +357,6 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
         // DevTools fails the whole app.json validation when it sees it. Route
         // it to the config file instead of letting it poison the manifest.
         const projectName = overrides.projectname ?? overrides.projectName;
-        const cloudEnv = overrides.cloudEnv;
         // cloudEnv/appid are OUR config keys, not app.json fields - WeChat's
         // validator rejects unknown top-level keys ("无效的 app.json
         // ["cloudEnv"]"). They steer app.js's wx.cloud.init and

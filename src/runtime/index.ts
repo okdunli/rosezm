@@ -2394,7 +2394,6 @@ export function __stopNetwork(): void {
 // Minimal but complete enough for dashboards and device feeds: handshake,
 // text/binary frames, continuation reassembly, ping/pong, close handshake.
 // No extensions, no permessage-deflate - deliberately.
-const __WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /** Parse as many complete frames as the buffer holds; return the tail (partial frame) for the next chunk. */
 function __wsParseFrames(buf: Buffer): { frames: { fin: boolean; opcode: number; payload: Buffer }[]; rest: Buffer } {

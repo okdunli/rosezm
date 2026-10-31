@@ -113,11 +113,6 @@ function routeOf(file: string, root: string): string {
   return '/' + segs.join('/');
 }
 
-/** A concrete URL for a pattern: `:id` -> 1, `:lang` -> the app's default locale. */
-function concreteRoute(pattern: string, defaultLocale: string | null): string {
-  return pattern.split('/').map((s) => (s.startsWith(':') ? (s === ':lang' ? defaultLocale ?? 'en' : '1') : s)).join('/');
-}
-
 /** Copy a directory tree, skipping nothing (a test fixture is small). */
 function copyTree(from: string, to: string): void {
   fs.mkdirSync(to, { recursive: true });
@@ -135,8 +130,6 @@ function propAttrs(props: Record<string, unknown>): string {
     .map(([k, v]) => `${k}={${JSON.stringify(v) ?? 'undefined'}}`)
     .join(' ');
 }
-
-let tmpCount = 0;
 
 /**
  * Compile `file` into a throwaway project and return a driver over the

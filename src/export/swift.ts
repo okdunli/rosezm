@@ -31,8 +31,8 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
-import { parseSvg, opsToPathData, swiftFill, type SvgOp, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, deferBlocks, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { parseSvg, swiftFill, type SvgShape } from './svg-path.js';
+import { rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -48,6 +48,7 @@ import {
   type StyleSubject,
 } from './style-engine.js';
 import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
+import { appIcon } from './app-icon.js';
 
 export interface EmitSwiftOptions {
   projectRoot: string;
@@ -292,6 +293,19 @@ async function copyAssets(root: string, resources: string, trees: IrNode[][], wa
     await fs.promises.mkdir(path.join(resources, 'Assets.xcassets'), { recursive: true });
     await fs.promises.writeFile(path.join(resources, 'Assets.xcassets', 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 } }, null, 2) + '\n', 'utf8');
   }
+  // R448: the build settings name AppIcon, so an app iconset has to exist -
+  // Xcode fails the build when the catalog carries none. public/icon.png is the
+  // convention every other target already follows; a missing one draws the
+  // placeholder and says so.
+  const catalog = path.join(resources, 'Assets.xcassets');
+  const appiconset = path.join(catalog, 'AppIcon.appiconset');
+  await fs.promises.mkdir(appiconset, { recursive: true });
+  await fs.promises.writeFile(path.join(appiconset, 'icon-1024.png'), appIcon(root, 'xcode', warnings));
+  await fs.promises.writeFile(path.join(appiconset, 'Contents.json'), JSON.stringify({
+    images: [{ filename: 'icon-1024.png', idiom: 'universal', platform: 'ios', size: '1024x1024' }],
+    info: { author: 'xcode', version: 1 },
+  }, null, 2) + '\n', 'utf8');
+  await fs.promises.writeFile(path.join(catalog, 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 } }, null, 2) + '\n', 'utf8');
   return { assets: used, vectors };
 }
 
@@ -1325,6 +1339,26 @@ func roseText(_ value: Any?) -> String {
     return String(describing: value!)
 }
 
+/// R444: the date input's wire format - the same ISO day the web input writes.
+private let roseIsoFormat: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+}()
+func roseDate(_ iso: String) -> Date {
+    roseIsoFormat.date(from: String(iso.prefix(10))) ?? Date()
+}
+func roseIso(_ date: Date) -> String {
+    roseIsoFormat.string(from: date)
+}
+func roseDateBounds(_ min: String, _ max: String) -> ClosedRange<Date> {
+    let lo = roseIsoFormat.date(from: min) ?? .distantPast
+    let hi = roseIsoFormat.date(from: max) ?? .distantFuture
+    return lo <= hi ? lo...hi : (.distantPast ... .distantFuture)
+}
+
 /// JS Math.round/floor/ceil answer a number; these answer Int, the type most
 /// native pages declare, and accept any numeric value.
 func roseRound(_ value: Any?) -> Int {
@@ -1863,6 +1897,10 @@ interface SwiftCtx {
   /** R259: same exposure for the `__focus_<class>__<scope>` keys - an element
    *  whose class is in here gets a .focused binding on a @FocusState flag. */
   focusKeys?: Set<string>;
+  /** R443: the @FocusState flags autofocus fields add, emitted with the page. */
+  autoFocusDecls?: string[];
+  /** R451: the @State flags a <details> opens with, one per fold-out panel. */
+  detailsDecls?: string[];
   /** R269: same exposure for the `__active_<class>__<scope>` keys - an element
    *  whose class is in here gets a pressing gesture on an @State flag. */
   activeKeys?: Set<string>;
@@ -1951,6 +1989,8 @@ function renderPage(
     components,
     lines: [],
     depth: 4,
+    autoFocusDecls: [],
+    detailsDecls: [],
     // CF: the theme sheet joins the page's cascade FIRST - same specificity,
     // later order wins, which is the order a browser uses too.
     sheet: parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
@@ -2016,6 +2056,10 @@ function renderPage(
     const v = focusVarName(key);
     return `    @FocusState private var ${v}: Bool`;
   }).join('\n');
+  // R443: one @FocusState flag per autofocus field; .onAppear flips it.
+  const autoFocusDecls = (ctx.autoFocusDecls ?? []).map((v) => `    @FocusState private var ${v}: Bool`).join('\n');
+  // R451: one @State flag per <details>, seeded by its `open` attribute.
+  const detailsDecls = (ctx.detailsDecls ?? []).map((d) => `    ${d}`).join('\n');
   // R269: one @State flag per synthetic active class - the element's
   // .onLongPressGesture(minimumDuration: .infinity, pressing:) flips it; the
   // pressing callback is SwiftUI's own pressed-state signal on any view.
@@ -2102,6 +2146,8 @@ ${paramsDecl}${bindFields}
 ${stateFields}
 ${hoverDecls}
 ${focusDecls}
+${autoFocusDecls}
+${detailsDecls}
 ${activeDecls}
 
     var body: some View {
@@ -2767,6 +2813,28 @@ function emitElementStyled(
     emitTextRun(`Text(${text || '""'})${[...textMods, ...boxMods].join('')}`, inlineConsts(node.children), ctx);
     return;
   }
+  // R451: <details>/<summary> is SwiftUI's DisclosureGroup - collapsed until
+  // tapped, with the summary as the label; `open` starts it expanded.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const open = node.attrs.some((a) => a.name === 'open');
+      const flag = `__open${ctx.detailsDecls?.length ?? 0}`;
+      ctx.detailsDecls?.push(`@State private var ${flag} = ${open ? 'true' : 'false'}`);
+      emit(`DisclosureGroup(isExpanded: $${flag}) {`, ctx);
+      ctx.depth++;
+      emitNodes(body, ctx);
+      ctx.depth--;
+      emit('} label: {', ctx);
+      ctx.depth++;
+      emitNodes(summary.children, ctx);
+      ctx.depth--;
+      emit(`}${boxMods.join('')}`, ctx);
+      return;
+    }
+    ctx.warnings.push('xcode: <details> without <summary> renders permanently open (DisclosureGroup needs a label)');
+  }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
@@ -2880,15 +2948,62 @@ function emitElementStyled(
     const disabledMod = disabledInput
       ? `.disabled(${disabledInput.value.kind === 'expr' ? swiftExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'})`
       : '';
+    // R443: autofocus is a @FocusState flag flipped on appear.
+    let autoMod = '';
+    if (ctx.autoFocusDecls && node.attrs.some((a) => a.name === 'autofocus')) {
+      const flag = `__autoFocus${ctx.autoFocusDecls.length}`;
+      ctx.autoFocusDecls.push(flag);
+      autoMod = `.focused($${flag}).onAppear { ${flag} = true }`;
+    }
+    // R444: a date input is the platform's own picker, not free text. The
+    // state keeps the ISO yyyy-MM-dd string the web input writes; an empty
+    // state adopts today on appear so what the chip shows is what a form sends.
+    if (type === 'date') {
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' ? JSON.stringify(attr.value.text.trim()) : '""');
+      const bounds = minAttr || maxAttr ? `, in: roseDateBounds(${literal(minAttr)}, ${literal(maxAttr)})` : '';
+      const stateName = propName ? `${propName} as? String ?? ""` : boundName;
+      if (!stateName) {
+        ctx.warnings.push('xcode: <input type="date"> without bind:value is inert');
+        emit('Text("[date]")', ctx);
+        return;
+      }
+      const seed = propName ? '""' : boundName;
+      emit(`DatePicker("", selection: Binding(get: { roseDate(${stateName}) }, set: { ${propName ? `v in ${propChangeHandler(propName)}(roseIso(v))` : `${boundName} = roseIso($0)`} })${bounds}, displayedComponents: .date).labelsHidden()${fieldMods}${disabledMod}${propName ? '' : `.onAppear { if ${seed}.isEmpty { ${seed} = roseIso(Date()) } }`}`, ctx);
+      return;
+    }
     // maxlength truncates in the binding's setter - SwiftUI has no limit
     // parameter. Only a literal count is supported.
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
     const clamp = (expr: string): string => (maxLen ? `String(${expr}.prefix(${maxLen}))` : expr);
+    // R439: a <textarea> is a TextEditor - multiline by nature; rows sets its
+    // minimum height. SwiftUI's TextEditor has no placeholder, so hint is unused.
+    if (tag === 'textarea') {
+      const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+      const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
+      const frame = `.frame(minHeight: ${Number(rows) * 24})${fieldMods}${disabledMod}`;
+      if (propName) {
+        emit(`TextEditor(text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${frame}`, ctx);
+        return;
+      }
+      if (boundName) {
+        emit(`TextEditor(text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${frame}`, ctx);
+        return;
+      }
+      const nameAttr = node.attrs.find((a) => a.name === 'name');
+      const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
+      const formKey = field ? formFieldKey(ctx.forms, field) : null;
+      emit(formKey
+        ? `TextEditor(text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${frame}`
+        : `TextEditor(text: .constant(""))${frame}`, ctx);
+      return;
+    }
     if (propName) {
-      emit(`${fieldKind}(${hint}, text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}`, ctx);
+      emit(`${fieldKind}(${hint}, text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else if (boundName) {
-      emit(`${fieldKind}(${hint}, text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}`, ctx);
+      emit(`${fieldKind}(${hint}, text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else {
       // A named input inside a submitting form binds to its name, like the
       // desktop channel: the handler reads the same state key.
@@ -2896,14 +3011,14 @@ function emitElementStyled(
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const formKey = field ? formFieldKey(ctx.forms, field) : null;
       if (formKey) {
-        emit(`${fieldKind}(${hint}, text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}`, ctx);
+        emit(`${fieldKind}(${hint}, text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
         return;
       }
       const valueProp = valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '';
       if (valueProp) {
-        emit(`${fieldKind}(${hint}, text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}`, ctx);
+        emit(`${fieldKind}(${hint}, text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
       } else {
-        emit(`${fieldKind}(${hint}, text: .constant(""))${keyMod}${fieldMods}${disabledMod}`, ctx);
+        emit(`${fieldKind}(${hint}, text: .constant(""))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
       }
     }
     return;

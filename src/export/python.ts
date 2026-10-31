@@ -34,9 +34,9 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
-import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, propChangeHandler, callSiteBinds, type Node as IrNode } from './ir.js';
+import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode } from './ir.js';
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
+import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
@@ -581,7 +581,7 @@ ${contentBlock}
 def roseThrow(message):
     """The await reject branch: it always raises, so the catch arm renders."""
     raise Exception(str(message))
-def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False, readonly=False):
+def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False, readonly=False, autofocus=False):
     """A text field with the app's base font - a bare tk.Entry renders in the
     system default at a size that fights every styled label beside it."""
     from styles import STYLES
@@ -603,7 +603,54 @@ def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password
         # Tk has no maxlength: a key validator refuses input past the limit.
         vcmd = (parent.register(lambda proposed: len(proposed) <= maxlength), '%P')
         widget.configure(validate='key', validatecommand=vcmd)
+    # R441: autofocus is the browser's focus-on-mount; defer until mapped.
+    if autofocus:
+        widget.after(0, widget.focus_set)
     return widget
+
+def rose_date(parent, key, state, render, iso_min='', iso_max=''):
+    """R447: a date input as three spin boxes (year, month, day) - Tk has no
+    calendar sheet in the box, but the value is the same ISO day the web input
+    writes, so nothing downstream sees a different format."""
+    import datetime as _dt
+    def _parse(text):
+        try:
+            return _dt.date.fromisoformat(str(text or '').strip())
+        except ValueError:
+            return None
+    current = _parse(state.get(key, '')) or _dt.date.today()
+    lo = _parse(iso_min)
+    hi = _parse(iso_max)
+    if lo and current < lo:
+        current = lo
+    if hi and current > hi:
+        current = hi
+    box = tk.Frame(parent)
+    year = tk.Spinbox(box, from_=(lo.year if lo else 1900), to=(hi.year if hi else 2100), width=5)
+    month = tk.Spinbox(box, from_=1, to=12, width=3, format='%02.0f')
+    day = tk.Spinbox(box, from_=1, to=31, width=3, format='%02.0f')
+    for widget, value in ((year, current.year), (month, current.month), (day, current.day)):
+        widget.delete(0, 'end')
+        widget.insert(0, str(value))
+
+    def sync(*_args):
+        try:
+            picked = _dt.date(int(year.get()), int(month.get()), int(day.get()))
+        except (TypeError, ValueError):
+            return
+        if lo and picked < lo:
+            picked = lo
+        if hi and picked > hi:
+            picked = hi
+        state[key] = picked.isoformat()
+        render()
+
+    for widget in (year, month, day):
+        widget.configure(command=sync)
+        widget.bind('<Return>', sync)
+        widget.bind('<FocusOut>', sync)
+        widget.pack(side='left')
+    return box
 
 def rose_button(parent, text, command, cls='', style=None, disabled=False):
     """A button that looks like an app button: the browser default carries
@@ -1372,6 +1419,7 @@ function renderPage(
     parent: 'parent',
     awaits: [],
     deferred: [],
+    opens: [],
     scriptConsts: scriptConstsFor(page.script, stateNames),
     propWriteTargets: new Map(),
     inline: new Map(),
@@ -1452,6 +1500,7 @@ ${state}
 }
 
 PERSIST = ${JSON.stringify(persist)}
+${ctx.opens.length ? '\n# R453: a fold keeps its state across re-renders - build() runs again on every render.\n__OPENED = {}' : ''}
 
 ${ctx.awaits.map((a) => `${a.started} = False
 ${a.done} = False
@@ -1508,6 +1557,8 @@ interface PyCtx {
   awaits: Array<{ started: string; done: string; value: string; err: string; expr: string }>;
   /** {#defer} flags: each starts false and its hold flips it true. */
   deferred: Array<{ name: string; hold: number }>;
+  /** R453: the `<details>` fold ids this page declared, for the __OPENED map. */
+  opens: string[];
   /** Script-level consts the {#await} heads may reference. */
   scriptConsts: Map<string, string>;
   /** A component call site's two-way props: prop name -> the parent state name. */
@@ -2203,6 +2254,30 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     emit(`${widget}.bind('<ButtonRelease-1>', lambda e: rose_apply(${widget}, ${baseDict || '{}'}))`, ctx);
   };
 
+  // R453: <details>/<summary> as a header button + a body frame that packs only
+  // while open; __OPENED lives at module scope so a re-render keeps the fold.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const id = `det${ctx.seq.n++}`;
+      const open = node.attrs.some((a) => a.name === 'open') ? 'True' : 'False';
+      ctx.opens.push(id);
+      emit(`__${id} = tk.Frame(${ctx.parent})`, ctx);
+      emit(`__toggle_${id} = lambda: (__OPENED.__setitem__('${id}', not __OPENED.get('${id}', ${open})), ${ctx.app}.render())`, ctx);
+      emit(`rose_button(__${id}, ${textOf(summary.children, ctx) || "''"}, __toggle_${id}).pack(fill='x', anchor='w')`, ctx);
+      emit(`__${id}_body = tk.Frame(__${id})`, ctx);
+      const saved = ctx.parent;
+      ctx.parent = `__${id}_body`;
+      emitNodes(body, ctx);
+      ctx.parent = saved;
+      emit(`if __OPENED.get('${id}', ${open}):`, ctx);
+      emit(`    __${id}_body.pack(fill='x', anchor='w')`, ctx);
+      emit(`__${id}.pack(${packArgs(ctx, { model, last })})`, ctx);
+      return;
+    }
+    ctx.warnings.push('python: <details> without <summary> renders permanently open (the fold needs a header)');
+  }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
     const max = node.attrs.find((a) => a.name === 'max');
@@ -2357,15 +2432,18 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     }
     if (tag === 'textarea') {
       const tdecls = filterDecls(tkDecls(model, rawFamily), 'Text');
+      // R440: rows is the textarea's visible line count.
+      const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+      const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
       const focusDictWanted = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Text', rawFamily);
       if (focusDictWanted) {
         // R253: the widget is named so the focus pair can attach to it.
         const name = `__w${ctx.seq.n++}`;
-        emit(`${name} = tk.Text(${ctx.parent}, height=4${tdecls.length ? ', ' + declsKw(tdecls) : ''})`, ctx);
+        emit(`${name} = tk.Text(${ctx.parent}, height=${rows}${tdecls.length ? ', ' + declsKw(tdecls) : ''})`, ctx);
         focusPair(name, 'Text');
         emit(`${name}.pack(${packArgs(ctx, { model, last })})`, ctx);
       } else {
-        place(`tk.Text(${ctx.parent}, height=4${tdecls.length ? ', ' + declsKw(tdecls) : ''})`);
+        place(`tk.Text(${ctx.parent}, height=${rows}${tdecls.length ? ', ' + declsKw(tdecls) : ''})`);
       }
       return;
     }
@@ -2380,6 +2458,22 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       const sdecls = filterDecls(tkDecls(model, rawFamily), 'Scale');
       if (sdecls.length) opts.push(declsKw(sdecls));
       place(`tk.Scale(${ctx.parent}, ${opts.join(', ')}${target ? `, command=lambda v: (${ctx.st}.__setitem__('${target}', v), ${ctx.app}.render())` : ''})`);
+      return;
+    }
+    // R447: a date input is a year/month/day spinner - Tk has no calendar sheet
+    // in the box, but the value is the same ISO day the web input writes.
+    if (type === 'date') {
+      const name = bind && bind.value.kind === 'expr' && ctx.stateNames.has(bind.value.code.trim()) ? bind.value.code.trim() : '';
+      if (!name) {
+        ctx.warnings.push('python: <input type="date"> without bind:value is inert');
+        place(`tk.Label(${ctx.parent}, text='[date]')`);
+        return;
+      }
+      const target = ctx.propWriteTargets.get(name) ?? name;
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? attr.value.text.trim() : '');
+      place(`rose_date(${ctx.parent}, '${target}', ${ctx.st}, ${ctx.app}.render, '${literal(minAttr)}', '${literal(maxAttr)}')`);
       return;
     }
     if (!bind && valueAttr && valueAttr.value.kind === 'expr' && [...ctx.propWriteTargets.values()].includes(valueAttr.value.code.trim())) {
@@ -2419,13 +2513,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const entryPwArg = entryType && entryType.value.kind === 'text' && entryType.value.text.trim().toLowerCase() === 'password' ? ', password=True' : '';
     // R430: a readonly entry keeps its text selectable but refuses edits.
     const entryRoArg = node.attrs.some((a) => a.name === 'readonly') ? ', readonly=True' : '';
+    // R441: autofocus is the browser's focus-on-mount.
+    const entryAutoArg = node.attrs.some((a) => a.name === 'autofocus') ? ', autofocus=True' : '';
     if (fallbackFocus) {
       const w = `__e${ctx.seq.n++}`;
-      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg})`, ctx);
+      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg}${entryAutoArg})`, ctx);
       focusPair(w, 'Entry');
       emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
     } else {
-      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg})`);
+      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg}${entryAutoArg})`);
     }
     return;
   }

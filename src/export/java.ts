@@ -25,10 +25,10 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
+import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods, type StringMethodSpell } from './state-ops.js';
+import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
 import { translateExpr, rewriteToFixedCalls, matchArrow, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
@@ -813,11 +813,54 @@ ${rows || '        // no style rules'}
     public static JPanel box(JPanel parent, String className) {
         return box(parent, style(className));
     }
-
     public static JPanel box(JPanel parent, Style style) {
         JPanel panel = panelOf(parent, style, true);
         if (style != null) applyBox(panel, style);
         return panel;
+    }
+
+    /** R447: the ISO day a date input writes, and the day a spinner opens on. */
+    public static java.time.LocalDate parseDay(String iso) {
+        try { return java.time.LocalDate.parse(iso == null ? "" : iso.trim()); } catch (Exception e) { return null; }
+    }
+    public static String isoDay(java.time.LocalDate day) {
+        return day == null ? "" : day.toString();
+    }
+
+    /** R453: a click on any component runs the action - Swing has no onclick,
+     *  and a fold header is the first widget whose whole surface is the control. */
+    public static void clickOn(JComponent widget, Runnable action) {
+        widget.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
+        widget.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) { action.run(); }
+        });
+    }
+
+    /** R447: a date input is a JSpinner over days - Swing has no calendar widget
+     *  in the box, but the spinner edits the same ISO day the web input writes. */
+    public static JSpinner dateField(JPanel parent, RoseApp app, String key, String min, String max) {
+        return dateField(parent, iso -> app.set(key, iso), RoseTheme.text(app.v(key)), min, max);
+    }
+
+    public static JSpinner dateField(JPanel parent, java.util.function.Consumer<String> onChange, String iso, String min, String max) {
+        java.time.LocalDate current = parseDay(iso);
+        if (current == null) current = java.time.LocalDate.now();
+        java.time.LocalDate lo = parseDay(min);
+        java.time.LocalDate hi = parseDay(max);
+        if (lo != null && current.isBefore(lo)) current = lo;
+        if (hi != null && current.isAfter(hi)) current = hi;
+        SpinnerDateModel model = new SpinnerDateModel(java.sql.Date.valueOf(current),
+            lo == null ? null : java.sql.Date.valueOf(lo),
+            hi == null ? null : java.sql.Date.valueOf(hi), java.util.Calendar.DAY_OF_MONTH);
+        JSpinner spinner = new JSpinner(model);
+        spinner.setEditor(new JSpinner.DateEditor(spinner, "yyyy-MM-dd"));
+        spinner.addChangeListener(e -> {
+            java.time.LocalDate picked = ((java.util.Date) spinner.getValue()).toInstant()
+                .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+            onChange.accept(isoDay(picked));
+        });
+        parent.add(spinner);
+        return spinner;
     }
 
     /** R257: the layout constraints one styled child carries: its margins and
@@ -1591,8 +1634,8 @@ ${rows || '        // no style rules'}
     }
 
     /** R229: a multi-line text area - a <textarea> is not a one-line field. */
-    public static JTextArea textArea(JPanel parent, String placeholder, RoseApp app, String stateKey) {
-        JTextArea area = new JTextArea(4, 20);
+    public static JTextArea textArea(JPanel parent, String placeholder, RoseApp app, String stateKey, int rows) {
+        JTextArea area = new JTextArea(rows < 1 ? 4 : rows, 20);
         area.setLineWrap(true);
         area.setWrapStyleWord(true);
         area.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -2420,7 +2463,6 @@ function renderApp(pages: Array<{ route: string; cls: string; params: string[] }
     if (p.params.length === 0) {
       branches.push(`        if (route.equals("${p.route}")) { ${p.cls}Page.build(this, content); return; }`);
     } else {
-      const prefix = p.route.slice(0, p.route.indexOf(':'));
       const regex = '^' + p.route.replace(/:[^/]+/g, '([^/]+)') + '$';
       const matcherVar = `matcher${p.cls}`;
       const bindings = p.params.map((name, i) => `params.put("${name}", ${matcherVar}.group(${i + 1}));`).join(' ');
@@ -3237,7 +3279,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
         const attr = given.find((a) => a.name === p.name);
         return attr ? javaAttr(attr, ctx) : javaLiteral(p.init);
       });
-    for (const [prop, state] of binds) {
+    for (const [, state] of binds) {
       args.push(`${ctx.app}.v("${state}")`);
       args.push(`v -> { ${ctx.app}.set("${state}", v); ${ctx.app}.render(); }`);
     }
@@ -3278,6 +3320,38 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     }
     emit(`${ctx.parent}.add(RoseTheme.label(${text}${styleArg}));`, ctx);
     return;
+  }
+  // R453: <details>/<summary> as a mouse-clickable header panel plus a body
+  // panel Swing hides and shows - the browser folds, so a native build must.
+  if (tag === 'details') {
+    const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
+    if (summary) {
+      const body = node.children.filter((c) => c !== summary);
+      const n = ++ctx.counter.n;
+      const open = node.attrs.some((a) => a.name === 'open');
+      emit('{', ctx);
+      ctx.depth++;
+      emit(`JPanel fold${n} = new JPanel(new java.awt.BorderLayout());`, ctx);
+      emit(`JPanel foldHead${n} = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0));`, ctx);
+      const savedHead = ctx.parent;
+      ctx.parent = `foldHead${n}`;
+      emitNodes(summary.children, ctx);
+      ctx.parent = savedHead;
+      emit(`JPanel foldBody${n} = new JPanel(new java.awt.BorderLayout());`, ctx);
+      emit(`foldBody${n}.setVisible(${open ? 'true' : 'false'});`, ctx);
+      emit(`RoseTheme.clickOn(foldHead${n}, () -> { foldBody${n}.setVisible(!foldBody${n}.isVisible()); foldBody${n}.revalidate(); });`, ctx);
+      const savedBody = ctx.parent;
+      ctx.parent = `foldBody${n}`;
+      emitNodes(body, ctx);
+      ctx.parent = savedBody;
+      emit(`fold${n}.add(foldHead${n}, java.awt.BorderLayout.NORTH);`, ctx);
+      emit(`fold${n}.add(foldBody${n}, java.awt.BorderLayout.CENTER);`, ctx);
+      emit(`${ctx.parent}.add(fold${n});`, ctx);
+      ctx.depth--;
+      emit('}', ctx);
+      return;
+    }
+    ctx.warnings.push('java: <details> without <summary> renders permanently open (the fold needs a header)');
   }
   if (tag === 'progress') {
     const value = node.attrs.find((a) => a.name === 'value');
@@ -3342,7 +3416,6 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     if (type === 'checkbox') {
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
-      const label = node.attrs.find((a) => a.name === 'placeholder');
       if (group) {
         emit(`RoseTheme.checkBox(${ctx.parent}, "", RoseTheme.list(${ctx.app}.v("${group}")).contains(${optionValue}), on -> {`, ctx);
         ctx.depth++;
@@ -3378,6 +3451,28 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       emit(`RoseTheme.slider(${ctx.parent}, ${ctx.app}, "${key}", ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
       return;
     }
+    // R447: a date input is a day spinner - Swing has no calendar sheet in the
+    // box, but the value is the same ISO day the web input writes.
+    if (type === 'date') {
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const literal = (attr: typeof minAttr): string => (attr && attr.value.kind === 'text' && /^\d{4}-\d{2}-\d{2}$/.test(attr.value.text.trim()) ? JSON.stringify(attr.value.text.trim()) : '""');
+      if (propName) {
+        const handler = propChangeHandler(propName);
+        emit(`RoseTheme.dateField(${ctx.parent}, value -> ${handler}.accept(value), String.valueOf(${propName}), ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
+        return;
+      }
+      const nameAttr = node.attrs.find((a) => a.name === 'name');
+      const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
+      const key = boundName || (field ? formFieldKey(ctx.forms, field) : '');
+      if (!key) {
+        ctx.warnings.push('java: <input type="date"> without bind:value is inert');
+        emit(`${ctx.parent}.add(new JLabel("[date]"));`, ctx);
+        return;
+      }
+      emit(`RoseTheme.dateField(${ctx.parent}, ${ctx.app}, "${key}", ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
+      return;
+    }
     // R255: the field helpers return the widget they created, so the focus
     // half wraps the call - no second walk over an already-nested expression.
     const focusWrap = (expr: string): string => (styled.focusKey && styleBinding.staticClasses.length)
@@ -3397,7 +3492,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     // block element was silently rendered as an input and its content clipped.
     if (tag === 'textarea') {
       const key = boundName || propName;
-      const area = `RoseTheme.textArea(${ctx.parent}, ${hint}, ${ctx.app}, "${key}")`;
+      // R440: rows is the textarea's visible line count.
+      const rowsAttr = node.attrs.find((a) => a.name === 'rows');
+      const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
+      const area = `RoseTheme.textArea(${ctx.parent}, ${hint}, ${ctx.app}, "${key}", ${rows})`;
       emit(activeWrap(focusWrap(readOnly ? `RoseTheme.readOnly(${area})` : area)), ctx);
       return;
     }
