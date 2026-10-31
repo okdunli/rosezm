@@ -84,6 +84,49 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Public raster images copied for this export: /rose.png -> assets/images/rose.png. */
 let assetMap = new Map<string, string>();
+
+/** R480: Dart reserved words plus the State members a field must not shadow. */
+const DART_KEYWORDS = new Set(['assert', 'break', 'case', 'catch', 'class', 'const', 'continue', 'default', 'do', 'else', 'enum', 'extends', 'false', 'final', 'finally', 'for', 'if', 'in', 'is', 'new', 'null', 'rethrow', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try', 'var', 'void', 'while', 'with', 'await', 'yield', 'build', 'initState', 'dispose', 'setState', 'mounted', 'widget', 'context', 'didChangePlatformBrightness']);
+let dartNames = new Map<string, string>();
+
+/** The Dart-safe spelling of a source identifier (`late` -> `late_`). */
+function dName(name: string): string {
+  return dartNames.get(name) ?? name;
+}
+
+/** Rename renamed identifiers, skipping string literals and member reads. */
+function dRename(code: string): string {
+  if (!dartNames.size) return code;
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === "'" || ch === '"') {
+      const q = ch;
+      out += ch;
+      i++;
+      while (i < code.length) {
+        const c = code[i];
+        out += c;
+        if (c === '\\') { i += 2; continue; }
+        i++;
+        if (c === q) break;
+      }
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      let j = i + 1;
+      while (j < code.length && /[\w$]/.test(code[j])) j++;
+      const word = code.slice(i, j);
+      out += out.endsWith('.') ? word : (dartNames.get(word) ?? word);
+      i = j;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 /** Vector assets by URL: drawn by the kit's RoseSvgPainter from a data table. */
 let svgShapes = new Map<string, { shape: SvgShape; name: string }>();
 
@@ -227,6 +270,15 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
       title: pageTitle(parsed.head, stem),
     });
   }
+
+  // R480: one rename map for the whole export, from the state declarations.
+  dartNames = new Map<string, string>();
+  for (const p of pages) {
+    for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data|derived)\b/g)) {
+      if (DART_KEYWORDS.has(m[1]) && !dartNames.has(m[1])) dartNames.set(m[1], m[1] + '_');
+    }
+  }
+  if (dartNames.size) warnings.push(`flutter: renamed reserved words used as identifiers: ${[...dartNames.keys()].join(', ')}`);
 
   const components: Array<{ file: string; name: string; className: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = [];
   for (const file of compFiles) {
@@ -2222,25 +2274,25 @@ function renderPage(
     const init = s.init || 'null';
     // A $persist field starts from the on-disk store when it has been written
     // before - that is what makes it survive a restart.
-    if (persist.has(s.name)) return `  dynamic ${s.name} = rosezmLoad(${JSON.stringify('rosezm:' + s.name)}) ?? ${dartLiteral(init, mapBinds)};`;
+    if (persist.has(s.name)) return `  dynamic ${dName(s.name)} = rosezmLoad(${JSON.stringify('rosezm:' + s.name)}) ?? ${dartLiteral(init, mapBinds)};`;
     // A member chain whose ROOT is an emitted module bind is reachable: the
     // bind is a top-level Dart map, and dartExpr spells the read as a subscript.
     // A chain rooted in anything else is module state this widget cannot see.
     const memberRoot = /^[A-Za-z_$][\w$]*/.exec(init)?.[0] ?? '';
     if (/^[A-Za-z_$][\w$]*(\.[\w$]+)*$/.test(init) && !/^(true|false|null|this)$/.test(init) && !mapBinds.has(memberRoot)) {
       warnings.push(`flutter: ${page.fileName}: the initial value of "${s.name}" reads module-level state (${init}) - it has no widget scope, so it starts null and the data channel/server state is the source`);
-      return `  dynamic ${s.name} = null;`;
+      return `  dynamic ${dName(s.name)} = null;`;
     }
-    return `  dynamic ${s.name} = ${dartLiteral(init, mapBinds)};`;
+    return `  dynamic ${dName(s.name)} = ${dartLiteral(init, mapBinds)};`;
   }).join('\n');
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries, or an
     // optional single entry, so `posts[0]` and `post?['x']` both compile.
-    if (b.init.startsWith('roseContentList(')) return `  List<dynamic> ${b.name} = ${b.init};`;
-    if (b.init.startsWith('roseContentGet(')) return `  dynamic ${b.name} = ${b.init};`;
-    return `  dynamic ${b.name} = ${dartLiteral(b.init)};`;
+    if (b.init.startsWith('roseContentList(')) return `  List<dynamic> ${dName(b.name)} = ${b.init};`;
+    if (b.init.startsWith('roseContentGet(')) return `  dynamic ${dName(b.name)} = ${b.init};`;
+    return `  dynamic ${dName(b.name)} = ${dartLiteral(b.init)};`;
   }).join('\n');
-  const derivedGetters = facts.derived.map((d) => `  dynamic get ${d.name} => ${dartExpr(d.expr, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((x) => x.name)]), ctx.mapBinds, ctx.dataNames)};`).join('\n');
+  const derivedGetters = facts.derived.map((d) => `  dynamic get ${dName(d.name)} => ${dartExpr(d.expr, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((x) => x.name)]), ctx.mapBinds, ctx.dataNames)};`).join('\n');
   // A $data field is a JSON map the data channel fills: the accessor reads the
   // latest patch, so a template call post() and a member chain both see it.
   const dataAccessors = facts.data.map((d) => `  dynamic ${d.name}() => __data[${JSON.stringify(d.name)}];`).join('\n');
@@ -2349,7 +2401,7 @@ ${ctx.awaits.map((a, i) => `
   void __set(String key, dynamic value) {
     setState(() {
       switch (key) {
-${facts.state.map((s) => `        case '${s.name}': ${s.name} = value; break;`).join('\n')}
+${facts.state.map((s) => `        case '${s.name}': ${dName(s.name)} = value; break;`).join('\n')}
         default: break;
       }
     });
@@ -3201,7 +3253,12 @@ function dartScalarCalls(code: string): string {
   );
 }
 
+/** R480: the Dart expression, with the reserved-word rename at the end. */
 function dartExpr(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
+  return dRename(dartExprRaw(code, stateNames, mapBinds, dataNames));
+}
+
+function dartExprRaw(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '[]');
@@ -3590,7 +3647,12 @@ const DART_EXPR: ExprDialect = {
 };
 
 
+/** R480: a handler body goes through the same rename, strings untouched. */
 function translateBody(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {
+  return dRename(translateBodyRaw(body, file, warnings, mapBinds));
+}
+
+function translateBodyRaw(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {
   // `throw new Error(x)` / `throw new ActionError(...)` become the kit's roseThrow
   // before the refusal, so a boundary widget (weather) is a real throw, not a stub.
   body = rewriteThrowNew(body);

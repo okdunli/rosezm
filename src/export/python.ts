@@ -2731,9 +2731,21 @@ function emitPack(ctx: PyCtx, widget: string, binding: ElementStyleBinding, mode
   emit(`${widget}.pack(${packArgs(ctx, { model, last })})`, ctx);
 }
 
+/** R481: a renamed function's call sites follow the rename. */
+function pyRenameCalls(code: string, renamed: Map<string, string>): string {
+  if (!renamed.size) return code;
+  let out = code;
+  for (const [from, to] of renamed) {
+    out = out.replace(new RegExp(`(?<![.\\w])${from}\\s*\\(`, 'g'), `${to}(`);
+  }
+  return out;
+}
+
 function pyHandler(code: string, ctx: PyCtx): string {
   if (!code) return 'lambda: None';
-  if (/^[A-Za-z_$][\w$]*$/.test(code)) return code;
+  // R481: a user function named `build` became `build_` (the page's entry point
+  // owns `build`), so a call to it must use the new name.
+  if (/^[A-Za-z_$][\w$]*$/.test(code)) return code === 'build' ? 'build_' : code;
   const existing = ctx.inline.get(code);
   if (existing) return existing;
   const ir = normalizeInlineHandler(code, pythonHandlerDialect(ctx), ctx.stateNames);
@@ -3161,14 +3173,22 @@ function translateHandlers(script: string, facts: ScriptFacts, page: { route: st
   // Top-level functions become closures inside build.
   const defs: string[] = [];
   const knownNames = [...facts.state, ...facts.derived.map((d) => d.name), ...facts.data];
+  // R481: the renamed function's calls inside other bodies must follow it.
+  const renamed = new Map<string, string>();
   for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
     const name = m[1];
     if (name.startsWith('__')) continue;
+    // R481: the page's own entry point is `def build(app, st, parent)`. A user
+    // function named `build` would nest a second `def build()` inside it - a
+    // hard error in Python (same name, different signature). Rename it.
+    const pyName = name === 'build' ? 'build_' : name;
+    if (pyName !== name) renamed.set(name, pyName);
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
     const body = code.slice(open + 1, close);
-    defs.push(`    def ${name}(${m[2].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.split(':')[0].trim()).join(', ')}):\n${translateBody(body, fileLabel, warnings, 8, knownNames, bindNames0)}`);
+    defs.push(`    def ${pyName}(${m[2].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.split(':')[0].trim()).join(', ')}):\n${pyRenameCalls(translateBody(body, fileLabel, warnings, 8, knownNames, bindNames0), renamed)}`);
+    if (pyName !== name) warnings.push(`${fileLabel}: the function "${name}" is renamed to "${pyName}" - the page's own entry point is called build`);
   }
   // A $effect body is the same kind of statement list, so it gets the same
   // translation - and build() then calls it before it renders, which is what

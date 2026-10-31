@@ -3750,6 +3750,16 @@ function javaScalarCalls(code: string): string {
   );
 }
 
+/** R482: a renamed function's call sites follow the rename. */
+function javaRenameCalls(code: string, renamed: Map<string, string>): string {
+  if (!renamed.size) return code;
+  let out = code;
+  for (const [from, to] of renamed) {
+    out = out.replace(new RegExp(`(?<![.\\w])${from}\\s*\\(`, 'g'), `${to}(`);
+  }
+  return out;
+}
+
 function javaExpr(code: string, ctx: JavaCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
@@ -4015,14 +4025,23 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
     .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+  // R482: the page's own entry point is `build(RoseApp, JPanel)`; a user
+  // function named `build` is a different signature with the same name - a
+  // hard error in Java. Rename it.
+  const renamed = new Map<string, string>();
   for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
     const name = m[1];
     if (name.startsWith('__')) continue;
+    const javaName = name === 'build' ? 'build_' : name;
+    if (javaName !== name) {
+      renamed.set(name, javaName);
+      warnings.push(`${page.cls}: the function "${name}" is renamed to "${javaName}" - the page's own entry point is called build`);
+    }
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings);
-    methods.push(`    private static void ${name}(RoseApp app) {\n${body}\n        app.render();\n    }`);
+    const body = javaRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed);
+    methods.push(`    private static void ${javaName}(RoseApp app) {\n${body}\n        app.render();\n    }`);
   }
   return methods.join('\n\n');
 }

@@ -5220,7 +5220,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     const r = await exportProject('arkts', kRoot, { apiBase: 'http://x', outRoot: dir }) as { warnings?: string[]; outDir: string };
     assert(!(r.warnings ?? []).some((w) => /:active/.test(w)), 'an ArkTS :active rule is no longer linted as skipped');
     const styles = readFileSync(join(r.outDir, 'entry/src/main/ets/kit/RoseStyles.ets'), 'utf8');
-    assert(/'__active___a_btn': \(it: RoseModifier\) => \{\.backgroundColor\('#e91e63'\)\.fontColor\('#ffffff'\)\}/.test(styles), 'the active row reaches the RoseStyles table');
+    assert(/'__active___a_btn': \(it: RoseModifier\) => \{it\.backgroundColor = '#e91e63'; it\.color = '#ffffff';\}/.test(styles), 'the active row reaches the RoseStyles table');
     const page = readFileSync(join(r.outDir, 'entry/src/main/ets/pages/HPage.ets'), 'utf8');
     assert(/@State __a_btn: boolean = false;/.test(page), 'the page declares the pressed flag as @State');
     assert(page.includes("this.__a_btn ? '__active___a_btn' : ''"), 'the synthetic class gates the attributeModifier');
@@ -5576,7 +5576,7 @@ h2 { font-size: 40px; }
     assert(dkPage.includes('roseResolve("div", listOf("card"), "Index")'), 'android: a page with dark rules resolves at runtime');
     const dka = await exportProject('arkts', dproj2, { apiBase: 'x', outRoot: join(scratch, 'dark-arkts') });
     const dkStyles = readFileSync(join(dka.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseStyles.ets'), 'utf8');
-    assert(dkStyles.includes('roseDarkStyles') && dkStyles.includes("'card__IndexPage': (it: RoseModifier) => {.backgroundColor('#10131a')"), 'arkts: the dark half gets its own table');
+    assert(dkStyles.includes('roseDarkStyles') && dkStyles.includes("'card__IndexPage': (it: RoseModifier) => {it.backgroundColor = '#10131a'"), 'arkts: the dark half gets its own table');
     assert(dkStyles.includes("AppStorage.get<boolean>('rosezmDark')") && dkStyles.includes('if (dark) {') && dkStyles.includes("roseDarkStyles[c + '__' + scope]"), 'arkts: resolve reads the system appearance');
     const dkPage2 = readFileSync(join(dka.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
     assert(dkPage2.includes("@StorageLink('rosezmDark') rosezmDark: boolean = false;"), 'arkts: the page re-renders on a theme flip');
@@ -5613,6 +5613,101 @@ h2 { font-size: 40px; }
     assert(baPage.includes('rememberAsyncImagePainter("https://example.com/a.png")'), 'android: a remote background-image uses Coil');
     assert(baPage.includes('import dev.rosezm.app.R'), 'android: the page imports the resource class it names');
     assert(existsSync(join(ba.outDir, 'app', 'src', 'main', 'res', 'drawable', 'rose.png')), 'android: the background picture is copied');
+    const bx = await exportProject('xcode', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-xcode') });
+    const bxTheme = readFileSync(join(bx.outDir, 'rosezmApp', 'Kit', 'RoseTheme.swift'), 'utf8');
+    assert(bxTheme.includes('RoseStyle(image: "rose", height: 120)') && bxTheme.includes('image: "https://example.com/a.png"'), 'xcode: a background-image maps to its asset, a remote one stays a URL');
+    assert(existsSync(join(bx.outDir, 'rosezmApp', 'Resources', 'Assets.xcassets', 'rose.imageset')), 'xcode: the background picture is copied');
+    assert(bxTheme.includes('AsyncImage(url: URL(string: img))') && bxTheme.includes('Image(img).resizable().scaledToFill()'), 'xcode: the box draws a local or remote picture');
+    const bk = await exportProject('arkts', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-arkts') });
+    const bkStyles = readFileSync(join(bk.outDir, 'entry', 'src', 'main', 'ets', 'kit', 'RoseStyles.ets'), 'utf8');
+    assert(bkStyles.includes("'hero__IndexPage': (it: RoseModifier) => {it.image = $r('app.media.rose');"), 'arkts: a background-image becomes a media resource');
+    assert(bkStyles.includes('it.image = "https://example.com/a.png";'), 'arkts: a remote background-image keeps its URL');
+    assert(existsSync(join(bk.outDir, 'entry', 'src', 'main', 'resources', 'base', 'media', 'rose.png')), 'arkts: the background picture is copied');
+    assert(bkStyles.includes('(it: RoseModifier) => {it.') && !/=> \{\./.test(bkStyles), 'arkts: every style row assigns, never chains (the old rows were not valid ArkTS)');
+  }
+  // R477: `when` is a Kotlin keyword. A state named that way used to be emitted
+  // verbatim, and the whole Android page stopped compiling.
+  {
+    const kwproj = join(scratch, 'kw-proj');
+    mkdirSync(join(kwproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(kwproj, 'src/pages/index.rose'), '<script>\n  let when = $state(0);\n  function bump() { when = when + 1; }\n</script>\n<div><button on:click={bump}>+</button>{when}</div>\n');
+    const ka = await exportProject('android', kwproj, { apiBase: 'x', outRoot: join(scratch, 'kw-android') });
+    const kp = readFileSync(join(ka.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(kp.includes('var when_ by remember'), 'android: a keyword state is renamed in its declaration');
+    assert(kp.includes('when_ = when_ + 1;'), 'android: the handler body follows the rename');
+    assert(!/\bvar when by\b/.test(kp) && !/\bwhen = when \+ 1/.test(kp), 'android: the keyword never survives as an identifier');
+    assert((ka.warnings ?? []).some((w: string) => /renamed Kotlin keywords/.test(w)), 'android: the rename is named');
+  }
+  // R478: the same guard for Swift's own reserved words (`repeat` here).
+  {
+    const swproj = join(scratch, 'sw-kw-proj');
+    mkdirSync(join(swproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(swproj, 'src/pages/index.rose'), '<script>\n  let repeat = $state(0);\n  function bump() { repeat = repeat + 1; }\n</script>\n<div><button on:click={bump}>+</button>{repeat}</div>\n');
+    const sx = await exportProject('xcode', swproj, { apiBase: 'x', outRoot: join(scratch, 'sw-kw-xcode') });
+    const sv = readFileSync(join(sx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(sv.includes('@State private var repeat_: Int = 0'), 'xcode: a keyword state is renamed in its declaration');
+    assert(sv.includes('repeat_ = repeat_ + 1;') && sv.includes('Text("\\(repeat_)")'), 'xcode: the handler body and the template follow the rename');
+    assert(!/\b@State private var repeat:/.test(sv) && !/\brepeat = repeat \+ 1/.test(sv), 'xcode: the keyword never survives as an identifier');
+    assert((sx.warnings ?? []).some((w: string) => /renamed Swift keywords/.test(w)), 'xcode: the rename is named');
+  }
+  // R479: a state that collides with the page struct's own member (`build`) or
+  // with an ArkTS reserved word is renamed before the struct is emitted.
+  {
+    const aproj = join(scratch, 'ar-kw-proj');
+    mkdirSync(join(aproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(aproj, 'src/pages/index.rose'), '<script>\n  let build = $state(0);\n  function bump() { build = build + 1; }\n</script>\n<div><button on:click={bump}>+</button>{build}</div>\n');
+    const ak = await exportProject('arkts', aproj, { apiBase: 'x', outRoot: join(scratch, 'ar-kw-arkts') });
+    const ap = readFileSync(join(ak.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(ap.includes('@State build_: number = 0;') && ap.includes('this.build_ = build_ + 1;'), 'arkts: a state colliding with build() is renamed');
+    assert(ap.includes('build() {') && ap.includes('Text(`${this.build_}`)'), 'arkts: the struct member survives and the template reads the rename');
+    assert(!/@State build:/.test(ap), 'arkts: the colliding name is gone');
+    assert((ak.warnings ?? []).some((w: string) => /renamed reserved words/.test(w)), 'arkts: the rename is named');
+  }
+  // R480: a state named after a State member (`build`) collides with Flutter's
+  // own override, and a truly reserved word would not compile either.
+  {
+    const dproj3 = join(scratch, 'dart-kw-proj');
+    mkdirSync(join(dproj3, 'src/pages'), { recursive: true });
+    writeFileSync(join(dproj3, 'src/pages/index.rose'), '<script>\n  let build = $state(0);\n  function bump() { build = build + 1; }\n</script>\n<div><button on:click={bump}>+</button>{build}</div>\n');
+    const dfk = await exportProject('flutter', dproj3, { apiBase: 'x', outRoot: join(scratch, 'dart-kw-flutter') });
+    const dp = readFileSync(join(dfk.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(dp.includes('dynamic build_ = 0;'), 'flutter: a state colliding with build() is renamed');
+    assert(dp.includes("case 'build': build_ = value; break;") && dp.includes('__set("build", build_ + 1)'), 'flutter: the patch key stays authored while the field is renamed');
+    assert(dp.includes('Widget build(BuildContext context) {'), 'flutter: the real build override survives');
+    assert((dfk.warnings ?? []).some((w: string) => /renamed reserved words/.test(w)), 'flutter: the rename is named');
+  }
+  // R481: a user function named `build` collided with the page's own entry
+  // point - a nested `def build()` inside `def build(app, st, parent)`.
+  {
+    const pyproj = join(scratch, 'py-build-proj');
+    mkdirSync(join(pyproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(pyproj, 'src/pages/index.rose'), '<script>\n  function build() { return 1; }\n  function bump() { return build(); }\n</script>\n<div><button on:click={bump}>+</button></div>\n');
+    const pyp = await exportProject('python', pyproj, { apiBase: 'x', outRoot: join(scratch, 'py-build-out') });
+    const pypSrc = readFileSync(join(pyp.outDir, 'pages', 'index.py'), 'utf8');
+    assert(pypSrc.includes('def build(app, st, parent):'), 'python: the page entry point keeps its name');
+    assert(pypSrc.includes('def build_():'), 'python: the user function is renamed');
+    assert(pypSrc.includes('return build_()'), 'python: the call site follows the rename');
+    const pypc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'py-build-out')], { encoding: 'utf8' });
+    assert(pypc.status === 0, `python: the renamed page compiles (${(pypc.stderr ?? '').slice(0, 120)})`);
+    assert((pyp.warnings ?? []).some((w: string) => /renamed to "build_"/.test(w)), 'python: the rename is named');
+  }
+  // R482: the same guard for the three desktop JVM-family targets - a user
+  // function named `build` collided with the page's own entry point.
+  {
+    const dproj4 = join(scratch, 'desk-build-proj');
+    mkdirSync(join(dproj4, 'src/pages'), { recursive: true });
+    writeFileSync(join(dproj4, 'src/pages/index.rose'), '<script>\n  function build() { return 1; }\n  function bump() { return build(); }\n</script>\n<div><button on:click={bump}>+</button></div>\n');
+    const jv = await exportProject('java', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-java') });
+    const jvs = readFileSync(join(jv.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(jvs.includes('public static void build(RoseApp app, JPanel parent) {') && jvs.includes('private static void build_(RoseApp app) {'), 'java: the user function is renamed, the entry point is not');
+    assert(jvs.includes('return build_();'), 'java: the call site follows the rename');
+    const nsv = await exportProject('dotnet', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-dotnet') });
+    const nsvs = readFileSync(join(nsv.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(nsvs.includes('private static void build_(RoseApp app)') && nsvs.includes('return build_();'), 'dotnet: the user function is renamed, the call site follows');
+    const cpv = await exportProject('cpp', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-cpp') });
+    const cpvs = readFileSync(join(cpv.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
+    assert(cpvs.includes('void build_(RoseApp& app) {') && cpvs.includes('return build_();'), 'cpp: the user function is renamed, the call site follows');
+    assert((jv.warnings ?? []).some((w: string) => /renamed to "build_"/.test(w)), 'java: the rename is named');
   }
   // R242: ArkTS was the only target that neither applied :hover nor said so.
   {
@@ -5663,7 +5758,7 @@ h2 { font-size: 40px; }
     const styles = readFileSync(join(dir, 'arkts', 'entry/src/main/ets/kit/RoseStyles.ets'), 'utf8');
     assert(/'__focus___f_field'/.test(styles) && /#fff7fa/.test(styles), 'arkts: the focus model reaches the runtime style table');
     const focusRow = (styles.split('\n').find((l: string) => l.includes("'__focus___f_field'")) ?? '');
-    assert(focusRow.includes('#fff7fa') && focusRow.includes('#e91e63') && focusRow.includes('top: 1'), 'arkts: the recolor-only half adopted the base border width');
+    assert(focusRow.includes('#fff7fa') && focusRow.includes('#e91e63') && focusRow.includes('borderWidth = 1'), 'arkts: the recolor-only half adopted the base border width');
   }
 
   // R261: the mini programs are the one family where `:focus` needed NO new

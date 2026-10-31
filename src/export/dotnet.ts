@@ -3803,6 +3803,16 @@ function csScalarCalls(code: string): string {
   );
 }
 
+/** R482: a renamed function's call sites follow the rename. */
+function csRenameCalls(code: string, renamed: Map<string, string>): string {
+  if (!renamed.size) return code;
+  let out = code;
+  for (const [from, to] of renamed) {
+    out = out.replace(new RegExp(`(?<![.\\w])${from}\\s*\\(`, 'g'), `${to}(`);
+  }
+  return out;
+}
+
 function csExpr(code: string, ctx: NetCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
@@ -4236,14 +4246,23 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
     .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+  // R482: the page's own entry point is `Build(...)`; a user function named
+  // `build` would be a second overload of it - legal C#, but the call sites
+  // pick the wrong one. Rename it.
+  const renamed = new Map<string, string>();
   for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
     const name = m[1];
     if (name.startsWith('__')) continue;
+    const csName = name === 'build' ? 'build_' : name;
+    if (csName !== name) {
+      renamed.set(name, csName);
+      warnings.push(`${page.cls}: the function "${name}" is renamed to "${csName}" - the page's own entry point is called Build`);
+    }
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings);
-    methods.push(`    private static void ${name}(RoseApp app)\n    {\n${body}\n        app.Render();\n    }`);
+    const body = csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed);
+    methods.push(`    private static void ${csName}(RoseApp app)\n    {\n${body}\n        app.Render();\n    }`);
   }
   return methods.join('\n\n');
 }

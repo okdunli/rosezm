@@ -64,6 +64,26 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
+
+/** R477: Kotlin's hard keywords. A state the author named `when` or `is` would
+ *  otherwise be emitted as a declaration, and the whole page would not compile. */
+const KOTLIN_KEYWORDS = new Set(['as', 'break', 'class', 'continue', 'do', 'else', 'false', 'for', 'fun', 'if', 'in', 'interface', 'is', 'null', 'object', 'package', 'return', 'super', 'this', 'throw', 'true', 'try', 'typealias', 'typeof', 'val', 'var', 'when', 'while', 'by', 'catch', 'constructor', 'delegate', 'dynamic', 'field', 'file', 'finally', 'get', 'import', 'init', 'param', 'property', 'receiver', 'set', 'setparam', 'where', 'actual', 'abstract', 'annotation', 'companion', 'const', 'crossinline', 'data', 'enum', 'expect', 'external', 'final', 'infix', 'inline', 'inner', 'internal', 'lateinit', 'noinline', 'open', 'operator', 'out', 'override', 'private', 'protected', 'public', 'reified', 'sealed', 'suspend', 'tailrec', 'vararg']);
+let ktNames = new Map<string, string>();
+
+/** The Kotlin-safe spelling of a source identifier (`when` -> `when_`). */
+function ktName(name: string): string {
+  return ktNames.get(name) ?? name;
+}
+
+/** Rename every renamed identifier in a translated expression. */
+function ktRename(code: string): string {
+  if (!ktNames.size) return code;
+  let out = code;
+  for (const [from, to] of ktNames) {
+    out = out.replace(new RegExp(`(?<![.$\w])${from}(?![\w$])`, 'g'), to);
+  }
+  return out;
+}
 /** R474: the drawable name of every public image this export copied, by URL. */
 let androidMedia = new Map<string, string>();
 /** R469: the prefers-color-scheme dark half, kept apart from the light rows. */
@@ -162,6 +182,17 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
       params: [...stem.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]),
     });
   }
+
+  // R477: one rename map for the whole export, built from the page scripts.
+  ktNames = new Map<string, string>();
+  for (const p of pages) {
+    // Only STATE names: a local keeps its authored spelling, and a function is
+    // never renamed (its call sites are not expressions).
+    for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data)\b/g)) {
+      if (KOTLIN_KEYWORDS.has(m[1]) && !ktNames.has(m[1])) ktNames.set(m[1], m[1] + '_');
+    }
+  }
+  if (ktNames.size) warnings.push(`android: renamed Kotlin keywords used as identifiers: ${[...ktNames.keys()].join(', ')}`);
 
   const components: Array<{ name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = [];
   for (const file of compFiles) {
@@ -2355,7 +2386,7 @@ function renderPage(
     // content read already carries its type in `init`.
     const t = b.init.startsWith('roseContentList(') ? 'List<Any?>' : b.init.startsWith('roseContentGet(') ? 'Map<String, Any?>?' : kotlinType(b.init);
     const value = t === 'List<Any?>' ? b.init : t === 'Map<String, Any?>' ? mapLiteral(b.init) : typedLiteral(b.init);
-    return `    val ${b.name}: ${t} = ${value}`;
+    return `    val ${ktName(b.name)}: ${t} = ${value}`;
   }).join('\n');
   // SharedPreferences, read once per composition; only emitted when a page
   // actually declares a $persist field.
@@ -2379,9 +2410,9 @@ function renderPage(
       // A $persist field starts from SharedPreferences when it has been written
       // before - that is what makes it survive a restart.
       const value = persist.includes(s.name) ? `__rosezmPrefs.getString(${JSON.stringify('rosezm:' + s.name)}, null) ?: ${seed}` : seed;
-      return `    var ${s.name} by remember { mutableStateOf<${type}>(${value}) }`;
+      return `    var ${ktName(s.name)} by remember { mutableStateOf<${type}>(${value}) }`;
     }),
-    ...facts.data.map((d) => `    var ${d}: Any? by remember { mutableStateOf(null) }`),
+    ...facts.data.map((d) => `    var ${ktName(d)}: Any? by remember { mutableStateOf(null) }`),
   ].join('\n');
   // The form's inputs keyed by their name, as the server action reads them.
   const formFieldsHelper = formFields.length
@@ -2680,16 +2711,18 @@ function kotlinType(init: string): string {
 
 /** One typed assignment line: `patch["x"]` -> the state field, type-correct. */
 function applyLine(name: string, type: string): string {
-  if (type === 'Int') return `(patch["${name}"] as? Number)?.toInt()?.let { ${name} = it }`;
-  if (type === 'Double') return `(patch["${name}"] as? Number)?.toDouble()?.let { ${name} = it }`;
-  if (type === 'Boolean') return `(patch["${name}"] as? Boolean)?.let { ${name} = it }`;
-  if (type === 'String') return `(patch["${name}"] as? String)?.let { ${name} = it }`;
-  if (type === 'List<String>') return `(patch["${name}"] as? List<*>)?.filterIsInstance<String>()?.let { ${name} = it }`;
-  if (type === 'List<Int>') return `(patch["${name}"] as? List<*>)?.filterIsInstance<Int>()?.let { ${name} = it }`;
-  if (type === 'List<Map<String, Any?>>') return `(patch["${name}"] as? List<*>)?.mapNotNull { it as? Map<String, Any?> }?.let { ${name} = it }`;
-  if (type.startsWith('List<')) return `(patch["${name}"] as? List<*>)?.let { ${name} = it as ${type} }`;
-  if (type === 'Map<String, Any?>') return `(patch["${name}"] as? Map<*, *>)?.mapKeys { it.key.toString() }?.let { ${name} = it }`;
-  return `patch["${name}"]?.let { ${name} = it }`;
+  // R477: the patch key is the authored name; the Kotlin variable may be renamed.
+  const id = ktName(name);
+  if (type === 'Int') return `(patch["${name}"] as? Number)?.toInt()?.let { ${id} = it }`;
+  if (type === 'Double') return `(patch["${name}"] as? Number)?.toDouble()?.let { ${id} = it }`;
+  if (type === 'Boolean') return `(patch["${name}"] as? Boolean)?.let { ${id} = it }`;
+  if (type === 'String') return `(patch["${name}"] as? String)?.let { ${id} = it }`;
+  if (type === 'List<String>') return `(patch["${name}"] as? List<*>)?.filterIsInstance<String>()?.let { ${id} = it }`;
+  if (type === 'List<Int>') return `(patch["${name}"] as? List<*>)?.filterIsInstance<Int>()?.let { ${id} = it }`;
+  if (type === 'List<Map<String, Any?>>') return `(patch["${name}"] as? List<*>)?.mapNotNull { it as? Map<String, Any?> }?.let { ${id} = it }`;
+  if (type.startsWith('List<')) return `(patch["${name}"] as? List<*>)?.let { ${id} = it as ${type} }`;
+  if (type === 'Map<String, Any?>') return `(patch["${name}"] as? Map<*, *>)?.mapKeys { it.key.toString() }?.let { ${id} = it }`;
+  return `patch["${name}"]?.let { ${id} = it }`;
 }
 function emitNodes(nodes: IrNode[], ctx: AndroidCtx): void {
   const run: IrNode[] = [];
@@ -3446,8 +3479,8 @@ function registerInlineHandler(code: string, ctx: AndroidCtx): string {
 function kotlinHandlerDialect(ctx: AndroidCtx): HandlerDialect {
   return {
     expr: (code) => ktExpr(code, ctx),
-    set: (name, expr) => `${name} = ${expr}`,
-    action: (name) => `${name}()`,
+    set: (name, expr) => `${ktName(name)} = ${expr}`,
+    action: (name) => `${ktName(name)}()`,
     refresh: () => '/* refresh: the data channel reloads on navigation */',
     refuses: (body, params) => {
       const event = refusesEventUse(body, params);
@@ -3479,7 +3512,12 @@ function ktScalarCalls(code: string): string {
 }
 
 /** A Rose expression in Kotlin/Compose: state reads are the local fields. */
+/** R477: the Kotlin expression, with the keyword rename applied once at the end. */
 function ktExpr(code: string, ctx: AndroidCtx): string {
+  return ktRename(ktExprRaw(code, ctx));
+}
+
+function ktExprRaw(code: string, ctx: AndroidCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '""');
@@ -3905,7 +3943,12 @@ function rewriteFamilyWrites(body: string, stateNames: string[]): string {
   return out;
 }
 
+/** R477: a handler body goes through the same keyword rename as an expression. */
 function translateBody(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = []): string {
+  return ktRename(translateBodyRaw(body, file, stateNames, warnings, bindNames));
+}
+
+function translateBodyRaw(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = []): string {
   // `throw new Error(x)` / `throw new ActionError(...)` become the kit's roseThrow
   // before the refusal, so a boundary widget (weather) is a real throw, not a stub.
   body = rewriteThrowNew(body);

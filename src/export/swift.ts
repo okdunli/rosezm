@@ -69,6 +69,28 @@ let tagStyles = new Map<string, StyleModel>();
 let swiftDarkClasses = new Map<string, StyleModel>();
 let swiftDarkTags = new Map<string, StyleModel>();
 let swiftDarkRules = 0;
+/** R475: asset name of every public image copied for this export, by URL. */
+let swiftMedia = new Map<string, string>();
+
+/** R478: Swift's reserved words. A state named `repeat` or `where` used to be
+ *  emitted verbatim, and the page stopped compiling. */
+const SWIFT_KEYWORDS = new Set(['associatedtype', 'class', 'deinit', 'enum', 'extension', 'fileprivate', 'func', 'import', 'init', 'inout', 'internal', 'let', 'open', 'operator', 'private', 'precedencegroup', 'protocol', 'public', 'rethrows', 'static', 'struct', 'subscript', 'typealias', 'var', 'break', 'case', 'continue', 'default', 'defer', 'do', 'else', 'fallthrough', 'for', 'guard', 'if', 'in', 'repeat', 'return', 'throw', 'switch', 'where', 'while', 'as', 'catch', 'false', 'is', 'nil', 'super', 'self', 'Self', 'throws', 'true', 'try', 'any', 'some', 'async', 'await', 'actor', 'convenience', 'dynamic', 'final', 'indirect', 'lazy', 'mutating', 'nonmutating', 'optional', 'override', 'required', 'unowned', 'weak']);
+let swiftNames = new Map<string, string>();
+
+/** The Swift-safe spelling of a source identifier (`repeat` -> `repeat_`). */
+function swName(name: string): string {
+  return swiftNames.get(name) ?? name;
+}
+
+/** Rename every renamed identifier in a translated expression. */
+function swRename(code: string): string {
+  if (!swiftNames.size) return code;
+  let out = code;
+  for (const [from, to] of swiftNames) {
+    out = out.replace(new RegExp(`(?<![.$\\w])${from}(?![\\w$])`, 'g'), to);
+  }
+  return out;
+}
 
 export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
@@ -80,6 +102,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   swiftDarkClasses = new Map<string, StyleModel>();
   swiftDarkTags = new Map<string, StyleModel>();
   swiftDarkRules = 0;
+  swiftMedia = new Map<string, string>();
   const appDir = path.join(out, APP);
   // App-level lifecycle (src/app.rose, uniapp's App.vue parity): onLaunch runs
   // once at app init, onShow/onHide ride SwiftUI's scenePhase, globalData is a
@@ -159,6 +182,15 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     });
   }
 
+  // R478: one rename map for the whole export, built from the state names.
+  swiftNames = new Map<string, string>();
+  for (const p of pages) {
+    for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data)\b/g)) {
+      if (SWIFT_KEYWORDS.has(m[1]) && !swiftNames.has(m[1])) swiftNames.set(m[1], m[1] + '_');
+    }
+  }
+  if (swiftNames.size) warnings.push(`xcode: renamed Swift keywords used as identifiers: ${[...swiftNames.keys()].join(', ')}`);
+
   const components: Array<{ name: string; view: string; nodes: IrNode[]; script: string | null; slots: SlotUsage; style: string }> = [];
   for (const file of compFiles) {
     const parsed = parseRose(await fs.promises.readFile(file, 'utf8'), file, 'xcode');
@@ -191,7 +223,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     if (!hex) return '#ffffff';
     return hex[1].length === 3 ? '#' + hex[1].split('').map((c) => c + c).join('') : hex[0];
   })();
-  const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings);
+  const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings, allCss);
   // R465: the named colour UILaunchScreen points at - one color set, the body
   // background, so the launch frame matches the first painted frame.
   const launchSet = path.join(appDir, 'Resources', 'Assets.xcassets', 'RoseLaunchBackground.colorset');
@@ -270,7 +302,7 @@ function substituteSlot(nodes: IrNode[], content: IrNode[]): IrNode[] {
 
 /** Copy referenced raster images into an asset catalog, and read referenced
  *  SVGs as vector shapes (SwiftUI draws them; there is no UIImage to make). */
-async function copyAssets(root: string, resources: string, trees: IrNode[][], warnings: string[]): Promise<{ assets: Map<string, string>; vectors: Map<string, SvgShape> }> {
+async function copyAssets(root: string, resources: string, trees: IrNode[][], warnings: string[], css = ''): Promise<{ assets: Map<string, string>; vectors: Map<string, SvgShape> }> {
   const used = new Map<string, string>();
   const vectors = new Map<string, SvgShape>();
   const visit = (nodes: IrNode[]): void => {
@@ -293,6 +325,15 @@ async function copyAssets(root: string, resources: string, trees: IrNode[][], wa
     }
   };
   trees.forEach(visit);
+  // R475: a background-image in a <style> block is copied like an <img> src.
+  for (const m of css.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\1\s*\)/gi)) {
+    const url = m[2];
+    if (used.has(url) || vectors.has(url)) continue;
+    if (/\.svg$/i.test(url)) { vectors.set(url, null as unknown as SvgShape); continue; }
+    if (!/\.(png|jpe?g)$/i.test(url)) continue;
+    used.set(url, url.replace(/^\//, '').replace(/\.[^.]+$/, '').toLowerCase());
+  }
+  swiftMedia = used;
   // Each referenced SVG is read once; a file outside the subset keeps its
   // honest warning and the page renders the symbol fallback.
   const svgFiles = new Map<string, string>();
@@ -593,6 +634,11 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
   const arr = (e: [number, number, number, number]) => `[${e.map((v) => n(v)).join(', ')}]`;
   if (model.color) args.push(`color: ${q(model.color)}`);
   if (model.background) args.push(`background: ${q(model.background)}`);
+  if (model.backgroundImage) {
+    // R475: an asset name for a copied picture; a remote URL stays a URL.
+    const mapped = swiftMedia.get(model.backgroundImage) ?? model.backgroundImage;
+    args.push(`image: ${q(mapped)}`);
+  }
   if (model.gradient && model.gradient.stops.length >= 2) args.push(`gradient: [${model.gradient.stops.map((s) => q(s.color)).join(', ')}]`);
   if (model.fontSize !== undefined) args.push(`fontSize: ${n(model.fontSize)}`);
   if (model.fontWeight !== undefined) args.push(`weight: ${model.fontWeight}`);
@@ -684,6 +730,7 @@ struct RoseHtmlText: View {
 struct RoseStyle {
     var color: String? = nil
     var background: String? = nil
+    var image: String? = nil
     var gradient: [String]? = nil
     var fontSize: Double? = nil
     var weight: Int? = nil
@@ -718,6 +765,7 @@ struct RoseStyle {
         var m = self
         if let v = o.color { m.color = v }
         if let v = o.background { m.background = v }
+        if let v = o.image { m.image = v }
         if let v = o.gradient { m.gradient = v }
         if let v = o.fontSize { m.fontSize = v }
         if let v = o.weight { m.weight = v }
@@ -954,7 +1002,19 @@ struct RoseCorners: Shape {
 }
 
 @ViewBuilder func roseBackgroundView(_ s: RoseStyle?) -> some View {
-    if let g = s?.gradient, g.count >= 2 {
+    if let img = s?.image {
+        if img.hasPrefix("http") {
+            AsyncImage(url: URL(string: img)) { phase in
+                if let picture = phase.image {
+                    picture.resizable().scaledToFill().clipped()
+                } else {
+                    Color.clear
+                }
+            }
+        } else {
+            Image(img).resizable().scaledToFill().clipped()
+        }
+    } else if let g = s?.gradient, g.count >= 2 {
         LinearGradient(colors: g.map { Color.rose($0) }, startPoint: .top, endPoint: .bottom)
     } else if let bg = s?.background {
         Color.rose(bg)
@@ -2146,13 +2206,13 @@ function renderPage(
     // scope) and an empty dictionary otherwise.
     if (THUNK_INIT.test(b.init)) {
       const body = b.init.slice(b.init.indexOf('>') + 1).trim();
-      if (body.startsWith('roseContentList(')) return `    static let ${b.name}: () -> [[String: Any]] = { ${swiftStringLiteralize(body)} }`;
-      if (body.startsWith('roseContentGet(')) return `    static let ${b.name}: () -> [String: Any]? = { ${swiftStringLiteralize(body)} }`;
-      return `    static let ${b.name}: () -> [String: Any] = { [:] }`;
+      if (body.startsWith('roseContentList(')) return `    static let ${swName(b.name)}: () -> [[String: Any]] = { ${swiftStringLiteralize(body)} }`;
+      if (body.startsWith('roseContentGet(')) return `    static let ${swName(b.name)}: () -> [String: Any]? = { ${swiftStringLiteralize(body)} }`;
+      return `    static let ${swName(b.name)}: () -> [String: Any] = { [:] }`;
     }
-    if (b.init.startsWith('roseContentList(')) return `    static let ${b.name}: [[String: Any]] = ${swiftStringLiteralize(b.init)}`;
-    if (b.init.startsWith('roseContentGet(')) return `    static let ${b.name}: [String: Any]? = ${swiftStringLiteralize(b.init)}`;
-    return `    static let ${b.name}: [String: Any] = ${swiftMapLiteral(b.init)}`;
+    if (b.init.startsWith('roseContentList(')) return `    static let ${swName(b.name)}: [[String: Any]] = ${swiftStringLiteralize(b.init)}`;
+    if (b.init.startsWith('roseContentGet(')) return `    static let ${swName(b.name)}: [String: Any]? = ${swiftStringLiteralize(b.init)}`;
+    return `    static let ${swName(b.name)}: [String: Any] = ${swiftMapLiteral(b.init)}`;
   }).join('\n');
   const persist = persistKeys(page.script ?? '');
   const stateFields = [
@@ -2164,9 +2224,9 @@ function renderPage(
       const seed = persist.includes(s.name)
         ? `UserDefaults.standard.string(forKey: ${JSON.stringify('rosezm:' + s.name)}) ?? ${swiftLiteral(init)}`
         : (page.params.includes(s.name) ? `params[${JSON.stringify(s.name)}] ?? ${swiftLiteral(init)}` : swiftLiteral(init));
-      return `    @State private var ${s.name}: ${type} = ${seed}`;
+      return `    @State private var ${swName(s.name)}: ${type} = ${seed}`;
     }),
-    ...facts.data.map((d) => `    @State private var ${d}: Any? = nil`),
+    ...facts.data.map((d) => `    @State private var ${swName(d)}: Any? = nil`),
     ...ctx.deferred.map((d) => `    @State private var ${d.name}: Bool = false`),
   ].join('\n');
   // A $persist write is mirrored into UserDefaults by an .onChange on the root
@@ -2190,14 +2250,15 @@ function renderPage(
   const patchApply = [
     ...facts.state.map((s) => {
       const type = swiftType(initOf(s.name));
-      if (type === 'Int') return `            ${s.name} = roseInt(patch, "${s.name}", ${s.name})`;
-      if (type === 'Double') return `            ${s.name} = (patch["${s.name}"] as? NSNumber)?.doubleValue ?? ${s.name}`;
-      if (type === 'Bool') return `            ${s.name} = roseBool(patch, "${s.name}", ${s.name})`;
-      if (type === 'String') return `            ${s.name} = roseString(patch, "${s.name}", ${s.name})`;
-      if (type.startsWith('[') && type.endsWith(']')) return `            ${s.name} = roseList(patch, "${s.name}", ${s.name})`;
-      return `            if let value = patch["${s.name}"] { ${s.name} = value }`;
+      const id = swName(s.name);
+      if (type === 'Int') return `            ${id} = roseInt(patch, "${s.name}", ${id})`;
+      if (type === 'Double') return `            ${id} = (patch["${s.name}"] as? NSNumber)?.doubleValue ?? ${id}`;
+      if (type === 'Bool') return `            ${id} = roseBool(patch, "${s.name}", ${id})`;
+      if (type === 'String') return `            ${id} = roseString(patch, "${s.name}", ${id})`;
+      if (type.startsWith('[') && type.endsWith(']')) return `            ${id} = roseList(patch, "${s.name}", ${id})`;
+      return `            if let value = patch["${s.name}"] { ${id} = value }`;
     }),
-    ...facts.data.map((d) => `            ${d} = patch["${d}"]`),
+    ...facts.data.map((d) => `            ${swName(d)} = patch["${d}"]`),
   ].join('\n');
   const compImports = '';
   const paramsDecl = page.params.length ? '    var params: [String: String] = [:]\n' : '';
@@ -3251,7 +3312,7 @@ function registerInlineHandler(code: string, ctx: SwiftCtx): string {
 function swiftHandlerDialect(ctx: SwiftCtx): HandlerDialect {
   return {
     expr: (code) => swiftExpr(code, ctx),
-    set: (name, expr) => `${name} = ${expr}`,
+    set: (name, expr) => `${swName(name)} = ${expr}`,
     action: (name) => `${name}()`,
     refresh: () => '/* refresh: the data channel reloads on navigation */',
     refuses: (body, params) => {
@@ -3304,7 +3365,12 @@ function swiftScalarCalls(code: string): string {
   );
 }
 
+/** R478: the Swift expression, with the keyword rename applied at the end. */
 function swiftExpr(code: string, ctx: SwiftCtx): string {
+  return swRename(swiftExprRaw(code, ctx));
+}
+
+function swiftExprRaw(code: string, ctx: SwiftCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '""');
@@ -3607,11 +3673,12 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     code = code.replace(new RegExp(`\\b(?:async\\s+)?function\\s+${escapeRe(action)}\\s*\\(`, 'g'), `function __server_${action}(`);
     const apply = facts.state.map((s) => {
       const type = swiftType(initialOf(script, s.name));
-      if (type === 'Int') return `        ${s.name} = roseInt(patch, "${s.name}", ${s.name})`;
-      if (type === 'Double') return `        ${s.name} = (patch["${s.name}"] as? NSNumber)?.doubleValue ?? ${s.name}`;
-      if (type === 'Bool') return `        ${s.name} = roseBool(patch, "${s.name}", ${s.name})`;
-      if (type === 'String') return `        ${s.name} = roseString(patch, "${s.name}", ${s.name})`;
-      return `        if let value = patch["${s.name}"] { ${s.name} = value }`;
+      const id = swName(s.name);
+      if (type === 'Int') return `        ${id} = roseInt(patch, "${s.name}", ${id})`;
+      if (type === 'Double') return `        ${id} = (patch["${s.name}"] as? NSNumber)?.doubleValue ?? ${id}`;
+      if (type === 'Bool') return `        ${id} = roseBool(patch, "${s.name}", ${id})`;
+      if (type === 'String') return `        ${id} = roseString(patch, "${s.name}", ${id})`;
+      return `        if let value = patch["${s.name}"] { ${id} = value }`;
     }).join('\n');
     methods.push(`    private func ${action}() async {
         let (patch, wall) = await roseAction(route, "${action}"${formFields.length ? ', __formFields()' : ''})
@@ -3800,7 +3867,12 @@ function rewriteFamilyAutoSetters(body: string, setterFor: (setter: string) => s
   return out;
 }
 
+/** R478: a handler body goes through the same keyword rename as an expression. */
 function translateBody(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[]): string {
+  return swRename(translateBodyRaw(body, file, stateNames, knownBinds, warnings));
+}
+
+function translateBodyRaw(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[]): string {
   // useNative('camera', opts) becomes the kit's roseNative call - one dispatch
   // shared by every page. Done before the DOM refusal below so the call is
   // never mistaken for a web-only construct.

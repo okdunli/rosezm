@@ -47,6 +47,9 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
+  // Per-export state, reset before anything reads it.
+  arkDarkRules = 0;
+  arkMedia = new Map<string, string>();
   // CF: the site's own stylesheet, sanitized once for this target - empty when the
   // project ships no theme, and then every sheet below stays byte-identical.
   const globalCss = sanitizeFor('arkts', opts.globalCss ?? '');
@@ -142,6 +145,15 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     });
   }
 
+  // R479: one rename map for the whole export, from the state declarations.
+  arkNames = new Map<string, string>();
+  for (const p of pages) {
+    for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data|derived)\b/g)) {
+      if ((ARK_KEYWORDS.has(m[1]) || ARK_MEMBERS.has(m[1])) && !arkNames.has(m[1])) arkNames.set(m[1], m[1] + '_');
+    }
+  }
+  if (arkNames.size) warnings.push(`arkts: renamed reserved words used as identifiers: ${[...arkNames.keys()].join(', ')}`);
+
   const components: Array<{ name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = [];
   for (const file of compFiles) {
     const parsed = parseRose(await fs.promises.readFile(file, 'utf8'), file, 'arkts');
@@ -164,6 +176,21 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const { media, vectors } = await copyMedia(root, pkgRoot, pages.map((p) => p.nodes), warnings);
 
   const allCss = [globalCss, ...pages.map((p) => p.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
+  // R476: a background-image in a <style> block is copied like an <img> src.
+  for (const m of allCss.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\1\s*\)/gi)) {
+    const url = m[2];
+    if (media.has(url)) continue;
+    if (!/\.(png|jpe?g|gif|webp)$/i.test(url)) continue;
+    const src = path.join(root, 'public', url.replace(/^\//, ''));
+    if (!fs.existsSync(src)) {
+      warnings.push(`arkts: background-image ${url} is not in public/ - the box keeps its colour`);
+      continue;
+    }
+    const file = snake(path.basename(src).replace(/\.[^.]+$/, '')) + path.extname(src).toLowerCase();
+    await fs.promises.copyFile(src, path.join(pkgRoot, 'resources', 'base', 'media', file));
+    media.set(url, snake(path.basename(src).replace(/\.[^.]+$/, '')));
+  }
+  arkMedia = media;
   const fontMap = await copyFonts(root, pkgRoot, allCss, warnings);
   const declared = new Set(fontFaces(allCss).map((f) => f.family));
   for (const fam of customFontFamilies(allCss)) {
@@ -189,7 +216,6 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const pageTagRows: string[] = [];
   const compTagRows: string[] = [];
   // R470: the dark half of every sheet, one set per scope.
-  arkDarkRules = 0;
   const pageDarkRows: string[] = [];
   const compDarkRows: string[] = [];
   const pageDarkTagRows: string[] = [];
@@ -534,7 +560,28 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
       classes.set(key, mergeModels(classes.get(key) ?? null, rule.model));
     }
   }
-  const mods = (m: StyleModel): string => modifierOf(m, fonts).join('');
+  // R476: the table rows ASSIGN to the holder. They used to paste the chained
+  // modifiers (.backgroundColor(...)) inside `(it: RoseModifier) => { ... }`,
+  // which is not valid ArkTS - every generated RoseStyles.ets failed to compile.
+  const mods = (m: StyleModel): string => {
+    const out: string[] = [];
+    if (m.background) out.push(`it.backgroundColor = '${arkColor(m.background)}';`);
+    if (m.backgroundImage) {
+      const local = arkMedia.get(m.backgroundImage);
+      out.push(`it.image = ${local ? `$r('app.media.${local}')` : JSON.stringify(m.backgroundImage)};`);
+    }
+    if (m.color) out.push(`it.color = '${arkColor(m.color)}';`);
+    if (m.fontSize !== undefined) out.push(`it.fontSize = ${m.fontSize};`);
+    if (m.fontWeight !== undefined) out.push(`it.fontWeight = ${m.fontWeight};`);
+    if (m.width) out.push(`it.width = '${m.width.n}${m.width.u === '%' ? '%' : ''}';`);
+    if (m.height) out.push(`it.height = '${m.height.n}${m.height.u === '%' ? '%' : ''}';`);
+    if (m.padding) out.push(`it.padding = [${m.padding.join(', ')}];`);
+    if (m.margin) out.push(`it.margin = [${m.margin.join(', ')}];`);
+    if (m.radius) out.push(`it.radius = ${m.radius[0]};`);
+    if (m.borderWidth && m.borderWidth.some((w) => w > 0)) out.push(`it.borderWidth = ${Math.max(...m.borderWidth)};`);
+    if (m.borderColor) out.push(`it.borderColor = '${arkColor(m.borderColor)}';`);
+    return out.join(' ');
+  };
   // R243: a `:hover` half becomes a synthetic class the element asks for while its
   // pointer flag is set. The key mirrors the flag the emitter derives from the
   // element, so the two agree without the emitter feeding this table back.
@@ -1264,6 +1311,30 @@ const KIT_IMPORT_SLOT = '__rosezm_KIT_IMPORT__';
 
 /** R470: how many dark rows this export compiled - 0 keeps the static path. */
 let arkDarkRules = 0;
+/** R476: media resource name of every copied picture, by URL. */
+let arkMedia = new Map<string, string>();
+
+/** R479: ArkTS (TypeScript) reserved words a state must not be called. */
+const ARK_KEYWORDS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', 'implements', 'await', 'as']);
+/** R479: names the page struct itself declares - a state with one would collide. */
+const ARK_MEMBERS = new Set(['build', 'aboutToAppear', 'aboutToDisappear', 'loadData']);
+let arkNames = new Map<string, string>();
+
+/** The ArkTS-safe spelling of a source identifier (`default` -> `default_`). */
+function arName(name: string): string {
+  return arkNames.get(name) ?? name;
+}
+
+/** Rename renamed identifiers in an expression, member reads included. */
+function arRename(code: string): string {
+  if (!arkNames.size) return code;
+  let out = code;
+  for (const [from, to] of arkNames) {
+    out = out.replace(new RegExp(`this\\.${from}(?![\\w$])`, 'g'), `this.${to}`);
+    out = out.replace(new RegExp(`(?<![.$\\w])${from}(?![\\w$])`, 'g'), to);
+  }
+  return out;
+}
 
 /**
  * The compiled style tables + the runtime `roseResolve`/`roseModifier`. A native
@@ -1350,6 +1421,8 @@ export function roseModifier(tag: string, classes: string[], scope: string, prop
       if (m.margin.length) instance.margin({ top: m.margin[0], right: m.margin[1], bottom: m.margin[2], left: m.margin[3] });
       if (m.radius) instance.borderRadius(m.radius);
       if (m.borderWidth) instance.border({ width: m.borderWidth, color: m.borderColor || '#e0e0e0' });
+      // R476: the CSS background picture.
+      if (m.image) instance.backgroundImage(m.image, ImageRepeat.NoRepeat);
     }
   };
 }
@@ -1363,6 +1436,7 @@ function renderRoseModifier(): string {
 /// .backgroundColor(...) call ends up as.
 export class RoseModifier {
   backgroundColor: string = '';
+  image: ResourceStr = '';
   color: string = '';
   fontSize: number = 0;
   fontWeight: number = 0;
@@ -1386,6 +1460,7 @@ export class RoseModifier {
       case 'border-radius': this.radius = parseFloat(value) || 0; break;
       case 'border-width': this.borderWidth = parseFloat(value) || 0; break;
       case 'border-color': this.borderColor = value; break;
+      case 'background-image': this.image = value; break;
     }
   }
 }
@@ -1698,10 +1773,10 @@ function renderPage(
       // A $persist field is mirrored into the preferences store by a @Watch
       // handler - ArkUI's own idiom for "react when this state changes".
       const watch = persist.includes(s.name) ? ` @Watch('__persist_${s.name}')` : '';
-      return `  @State${watch} ${s.name}: ${kotlinType(init)} = ${tsLiteral(init)};`;
+      return `  @State${watch} ${arName(s.name)}: ${kotlinType(init)} = ${tsLiteral(init)};`;
     }),
-    ...facts.derived.map((d) => `  get ${d.name}(): ${kTypeOfExpr(d.expr)} { return ${etsExpr(d.expr, ctx)}; }`),
-    ...facts.data.map((d) => `  @State ${d}: Object | null = null;`),
+    ...facts.derived.map((d) => `  get ${arName(d.name)}(): ${kTypeOfExpr(d.expr)} { return ${etsExpr(d.expr, ctx)}; }`),
+    ...facts.data.map((d) => `  @State ${arName(d)}: Object | null = null;`),
     // R124: a `{#defer}` flag is @State, so it re-renders the block it guards.
     ...ctx.deferred.map((d) => `  @State ${d.name}: boolean = false;`),
     // R243: a `:hover` rule becomes a flag + the hover model's own modifiers.
@@ -1709,11 +1784,11 @@ function renderPage(
     ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
     ...(pull ? ['  @State __refreshing: boolean = false;'] : []),
   ].join('\n');
-  const persistSeeds = persist.map((k) => `    if (__rosezmP.hasSync(${JSON.stringify('rosezm:' + k)})) this.${k} = String(__rosezmP.getSync(${JSON.stringify('rosezm:' + k)}, this.${k}));`).join('\n');
+  const persistSeeds = persist.map((k) => `    if (__rosezmP.hasSync(${JSON.stringify('rosezm:' + k)})) this.${arName(k)} = String(__rosezmP.getSync(${JSON.stringify('rosezm:' + k)}, this.${arName(k)}));`).join('\n');
   const persistWatchers = persist.map((k) => `
   __persist_${k}(): void {
     const __p = preferences.getPreferencesSync(getContext(this), 'rosezm');
-    __p.putSync(${JSON.stringify('rosezm:' + k)}, this.${k});
+    __p.putSync(${JSON.stringify('rosezm:' + k)}, this.${arName(k)});
     __p.flush();
   }`).join('\n');
   // The page's form inputs, by the `name` each input declares: a server action
@@ -1794,8 +1869,8 @@ ${ctx.vectorRenderers.map((r) => `  private ${r} = new CanvasRenderingContext2D(
   async loadData(): Promise<void> {
     const patch = await roseData(${JSON.stringify(page.route)});
     if (!patch || Object.keys(patch).length === 0) return;
-${facts.state.map((s) => `    if (patch['${s.name}'] !== undefined) this.${s.name} = patch['${s.name}'] as ${kotlinType(initOf(s.name))};`).join('\n')}
-${facts.data.map((d) => `    if (patch['${d}'] !== undefined) this.${d} = patch['${d}'] as Object;`).join('\n')}
+${facts.state.map((s) => `    if (patch['${s.name}'] !== undefined) this.${arName(s.name)} = patch['${s.name}'] as ${kotlinType(initOf(s.name))};`).join('\n')}
+${facts.data.map((d) => `    if (patch['${d}'] !== undefined) this.${arName(d)} = patch['${d}'] as Object;`).join('\n')}
   }
 ${persistWatchers}${formFieldsHelper}
 
@@ -2591,8 +2666,8 @@ function registerInlineHandler(code: string, ctx: ArkCtx): string {
 function arktsHandlerDialect(ctx: ArkCtx): HandlerDialect {
   return {
     expr: (code) => etsExpr(code, ctx),
-    set: (name, expr) => `this.${name} = ${expr}`,
-    action: (name) => `this.${name}()`,
+    set: (name, expr) => `this.${arName(name)} = ${expr}`,
+    action: (name) => `this.${arName(name)}()`,
     refresh: () => 'this.loadData()',
     refuses: (body, params) => {
       const event = refusesEventUse(body, params);
@@ -2639,7 +2714,12 @@ ${draw}
 }
 
 /** A Rose expression in ArkTS: state reads become `this.x`. */
+/** R479: the ArkTS expression, with the reserved-word rename at the end. */
 function etsExpr(code: string, ctx: ArkCtx): string {
+  return arRename(etsExprRaw(code, ctx));
+}
+
+function etsExprRaw(code: string, ctx: ArkCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', "''");
@@ -2934,7 +3014,12 @@ function matchParen(src: string, open: number): number {
 }
 
 /** Script -> ArkTS struct members: @State fields, methods, action POSTs. */
+/** R479: a handler body goes through the same rename as an expression. */
 function translateHandlers(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): string {
+  return arRename(translateHandlersRaw(script, facts, page, warnings, formFields, bindNames));
+}
+
+function translateHandlersRaw(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): string {
   if (!script.trim()) return '';
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
   try {
@@ -2959,8 +3044,8 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
   for (const action of actions) {
     code = code.replace(new RegExp(`\\b(?:async\\s+)?function\\s+${escapeRe(action)}\\s*\\(`, 'g'), `function __server_${action}(`);
     const apply = [
-      ...facts.state.map((st) => `    if (patch['${st.name}'] !== undefined) this.${st.name} = patch['${st.name}'] as ${kotlinType(st.init)};`),
-      ...facts.data.map((d) => `    if (patch['${d}'] !== undefined) this.${d} = patch['${d}'];`),
+      ...facts.state.map((st) => `    if (patch['${st.name}'] !== undefined) this.${arName(st.name)} = patch['${st.name}'] as ${kotlinType(st.init)};`),
+      ...facts.data.map((d) => `    if (patch['${d}'] !== undefined) this.${arName(d)} = patch['${d}'];`),
     ].join('\n');
     methods.push(`  async ${action}(): Promise<void> {
     const patch = await roseAction(${JSON.stringify(page.route)}, ${JSON.stringify(action)}${formFields.length ? ', __formFields()' : ''});

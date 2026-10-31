@@ -3557,6 +3557,16 @@ function cppRoseify(code: string): string {
   return out;
 }
 
+/** R482: a renamed function's call sites follow the rename. */
+function cppRenameCalls(code: string, renamed: Map<string, string>): string {
+  if (!renamed.size) return code;
+  let out = code;
+  for (const [from, to] of renamed) {
+    out = out.replace(new RegExp(`(?<![.\\w])${from}\\s*\\(`, 'g'), `${to}(`);
+  }
+  return out;
+}
+
 function cppExpr(code: string, ctx: CppCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
@@ -3855,15 +3865,24 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
     .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+  // R482: the page emits `void build(RoseApp&, QWidget*)`; a user function
+  // named `build` is the same name with a different signature - C++ picks the
+  // wrong overload. Rename it.
+  const renamed = new Map<string, string>();
   for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
     const name = m[1];
     if (name.startsWith('__')) continue;
+    const cppName = name === 'build' ? 'build_' : name;
+    if (cppName !== name) {
+      renamed.set(name, cppName);
+      warnings.push(`${page.cls}: the function "${name}" is renamed to "${cppName}" - the page's own entry point is called build`);
+    }
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings);
-    names.push(name);
-    methods.push(`void ${name}(RoseApp& app) {\n${body}\n    app.render();\n}`);
+    const body = cppRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed);
+    names.push(cppName);
+    methods.push(`void ${cppName}(RoseApp& app) {\n${body}\n    app.render();\n}`);
   }
   return { text: methods.join('\n\n'), names };
 }
