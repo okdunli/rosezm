@@ -514,7 +514,7 @@ ${contentBlock}
 def roseThrow(message):
     """The await reject branch: it always raises, so the catch arm renders."""
     raise Exception(str(message))
-def rose_entry(parent, cls='', style=None):
+def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False):
     """A text field with the app's base font - a bare tk.Entry renders in the
     system default at a size that fights every styled label beside it."""
     from styles import STYLES
@@ -525,9 +525,18 @@ def rose_entry(parent, cls='', style=None):
     for __k, __v in (style or {}).items():
         if __k in ('bg', 'background', 'fg', 'foreground', 'font', 'justify', 'state', 'highlightbackground', 'highlightthickness', 'padx', 'pady'):
             opts[__k] = __v
-    return tk.Entry(parent, **opts)
+    if disabled:
+        opts['state'] = 'disabled'
+    if password:
+        opts['show'] = '*'
+    widget = tk.Entry(parent, **opts)
+    if maxlength:
+        # Tk has no maxlength: a key validator refuses input past the limit.
+        vcmd = (parent.register(lambda proposed: len(proposed) <= maxlength), '%P')
+        widget.configure(validate='key', validatecommand=vcmd)
+    return widget
 
-def rose_button(parent, text, command, cls='', style=None):
+def rose_button(parent, text, command, cls='', style=None, disabled=False):
     """A button that looks like an app button: the browser default carries
     padding, a border, a pointer cursor and a system font, and a bare
     tk.Button has none of them. The class style wins where it speaks."""
@@ -550,6 +559,9 @@ def rose_button(parent, text, command, cls='', style=None):
     for __k, __v in (style or {}).items():
         if __k in ('bg', 'background', 'fg', 'foreground', 'font', 'justify', 'anchor', 'padx', 'pady', 'relief', 'cursor', 'state', 'activebackground', 'activeforeground', 'bd', 'highlightbackground', 'highlightthickness'):
             opts[__k] = __v
+    if disabled:
+        opts['state'] = 'disabled'
+        opts.pop('cursor', None)
     return tk.Button(parent, **opts)
 
 
@@ -2111,7 +2123,12 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const text = transformLabel(pyLabelText(label, ''), model);
     const style = styleDict(model, 'Label', rawFamily);
     ctx.links.used = true;
-    const call = `rose_link(${ctx.parent}, ${text}, lambda t=${target}: ${ctx.app}.navigate(t)${style ? `, ${style}` : ''})`;
+    // An external link is a URL the app cannot route: the OS browser opens it.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    const external = /^(https?:\/\/|mailto:|tel:)/i.test(hrefText);
+    const call = external
+      ? `rose_link(${ctx.parent}, ${text}, lambda: __import__('webbrowser').open(${JSON.stringify(hrefText)})${style ? `, ${style}` : ''})`
+      : `rose_link(${ctx.parent}, ${text}, lambda t=${target}: ${ctx.app}.navigate(t)${style ? `, ${style}` : ''})`;
     if (binding.hasDynamic) {
       const name = `__w${ctx.lines.length}`;
       emit(`${name} = ${call}`, ctx);
@@ -2201,27 +2218,35 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       // appends app.render() after its writes, so these widget callbacks must too.
       emit(`__var_${name}.trace_add('write', lambda *_: ${ctx.app}.render())`, ctx);
       const focusDictWanted = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Entry', rawFamily);
+      const tvType = node.attrs.find((a) => a.name === 'type');
+      const tvPw = tvType && tvType.value.kind === 'text' && tvType.value.text.trim().toLowerCase() === 'password' ? ", show='*'" : '';
       if (focusDictWanted) {
         // R253: the widget is named so the focus pair can attach to it.
         const w = `__e${ctx.seq.n++}`;
-        emit(`${w} = tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''})`, ctx);
+        emit(`${w} = tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''}${tvPw})`, ctx);
         focusPair(w, 'Entry');
         emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
       } else {
-        place(`tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''})`);
+        place(`tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''}${tvPw})`);
       }
       return;
     }
     place(`tk.Label(${ctx.parent}, text=${hint})`);
     const entryStyle = styleDict(model, 'Entry', rawFamily);
     const fallbackFocus = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Entry', rawFamily);
+    const entryDisabled = node.attrs.find((a) => a.name === 'disabled');
+    const entryDisabledArg = entryDisabled ? `, disabled=${entryDisabled.value.kind === 'expr' ? pyExpr(entryDisabled.value.code, ctx) : 'True'}` : '';
+    const entryMax = node.attrs.find((a) => a.name === 'maxlength');
+    const entryMaxArg = entryMax && entryMax.value.kind === 'text' && /^\d+$/.test(entryMax.value.text.trim()) ? `, maxlength=${entryMax.value.text.trim()}` : '';
+    const entryType = node.attrs.find((a) => a.name === 'type');
+    const entryPwArg = entryType && entryType.value.kind === 'text' && entryType.value.text.trim().toLowerCase() === 'password' ? ', password=True' : '';
     if (fallbackFocus) {
       const w = `__e${ctx.seq.n++}`;
-      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''})`, ctx);
+      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg})`, ctx);
       focusPair(w, 'Entry');
       emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
     } else {
-      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''})`);
+      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg})`);
     }
     return;
   }
@@ -2231,6 +2256,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `{rose_text(lambda: ${pyExpr(c.code, ctx)})}` : '')).join('').trim();
     const text = transformLabel(pyLabelText(label, 'Button'), model);
     const style = styleDict(model, 'Button', rawFamily);
+    const buttonDisabled = node.attrs.find((a) => a.name === 'disabled');
+    const buttonDisabledArg = buttonDisabled ? `, disabled=${buttonDisabled.value.kind === 'expr' ? pyExpr(buttonDisabled.value.code, ctx) : 'True'}` : '';
     // R263: the button is named here so BOTH press-state halves attach directly
     // - the hover half (STYLES key, as emitPack would) and the `:active` half
     // (inline dict). A button returns before the generic tail; `:active` is
@@ -2239,7 +2266,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const hoverKey = binding.staticClasses.map((c) => `__hover_${c}__${ctx.scope}`).find((k) => ctx.hoverKeys?.has(k));
     if (wantsActive || hoverKey || binding.hasDynamic) {
       const name = `__b${ctx.seq.n++}`;
-      emit(`${name} = rose_button(${ctx.parent}, ${text}, ${command}${style ? `, '', ${style}` : ''})`, ctx);
+      emit(`${name} = rose_button(${ctx.parent}, ${text}, ${command}${style ? `, '', ${style}` : ''}${buttonDisabledArg})`, ctx);
       emit(`${name}.pack(${packArgs(ctx, { model, last })})`, ctx);
       if (binding.hasDynamic) emit(dynApply(name, binding, ctx), ctx);
       if (hoverKey) {
@@ -2251,7 +2278,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       if (wantsActive) activePair(name, 'Button');
       return;
     }
-    emitPack(ctx, `rose_button(${ctx.parent}, ${text}, ${command}${style ? `, '', ${style}` : ''})`, binding, model, last);
+    emitPack(ctx, `rose_button(${ctx.parent}, ${text}, ${command}${style ? `, '', ${style}` : ''}${buttonDisabledArg})`, binding, model, last);
     return;
   }
   if (tag === 'select') {

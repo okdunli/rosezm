@@ -790,7 +790,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip as clipModifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -2020,6 +2024,8 @@ interface AndroidCtx {
   stateNames: Set<string>;
   /** `$data` field names: their member reads are JSON map reads (see ktExpr). */
   dataNames?: Set<string>;
+  /** Counter for the per-link LocalUriHandler locals. */
+  uriCount?: number;
   /** R191: `$derived` name -> its source expression, re-evaluated per read. */
   derivedExprs?: Map<string, string>;
   mapBinds: Set<string>;
@@ -2809,6 +2815,16 @@ function emitElementStyled(
     // the link actually shows instead of a hard-coded brand colour.
     const textStyle = resolved.expr ? `, style = roseTextStyle(${resolved.expr})` : '';
     const boxMod = resolved.expr ? `, modifier = Modifier.roseBox(${resolved.expr})` : '';
+    // An external link is a URL the app cannot route: LocalUriHandler hands it
+    // to the system browser (or mail app) inside the same styled button.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    if (/^(https?:\/\/|mailto:|tel:)/i.test(hrefText)) {
+      const n = (ctx.uriCount = (ctx.uriCount ?? 0) + 1);
+      const local = `__uri${n}`;
+      emit(`val ${local} = LocalUriHandler.current`, ctx);
+      emit(`TextButton(onClick = { ${local}.openUri(${JSON.stringify(hrefText)}) }${boxMod}) { Text(${label}${textStyle}) }`, ctx);
+      return;
+    }
     emit(`TextButton(onClick = { onNavigate(${target}.toString()) }${boxMod}) { Text(${label}${textStyle}) }`, ctx);
     return;
   }
@@ -2848,9 +2864,15 @@ function emitElementStyled(
     const formKey = field ? formFieldKey(ctx.forms, field) : null;
     const bound = propName ? '' : (boundName || formKey || '');
     const valueExpr = (boundName || propName || formKey) ? `value = ${(boundName || propName || formKey)}.toString()` : `value = ""`;
+    // maxlength truncates in the write path - Compose's TextField has no limit
+    // parameter. Only a literal count is supported (a dynamic one would need a
+    // runtime read in the setter).
+    const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+    const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    const clamp = (v: string): string => (maxLen ? `${v}.take(${maxLen})` : v);
     const onChange = propName
-      ? `, onValueChange = { v -> ${propChangeHandler(propName)}(v) }`
-      : (bound ? `, onValueChange = { ${bound} = it }` : '');
+      ? `, onValueChange = { v -> ${propChangeHandler(propName)}(${clamp('v')}) }`
+      : (bound ? `, onValueChange = { ${bound} = ${clamp('it')} }` : '');
     // A styled input carries its colour/font/border through the same text +
     // box modifiers the link uses, so a class or input {} rule shows instead of
     // a bare system TextField.
@@ -2869,7 +2891,19 @@ function emitElementStyled(
     const baseMod = 'Modifier.fillMaxWidth()' + focusMod + activeMod + (resolved.expr ? `.roseBox(${resolved.expr})` : boxParts.join(''));
     const labelStyle = resolved.expr ? `, style = roseTextStyle(${resolved.expr})` : (textArgs.length ? `, style = TextStyle(${textArgs.join(', ')})` : '');
     const labelBody = `${hint}${labelStyle}`;
-    emit(`TextField(${valueExpr}${onChange}, label = { Text(${labelBody}) }, modifier = ${baseMod})`, ctx);
+    // The element's type= carries through: a password field masks, and a
+    // number/email/tel field opens the keyboard that fits it.
+    const keyboard = type === 'number' ? `, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)`
+      : type === 'email' ? `, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email)`
+      : type === 'tel' ? `, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)`
+      : type === 'password' ? `, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)`
+      : '';
+    const visual = type === 'password' ? `, visualTransformation = PasswordVisualTransformation()` : '';
+    const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+    const inputEnabled = disabledInput
+      ? `, enabled = !(${disabledInput.value.kind === 'expr' ? ktExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'})`
+      : '';
+    emit(`TextField(${valueExpr}${onChange}${keyboard}${visual}${inputEnabled}, label = { Text(${labelBody}) }, modifier = ${baseMod})`, ctx);
     return;
   }
   if (tag === 'button') {
@@ -2879,6 +2913,12 @@ function emitElementStyled(
     // A submit button in a form with no handler posts to the page's action.
     if (!click && isSubmitButton(node) && ctx.pageAction) handler = `() -> ${ctx.pageAction}()`;
     const label = textOf(node.children, ctx) || '""';
+    // disabled - static or bound - greys the button and stops the click.
+    const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+    const disabled = disabledAttr
+      ? (disabledAttr.value.kind === 'expr' ? ktExpr(disabledAttr.value.code, ctx) : disabledAttr.value.kind === 'text' ? disabledAttr.value.text : 'true')
+      : '';
+    const enabledArg = disabled ? `, enabled = !(${disabled})` : '';
     // A styled button keeps its class, exactly like Flutter's: the box half
     // (background, padding, radius, border) rides the control's own Modifier
     // chain and the text half styles the label. The M3 surface goes transparent
@@ -2891,7 +2931,7 @@ function emitElementStyled(
       const hoverMod = resolved.hoverKey ? `.hoverable(${hoverVarName(resolved.hoverKey)}Source)` : '';
       const focusMod = resolved.focusKey ? `.onFocusChanged { ${focusVarName(resolved.focusKey)} = it.isFocused }` : '';
       const activeMod = resolved.activeKey ? `.clickable(interactionSource = ${activeVarName(resolved.activeKey)}Source, indication = null) {}` : '';
-      emit(`Button(onClick = ${handler}, colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent), modifier = Modifier${hoverMod}${focusMod}${activeMod}.roseBox(${resolved.expr})) { Text(${label}, style = roseTextStyle(${resolved.expr})) }`, ctx);
+      emit(`Button(onClick = ${handler}${enabledArg}, colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent), modifier = Modifier${hoverMod}${focusMod}${activeMod}.roseBox(${resolved.expr})) { Text(${label}, style = roseTextStyle(${resolved.expr})) }`, ctx);
       return;
     }
     if (resolved.model) {
@@ -2901,10 +2941,10 @@ function emitElementStyled(
       const mod = boxParts.length ? `modifier = Modifier${boxParts.join('')}` : null;
       const ctrl = [colors, mod].filter(Boolean).join(', ');
       const textArgs = params.length ? `, ${params.join(', ')}` : '';
-      emit(`Button(onClick = ${handler}, ${ctrl}) { Text(${label}${textArgs}) }`, ctx);
+      emit(`Button(onClick = ${handler}${enabledArg}, ${ctrl}) { Text(${label}${textArgs}) }`, ctx);
       return;
     }
-    emit(`Button(onClick = ${handler}) { Text(${label}) }`, ctx);
+    emit(`Button(onClick = ${handler}${enabledArg}) { Text(${label}) }`, ctx);
     return;
   }
   if (tag === 'select') {

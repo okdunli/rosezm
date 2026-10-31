@@ -306,7 +306,7 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
       generatedBy: 'rosezm export',
       pages: result.pages,
       components: result.components,
-      apiBase: opts.apiBase ?? '',
+      apiBase: opts.apiBase ?? '', warnings: warnings.length,
     }, null, 2) + '\n', 'utf8');
     // A project can ship its own native manifest fragments: `<project>/rosezm.mp.json`
     // merges over the generated `app.json` (object values like `window` merge per
@@ -377,7 +377,7 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
       generatedBy: 'rosezm export',
       pages: result.pages,
       components: result.components,
-      apiBase: opts.apiBase ?? '',
+      apiBase: opts.apiBase ?? '', warnings: warnings.length,
     }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
@@ -385,25 +385,25 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
     const result = await emitZig({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'zig');
     await fs.promises.mkdir(dir, { recursive: true });
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'cpp') {
     const result = await emitCpp({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'cpp');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'dotnet') {
     const result = await emitDotnet({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'dotnet');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'java') {
     const result = await emitJava({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'java');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'electron') {
@@ -412,45 +412,45 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
     // passing the sheet again would style the same page twice.
     const result = await emitElectron({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'electron');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'wails') {
     const result = await emitWails({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'wails');
     await fs.promises.mkdir(dir, { recursive: true });
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'tauri') {
     const result = await emitTauri({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'tauri');
     await fs.promises.mkdir(dir, { recursive: true });
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'xcode') {
     const result = await emitSwift({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'xcode');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'android') {
     const result = await emitAndroid({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'android');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'arkts') {
     const result = await emitArkTs({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'arkts');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   if (target === 'python') {
     const result = await emitPython({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, globalCss, warnings });
     const dir = path.join(outRoot, 'python');
-    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '' }, null, 2) + '\n', 'utf8');
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
   }
   throw new RoseError('E-EXPORT-FAMILY', `no emitter for target family "${info.family}"`);

@@ -218,6 +218,10 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   const content = bakeContent(root);
   const contentBaked = content !== null;
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
+  // An <a href="https://..."> needs the web-view page; only a project that
+  // writes one gets it (every other export stays byte-identical).
+  const rawSources = await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8')));
+  const hasExternalLinks = rawSources.some((t) => /href\s*=\s*["']https?:\/\//i.test(t));
   const layouts = new Map<string, LayoutFile>();
   for (const f of pageFiles) {
     if (path.basename(f) !== '_layout.rose') continue;
@@ -448,6 +452,22 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     } else {
       pageList.push(`pages/${page.name}/${page.name}`);
     }
+  }
+
+  if (hasExternalLinks) {
+    pageList.push('pages/_external/_external');
+    await fs.promises.mkdir(path.join(out, 'pages', '_external'), { recursive: true });
+    await fs.promises.writeFile(
+      path.join(out, 'pages', '_external', `_external.${dialect.tpl}`),
+      '<web-view src="{{url}}"></web-view>\n',
+      'utf8',
+    );
+    await fs.promises.writeFile(
+      path.join(out, 'pages', '_external', '_external.js'),
+      "Page({\n  data: { url: '' },\n  onLoad: function (options) {\n    var u = options && options.url ? decodeURIComponent(options.url) : '';\n    this.setData({ url: u });\n  }\n});\n",
+      'utf8',
+    );
+    warnings.push(`${opts.target}: external links open in a <web-view> page - add their domains to the mini program's request/business-domain whitelist, or the page stays blank`);
   }
 
   // The route map is final once every placement is known - a subpackaged
@@ -1872,6 +1892,19 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       if (low.startsWith('out:') || low.startsWith('use:')) {
         ctx.warnings.push(`${ctx.file}: ${name} has no mini-program equivalent - dropped (${node.tag})`);
       }
+      continue;
+    }
+    // tel:/mailto: have no mini-program anchor equivalent; a navigator to one
+    // would be a dead tap, so the href is dropped with a warning.
+    if (low === 'href' && node.tag.toLowerCase() === 'a' && attr.value.kind === 'text' && /^(?:tel:|mailto:)/i.test(attr.value.text.trim())) {
+      ctx.warnings.push(`${ctx.file}: href="${attr.value.text.trim()}" has no mini-program equivalent - use useNative('make-phone-call') instead (the href is dropped)`);
+      continue;
+    }
+    // An external link is a URL the app cannot route: it opens in the web-view
+    // page below (the one way a mini program reaches the open web), with the
+    // target URL carried as a query parameter.
+    if (low === 'href' && node.tag.toLowerCase() === 'a' && attr.value.kind === 'text' && /^https?:\/\//i.test(attr.value.text.trim())) {
+      out.push(`url="/pages/_external/_external?url=${encodeURIComponent(attr.value.text.trim())}"`);
       continue;
     }
     if (low === 'href' && node.tag.toLowerCase() === 'a') {

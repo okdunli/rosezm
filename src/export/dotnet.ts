@@ -1546,11 +1546,12 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return block;
     }
 
-    public static RoseButton Button(Panel parent, string text, RoutedEventHandler onClick, RoseStyle? style = null, RoseStyle? hover = null)
+    public static RoseButton Button(Panel parent, string text, RoutedEventHandler onClick, RoseStyle? style = null, RoseStyle? hover = null, bool enabled = true)
     {
         var button = new RoseButton(text, onClick);
         button.ApplyStyle(style);
         if (hover != null) button.SetHover(hover);
+        if (!enabled) { button.IsEnabled = false; button.Opacity = 0.6; }
         parent.Children.Add(button);
         return button;
     }
@@ -1597,10 +1598,37 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return combo;
     }
 
-    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null)
+    /// JS &lt;input type="range"&gt;: a WPF Slider whose value writes back to the state.
+    public static Slider Slider(Panel parent, RoseApp app, string stateKey, double min, double max)
+    {
+        var slider = new System.Windows.Controls.Slider
+        {
+            Minimum = min,
+            Maximum = max,
+            Value = Convert.ToDouble(app.V(stateKey) ?? 0, CultureInfo.InvariantCulture),
+        };
+        slider.ValueChanged += (_, e) => app.Set(stateKey, e.NewValue);
+        parent.Children.Add(slider);
+        return slider;
+    }
+
+    public static PasswordBox Password(Panel parent, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0)
+    {
+        var box = new PasswordBox { MinWidth = 220 };
+        if (style != null) Apply(box, style);
+        if (!enabled) box.IsEnabled = false;
+        if (maxLength > 0) box.MaxLength = maxLength;
+        box.PasswordChanged += (_, _) => app.Set(stateKey, box.Password);
+        parent.Children.Add(box);
+        return box;
+    }
+
+    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0)
     {
         var box = new TextBox { Text = RoseTheme.Str(app.V(stateKey)), MinWidth = 220 };
         if (style != null) Apply(box, style);
+        if (!enabled) box.IsEnabled = false;
+        if (maxLength > 0) box.MaxLength = maxLength;
         box.TextChanged += (_, _) => app.Set(stateKey, box.Text);
         parent.Children.Add(box);
         return box;
@@ -3080,7 +3108,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const label = capText(csText(node.children, ctx) || '""', model.textTransform);
     const style = styleOf(model);
     const extra = style || hover ? `, ${style || 'null'}${hover ? `, ${hover}` : ''}` : '';
-    const call = `RoseTheme.Link(${ctx.parent}, ${label}, (_, _) => ${ctx.app}.Navigate(RoseTheme.Str(${target}))${extra})`;
+    // An external link is a URL the app cannot route: the OS shell opens it.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    const external = /^(https?:\/\/|mailto:|tel:)/i.test(hrefText);
+    const handler = external
+      ? `(_, _) => { var __psi = new System.Diagnostics.ProcessStartInfo(${JSON.stringify(hrefText)}) { UseShellExecute = true }; System.Diagnostics.Process.Start(__psi); }`
+      : `(_, _) => ${ctx.app}.Navigate(RoseTheme.Str(${target}))`;
+    const call = `RoseTheme.Link(${ctx.parent}, ${label}, ${handler}${extra})`;
     if (!needVar) { emit(`${call};`, ctx); return; }
     const link = `link${++ctx.counter.c}`;
     emit(`var ${link} = ${call};`, ctx);
@@ -3149,21 +3183,45 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const bound = bindValue && bindValue.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(bindValue.value.code.trim()) ? bindValue.value.code.trim() : '';
     const propName = ctx.componentProps.has(bound) ? bound
       : (valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '');
+    const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+    const inputEnable = disabledInput ? (disabledInput.value.kind === 'expr' ? csExpr(disabledInput.value.code, ctx) : 'true') : '';
+    const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+    const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    if (type === 'range') {
+      // A range is a Slider - falling through emitted a text box for a number.
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const num = (a: typeof minAttr, d: string): string => (a && a.value.kind === 'text' ? a.value.text : d);
+      const key = stateOf(bindValue) || propName;
+      emit(`RoseTheme.Slider(${ctx.parent}, ${ctx.app}, "${key}", ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
+      return;
+    }
+    const isPassword = type.trim().toLowerCase() === 'password';
     if (propName) {
       const handler = propChangeHandler(propName);
       emit('{', ctx);
       ctx.depth++;
-      emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220 };`, ctx);
-      if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
-      emit(`box.TextChanged += (s, e) => ${handler}(box.Text);`, ctx);
+      if (isPassword) {
+        // WPF masks through PasswordBox, not TextBox.
+        emit(`var box = new PasswordBox { MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''} };`, ctx);
+        if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
+        emit(`box.PasswordChanged += (s, e) => ${handler}(box.Password);`, ctx);
+      } else {
+        emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''} };`, ctx);
+        if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
+        emit(`box.TextChanged += (s, e) => ${handler}(box.Text);`, ctx);
+      }
       emit(`${ctx.parent}.Children.Add(box);`, ctx);
       ctx.depth--;
       emit('}', ctx);
     } else {
       const nameAttr = node.attrs.find((a) => a.name === 'name');
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
-      const key = field ? formFieldKey(ctx.forms, field) : null;
-      const call = `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix})`;
+      // A bind:value state is the field's key too (no name attribute needed).
+      const key = field ? formFieldKey(ctx.forms, field) : (bound || null);
+      const call = isPassword
+        ? `RoseTheme.Password(${ctx.parent}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`
+        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const c = `input${++ctx.counter.c}`;
       emit(`var ${c} = ${call};`, ctx);
@@ -3173,6 +3231,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   }
   if (tag === 'button') {
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
+    const disabledBtn = node.attrs.find((a) => a.name === 'disabled');
+    const btnEnable = disabledBtn ? (disabledBtn.value.kind === 'expr' ? csExpr(disabledBtn.value.code, ctx) : 'true') : '';
     const typeAttr = node.attrs.find((a) => a.name === 'type');
     const style = styleOf(model);
     const extra = style || hover ? `, ${style || 'null'}${hover ? `, ${hover}` : ''}` : '';
@@ -3181,7 +3241,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     if (!click && typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text === 'submit' && (ctx.formSubmit || ctx.pageAction)) {
       const submitLabel = capText(csText(node.children, ctx) || '""', model.textTransform);
       const run = ctx.formSubmit ? `${ctx.formSubmit}(${ctx.app})` : `${ctx.pageAction}(${ctx.app})`;
-      const call = `RoseTheme.Button(${ctx.parent}, ${submitLabel}, (_, _) => { ${run}; ${ctx.app}.Render(); }${extra})`;
+      const call = `RoseTheme.Button(${ctx.parent}, ${submitLabel}, (_, _) => { ${run}; ${ctx.app}.Render(); }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const b = `btn${++ctx.counter.c}`;
       emit(`var ${b} = ${call};`, ctx);
@@ -3204,7 +3264,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       }
     }
     const label = capText(csText(node.children, ctx) || '""', model.textTransform);
-    const call = `RoseTheme.Button(${ctx.parent}, ${label}, (_, _) => { ${body} }${extra})`;
+    const call = `RoseTheme.Button(${ctx.parent}, ${label}, (_, _) => { ${body} }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
     if (!needVar) { emit(`${call};`, ctx); return; }
     const b = `btn${++ctx.counter.c}`;
     emit(`var ${b} = ${call};`, ctx);

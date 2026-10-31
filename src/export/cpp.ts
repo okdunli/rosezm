@@ -79,6 +79,10 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   const app = appIdentity(opts.projectRoot);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
+  // An <a href="https://..."> needs QDesktopServices in the kit header - only
+  // for a project that writes one (byte-identical otherwise).
+  const rawSources = await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8')));
+  const hasExternalLinks = rawSources.some((t) => /href\s*=\s*["'](?:https?:\/\/|mailto:|tel:)/i.test(t));
 
   const layers = new Map<string, { nodes: IrNode[]; script: string | null; style: string | null }>();
   for (const f of pageFiles) {
@@ -156,7 +160,7 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   // rose.cpp exactly as they were.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app, hasExternalLinks), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'pages.h'), renderPagesHeader(pages, components), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'main.cpp'), renderMain([...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'CMakeLists.txt'), renderCMake(pages, components), 'utf8');
@@ -550,6 +554,7 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #include <QMainWindow>
 #include <QPushButton>
 #include <QProgressBar>
+#include <QSlider>
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -854,9 +859,10 @@ RoseStyle rose_resolve(const std::vector<std::string>& classes, const std::strin
 RoseStyle rose_apply_prop(const RoseStyle& style, const std::string& prop, const std::string& value);
 QLabel* rose_label(QWidget* parent, const std::string& text, const std::string& className);
 QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::string& className);
-QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{});
+QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{}, bool enabled = true);
 QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{});
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{});
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false);
+QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int min, int max);
 QWidget* rose_spacer(QWidget* parent, int height);
 QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& style = RoseStyle{});
 RoseVector* rose_vector(QWidget* parent, const std::vector<std::string>& fills, const std::vector<std::string>& data);
@@ -921,7 +927,7 @@ inline std::string rose_route_path(std::string target) {
 `;
 }
 
-function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = [], app: AppIdentity): string {
+function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = [], app: AppIdentity, externalLinks = false): string {
   const appName = app.name;
   const branches: string[] = [];
   for (const page of pages) {
@@ -1017,7 +1023,7 @@ ${native.includes('camera') ? `    if (capability == "camera") {
 #include <QDebug>
 ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `#include <QClipboard>
 #include <QGuiApplication>
-` : ''}${native.includes('share') || native.includes('make-phone-call') ? `#include <QDesktopServices>
+` : ''}${native.includes('share') || native.includes('make-phone-call') || externalLinks ? `#include <QDesktopServices>
 ` : ''}
 #include <regex>
 #include <sstream>
@@ -1930,7 +1936,7 @@ QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::str
     return label;
 }
 
-QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style) {
+QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style, bool enabled) {
     auto* button = new QPushButton(QString::fromStdString(text));
     button->setCursor(Qt::PointingHandCursor);
     QObject::connect(button, &QPushButton::clicked, button, onClick);
@@ -1961,6 +1967,7 @@ QPushButton* rose_button(QWidget* parent, const std::string& text, std::function
         button->setStyleSheet(QString::fromStdString(sheet));
     }
     if (auto* outer = qobject_cast<QBoxLayout*>(parent->layout())) outer->addWidget(button);
+    if (!enabled) button->setEnabled(false);
     return button;
 }
 
@@ -1995,7 +2002,16 @@ QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<v
     return button;
 }
 
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style) {
+QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int min, int max) {
+    auto* slider = new QSlider(Qt::Horizontal);
+    slider->setRange(min, max);
+    slider->setValue(static_cast<int>(rose_num(app.v(key))));
+    QObject::connect(slider, &QSlider::valueChanged, slider, [&app, key](int value) { app.set(key, RoseValue(static_cast<double>(value))); });
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(slider);
+    return slider;
+}
+
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int maxLength, bool password) {
     auto* input = new QLineEdit;
     input->setPlaceholderText(QString::fromStdString(placeholder));
     // A stylesheet the cascade resolved paints the field; a bare one keeps the
@@ -2024,6 +2040,9 @@ QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& 
         app.set(key, text.toStdString());
     });
     if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(input);
+    if (!enabled) input->setEnabled(false);
+    if (maxLength > 0) input->setMaxLength(maxLength);
+    if (password) input->setEchoMode(QLineEdit::Password);
     return input;
 }
 
@@ -2858,7 +2877,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
     const href = node.attrs.find((a) => a.name === 'href');
     const target = href ? cppAttr(href, ctx) : '""';
     const label = cppText(node.children, ctx) || '""';
-    emit(`rose_link(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { app.navigate(rose_str(${target})); }${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
+    // An external link is a URL the app cannot route: Qt hands it to the OS.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    const external = /^(https?:\/\/|mailto:|tel:)/i.test(hrefText);
+    const body = external
+      ? `QDesktopServices::openUrl(QUrl(${JSON.stringify(hrefText)}));`
+      : `app.navigate(rose_str(${target}));`;
+    emit(`rose_link(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { ${body} }${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
     return;
   }
   if (tag === 'input' || tag === 'textarea') {
@@ -2899,6 +2924,14 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       return;
     }
     const bound = bindValue && bindValue.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(bindValue.value.code.trim()) ? bindValue.value.code.trim() : '';
+    if (type === 'range') {
+      // A range is a QSlider - falling through emitted a line edit for a number.
+      const minAttr = node.attrs.find((a) => a.name === 'min');
+      const maxAttr = node.attrs.find((a) => a.name === 'max');
+      const num = (a: typeof minAttr, d: string): string => (a && a.value.kind === 'text' ? a.value.text : d);
+      emit(`rose_slider(${ctx.parent}, ${ctx.app}, "${bound}", ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
+      return;
+    }
     const propName = ctx.componentProps.has(bound) ? bound
       : (valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '');
     if (propName) {
@@ -2924,6 +2957,12 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       const nameAttr = node.attrs.find((a) => a.name === 'name');
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const key = field ? formFieldKey(ctx.forms, field) : bound;
+      const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+      const enableExpr = disabledAttr ? `!(${disabledAttr.value.kind === 'expr' ? cppExpr(disabledAttr.value.code, ctx) : 'true'})` : 'true';
+      const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+      const maxArg = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? `, ${maxAttr.value.text.trim()}` : '';
+      const typeAttr = node.attrs.find((a) => a.name === 'type');
+      const pwArg = typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text.trim().toLowerCase() === 'password' ? `${maxArg ? '' : ', 0'}, true` : '';
       // R256/R266: rose_input RETURNS the widget, so the focus and active
       // halves wrap the call - one emit each, the Swing wrap trick.
       const wrap = (expr: string): string => {
@@ -2931,20 +2970,22 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
         if (activeKey) expr = `rose_active(${expr}, ${isEmptyModel(model) ? 'RoseStyle{}' : cppStyleLiteral(model)}, rose_style_of("${activeKey}") ? *rose_style_of("${activeKey}") : RoseStyle{})`;
         return expr;
       };
-      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ''})`)};`, ctx);
-      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ''})`)};`, ctx);
+      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg})`)};`, ctx);
+      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg})`)};`, ctx);
     }
     return;
   }
   if (tag === 'button') {
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
     const typeAttr = node.attrs.find((a) => a.name === 'type');
+    const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+    const enableExpr = disabledAttr ? `!(${disabledAttr.value.kind === 'expr' ? cppExpr(disabledAttr.value.code, ctx) : 'true'})` : 'true';
     // A submit button inside a form runs the form's handler: the desktop has no
     // form element to carry it.
     if (!click && typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text === 'submit' && (ctx.formSubmit || ctx.pageAction)) {
       const submitLabel = cppText(node.children, ctx) || 'std::string()';
       const run = ctx.formSubmit ? `${ctx.formSubmit}(app)` : `${ctx.pageAction}(app)`;
-      emit(`rose_button(${ctx.parent}, ${submitLabel}, [&app = ${ctx.app}]() { ${run}; app.render(); }${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
+      emit(`rose_button(${ctx.parent}, ${submitLabel}, [&app = ${ctx.app}]() { ${run}; app.render(); }${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr});`, ctx);
       return;
     }
     let body = '';
@@ -2967,13 +3008,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
     // applies, here because a button returns before it - the widget is named so
     // the filters attach. One naming serves all three.
     if (hoverKey || focusKey || activeKey) {
-      emit(`auto* __b${++ctx.counter.n} = rose_button(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { ${body} }${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
+      emit(`auto* __b${++ctx.counter.n} = rose_button(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { ${body} }${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr});`, ctx);
       const base = isEmptyModel(model) ? 'RoseStyle{}' : cppStyleLiteral(model);
       if (hoverKey) emit(`rose_hover(__b${ctx.counter.n}, ${base}, rose_style_of("${hoverKey}") ? *rose_style_of("${hoverKey}") : RoseStyle{});`, ctx);
       if (focusKey) emit(`rose_focus(__b${ctx.counter.n}, ${base}, rose_style_of("${focusKey}") ? *rose_style_of("${focusKey}") : RoseStyle{});`, ctx);
       if (activeKey) emit(`rose_active(__b${ctx.counter.n}, ${base}, rose_style_of("${activeKey}") ? *rose_style_of("${activeKey}") : RoseStyle{});`, ctx);
     } else {
-      emit(`rose_button(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { ${body} }${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
+      emit(`rose_button(${ctx.parent}, ${label}, [&app = ${ctx.app}]() { ${body} }${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr});`, ctx);
     }
     return;
   }

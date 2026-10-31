@@ -1501,6 +1501,117 @@ try {
     assert(!(okA.warnings ?? []).some((w: string) => /no faithful spelling/.test(w)), 'arkts: Math/toFixed are TypeScript, so no warning fires');
   }
 
+  // input type= carries through on the mobile targets: password masks, and a
+  // numeric field opens the number keyboard (uniapp parity for login forms).
+  {
+    const ip = join(scratch, 'input-proj');
+    mkdirSync(join(ip, 'src/pages'), { recursive: true });
+    writeFileSync(join(ip, 'src/pages/index.rose'), `<script>
+  let pw = $state('');
+  let qty = $state('');
+  let busy = $state(false);
+  let vol = $state(10);
+  export async function save(form: FormData): Promise<void> { pw = String(form.get('pw') || ''); }
+</script>
+<form method="POST"><input type="password" name="pw" bind:value={pw}><input type="number" name="qty" bind:value={qty}><input type="text" name="ro" disabled maxlength="12"><input type="range" min="0" max="100" bind:value={vol}><button type="submit" disabled={busy}>go</button></form>`);
+    const ipA = await exportProject('android', ip, { apiBase: 'x', outRoot: join(scratch, 'input-android') });
+    const ipASrc = readFileSync(join(ipA.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(ipASrc.includes('KeyboardType.Password') && ipASrc.includes('PasswordVisualTransformation()') && ipASrc.includes('KeyboardType.Number'), 'android: password masks and number opens the number keyboard');
+    assert(ipASrc.includes('enabled = !(busy)') && ipASrc.includes('enabled = !(true)'), 'android: disabled greys the button and the field');
+    assert(ipASrc.includes('.take(12)'), 'android: maxlength truncates in the write path');
+    const ipF = await exportProject('flutter', ip, { apiBase: 'x', outRoot: join(scratch, 'input-flutter') });
+    const ipFSrc = readFileSync(join(ipF.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(ipFSrc.includes("obscure: true") && ipFSrc.includes("keyboard: 'number'"), 'flutter: password masks and number opens the number keyboard');
+    assert(ipFSrc.includes('(busy) ? null :') && ipFSrc.includes('enabled: false'), 'flutter: disabled nulls onPressed and greys the field');
+    assert(ipFSrc.includes('maxLength: 12'), 'flutter: maxlength reaches the field');
+    const ipX = await exportProject('xcode', ip, { apiBase: 'x', outRoot: join(scratch, 'input-xcode') });
+    const ipXSrc = readFileSync(join(ipX.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(ipXSrc.includes('SecureField(') && ipXSrc.includes('.keyboardType(.numberPad)'), 'xcode: password becomes a SecureField and number opens the number pad');
+    assert(ipXSrc.includes('.disabled(busy)') && ipXSrc.includes('.disabled(true)'), 'xcode: disabled rides the SwiftUI modifier');
+    assert(ipXSrc.includes('prefix(12)'), 'xcode: maxlength truncates in the binding setter');
+    const ipK = await exportProject('arkts', ip, { apiBase: 'x', outRoot: join(scratch, 'input-arkts') });
+    const ipKSrc = readFileSync(join(ipK.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(ipKSrc.includes('.type(InputType.Password)') && ipKSrc.includes('.type(InputType.Number)'), 'arkts: password masks and number opens the number keyboard');
+    assert(ipKSrc.includes('.enabled(!(this.busy))') && ipKSrc.includes('.enabled(!(true))'), 'arkts: disabled greys the button and the field');
+    assert(ipKSrc.includes('.maxLength(12)'), 'arkts: maxlength is a native modifier');
+    const ipP = await exportProject('python', ip, { apiBase: 'x', outRoot: join(scratch, 'input-python') });
+    const ipPSrc = readFileSync(join(ipP.outDir, 'pages', 'index.py'), 'utf8');
+    assert(ipPSrc.includes('disabled=True') && ipPSrc.includes("disabled=st.get('busy')"), 'python: disabled greys the field and the button');
+    const ipJ = await exportProject('java', ip, { apiBase: 'x', outRoot: join(scratch, 'input-java') });
+    const ipJSrc = readFileSync(join(ipJ.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(ipJSrc.includes('"ro", true') && ipJSrc.includes('RoseTheme.bool(app.v("busy"))'), 'java: disabled greys the field and the button');
+    const ipN = await exportProject('dotnet', ip, { apiBase: 'x', outRoot: join(scratch, 'input-dotnet') });
+    const ipNSrc = readFileSync(join(ipN.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(ipNSrc.includes('enabled: true') && ipNSrc.includes('enabled: RoseTheme.Bool(app.V("busy"))'), 'dotnet: disabled greys the field and the button');
+    const ipC = await exportProject('cpp', ip, { apiBase: 'x', outRoot: join(scratch, 'input-cpp') });
+    const ipCSrc = readFileSync(join(ipC.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
+    assert(ipCSrc.includes('!(true)') && ipCSrc.includes('!(app.v("busy"))'), 'cpp: disabled greys the field and the button');
+    assert(ipPSrc.includes('maxlength=12'), 'python: maxlength rides the key validator');
+    assert(ipJSrc.includes('"ro", true, 12)'), 'java: maxlength is a DocumentFilter');
+    assert(ipNSrc.includes('maxLength: 12'), 'dotnet: maxlength is the TextBox property');
+    assert(ipCSrc.includes('!(true), 12)'), 'cpp: maxlength is setMaxLength');
+    assert(ipPSrc.includes("show='*'"), 'python: a password field masks its input');
+    assert(ipJSrc.includes('RoseTheme.passwordField('), 'java: a password field masks its input');
+    assert(ipNSrc.includes('RoseTheme.Password(') && ipNSrc.includes('"pw"'), 'dotnet: password becomes a PasswordBox bound to the state');
+    assert(ipCSrc.includes(', true, 0, true)'), 'cpp: a password field sets the echo mode');
+    assert(ipNSrc.includes('RoseTheme.Slider(panel1, app, "vol", 0, 100)'), 'dotnet: a range is a WPF Slider');
+    assert(ipCSrc.includes('rose_slider(panel1, app, "vol", 0, 100)'), 'cpp: a range is a QSlider');
+  }
+
+  // External links are handed to the system browser on every mobile target; an
+  // internal href keeps the router. A static https href used to push a route
+  // that does not exist - a dead tap on privacy/docs links.
+  {
+    const ep = join(scratch, 'ext-link-proj');
+    mkdirSync(join(ep, 'src/pages'), { recursive: true });
+    writeFileSync(join(ep, 'src/pages/index.rose'), '<div><a href="https://example.com/privacy">Privacy</a><a href="/about">About</a><a href="tel:10086">Call</a></div>\n');
+    const ex = await exportProject('xcode', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-xcode') });
+    const exS = readFileSync(join(ex.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(exS.includes('Link(destination: URL(string: "https://example.com/privacy")!)'), 'xcode: an external link opens in Safari via Link');
+    assert(exS.includes('Link(destination: URL(string: "tel:10086")!)'), 'xcode: a tel: link reaches the phone app');
+    assert(exS.includes('onNavigate("/about")'), 'xcode: an internal link still routes');
+    const ea = await exportProject('android', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-android') });
+    const eaS = readFileSync(join(ea.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(eaS.includes('openUri("https://example.com/privacy")'), 'android: an external link opens through LocalUriHandler');
+    assert(eaS.includes('openUri("tel:10086")'), 'android: a tel: link reaches the dialer');
+    assert(eaS.includes('onNavigate("/about"'), 'android: an internal link still routes');
+    const ef = await exportProject('flutter', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-flutter') });
+    const efS = readFileSync(join(ef.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    const efP = readFileSync(join(ef.outDir, 'pubspec.yaml'), 'utf8');
+    assert(efS.includes('roseOpenUrl("https://example.com/privacy")') && efP.includes('url_launcher'), 'flutter: an external link opens in the browser (url_launcher rides pubspec)');
+    assert(efS.includes('pushNamed(context, "/about"'), 'flutter: an internal link still routes');
+    const ek = await exportProject('arkts', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-arkts') });
+    const ekS = readFileSync(join(ek.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(ekS.includes("startAbility({ action: 'ohos.want.action.viewData'"), 'arkts: an external link opens through a viewData want');
+    assert(ekS.includes('router.pushUrl({ url: "/about"'), 'arkts: an internal link still routes');
+    const epy = await exportProject('python', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-python') });
+    const epyS = readFileSync(join(epy.outDir, 'pages', 'index.py'), 'utf8');
+    assert(epyS.includes(`__import__('webbrowser').open("https://example.com/privacy")`), 'python: an external link opens in the browser');
+    const ej = await exportProject('java', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-java') });
+    const ejS = readFileSync(join(ej.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
+    assert(ejS.includes('java.awt.Desktop.getDesktop().browse(new java.net.URI("https://example.com/privacy"))'), 'java: an external link opens in the desktop browser');
+    const en = await exportProject('dotnet', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-dotnet') });
+    const enS = readFileSync(join(en.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(enS.includes('ProcessStartInfo("https://example.com/privacy") { UseShellExecute = true }'), 'dotnet: an external link opens through the shell');
+    const ec = await exportProject('cpp', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-cpp') });
+    const ecS = readFileSync(join(ec.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
+    const ecKit = readFileSync(join(ec.outDir, 'src', 'rose.cpp'), 'utf8');
+    assert(ecS.includes('QDesktopServices::openUrl(QUrl("https://example.com/privacy"))'), 'cpp: an external link opens through Qt');
+    assert(ecKit.includes('#include <QDesktopServices>'), 'cpp: the header carries the include the link needs');
+    const ew = await exportProject('weapp', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-weapp') });
+    const ewTpl = readFileSync(join(ew.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    const ewApp = JSON.parse(readFileSync(join(ew.outDir, 'app.json'), 'utf8'));
+    const ewPage = readFileSync(join(ew.outDir, 'pages', '_external', '_external.wxml'), 'utf8');
+    assert(ewTpl.includes('url="/pages/_external/_external?url=https%3A%2F%2Fexample.com%2Fprivacy"'), 'weapp: an external link routes to the web-view page with the URL encoded');
+    assert(ewApp.pages.includes('pages/_external/_external') && ewPage.includes('<web-view src="{{url}}">'), 'weapp: the web-view page is shipped and registered');
+    assert((ew.warnings ?? []).some((w: string) => /web-view/.test(w)), 'weapp: the domain whitelist the web-view needs is warned about');
+    assert((ew.warnings ?? []).some((w: string) => /tel:10086/.test(w)) && !ewTpl.includes('url="tel:10086"'), 'weapp: a tel: anchor is warned and its dead href dropped');
+    const eal = await exportProject('alipay', ep, { apiBase: 'x', outRoot: join(scratch, 'ext-alipay') });
+    const ealTpl = readFileSync(join(eal.outDir, 'pages', 'index', 'index.axml'), 'utf8');
+    assert(ealTpl.includes('_external/_external?url=') && existsSync(join(eal.outDir, 'pages', '_external', '_external.axml')), 'alipay: an external link uses the same web-view page');
+    assert(!existsSync(join(result.outDir, 'pages', '_external', '_external.wxml')), 'weapp: a project without external links ships no web-view page');
+  }
+
   // 11. the desktop JVM family: Java Swing, stdlib only.
   const java = await exportProject('java', example, { apiBase: 'https://api.example.com', outRoot: scratch });
   const jdir = java.outDir;
@@ -5825,6 +5936,7 @@ h2 { font-size: 40px; }
       // electron claiming zero pages while the project had two.
       const manifest = JSON.parse(readFileSync(join(k.outDir, 'rosezm-export.json'), 'utf8'));
       assert((manifest.pages ?? []).length > 0, `${target}: the export manifest reports the pages it actually emitted`);
+      assert(typeof manifest.warnings === 'number', `${target}: the manifest carries the warning count, so CI can gate on it`);
     }
   }
 

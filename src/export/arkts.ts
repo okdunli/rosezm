@@ -1646,7 +1646,7 @@ import { ${kitNames} } from '../kit/RoseKit';
 import { roseModifier } from '../kit/RoseStyles';
 ${KIT_IMPORT_SLOT}
 import { preferences } from '@kit.ArkData';
-import { getContext } from '@kit.AbilityKit';
+import { common, getContext } from '@kit.AbilityKit';
 import { Progress, Video } from '@kit.ArkUI';
 ${fontMap.size ? "import { font } from '@kit.ArkUI';" : ''}${imports}
 
@@ -2090,6 +2090,13 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const target = href ? attrOf(href, ctx) : "''";
     const label = templateOf(node.children, ctx);
     const color = model.color ? '' : ".fontColor('#e91e63')";
+    // An external link is a URL the app cannot route: the ability hands it to
+    // the system browser (or mail app) through a viewData want.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    if (/^(https?:\/\/|mailto:|tel:)/i.test(hrefText)) {
+      emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${color}.onClick(() => { const __ctx = getContext(this) as common.UIAbilityContext; __ctx.startAbility({ action: 'ohos.want.action.viewData', uri: ${JSON.stringify(hrefText)} }); })`), ctx);
+      return;
+    }
     emit(box(`Text(${label || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${color}.onClick(() => { router.pushUrl({ url: ${target} }); })`), ctx);
     return;
   }
@@ -2156,7 +2163,22 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
         ? `.onChange((value: string) => { this.${bound} = value; })`
         : '.onChange((value: string) => {})');
     if (tag === 'textarea') emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : '.height(96)'}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
-    else emit(box(`TextInput({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+    else {
+      // The element's type= carries through: a password field masks, and a
+      // number/email/tel field opens the keyboard that fits it.
+      const inputType = type === 'password' ? '.type(InputType.Password)'
+        : type === 'number' ? '.type(InputType.Number)'
+        : type === 'email' ? '.type(InputType.Email)'
+        : type === 'tel' ? '.type(InputType.PhoneNumber)'
+        : '';
+      const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+      const disabledMod = disabledInput
+        ? `.enabled(!(${disabledInput.value.kind === 'expr' ? etsExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'}))`
+        : '';
+      const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+      const maxMod = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? `.maxLength(${maxAttr.value.text.trim()})` : '';
+      emit(box(`TextInput({ placeholder: ${hint} })${inputType}${disabledMod}${maxMod}${onChange}${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+    }
     return;
   }
   if (tag === 'button') {
@@ -2164,8 +2186,14 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     let handler = click && click.value.kind === 'expr' ? handlerRef(click.value.code.trim(), ctx) : '() => {}';
     // A submit button in a form with no handler posts to the page's action.
     if (!click && isSubmitButton(node) && ctx.pageAction) handler = `() => { this.${ctx.pageAction}(); }`;
+    // disabled - static or bound - greys the button and stops the tap.
+    const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+    const disabled = disabledAttr
+      ? (disabledAttr.value.kind === 'expr' ? etsExpr(disabledAttr.value.code, ctx) : disabledAttr.value.kind === 'text' ? disabledAttr.value.text : 'true')
+      : '';
+    const enabledMod = disabled ? `.enabled(!(${disabled}))` : '';
     const label = templateOf(node.children, ctx);
-    emit(box(`Button(${label || "'Button'"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}.onClick(${handler})`), ctx);
+    emit(box(`Button(${label || "'Button'"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}${enabledMod}.onClick(${handler})`), ctx);
     return;
   }
   if (tag === 'select') {

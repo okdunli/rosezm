@@ -181,6 +181,10 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   tagStyles = new Map<string, StyleModel>();
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
+  // An <a href="https://..."> needs the url_launcher plugin and the kit's
+  // roseOpenUrl - only for a project that writes one (byte-identical otherwise).
+  const rawSources = await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8')));
+  const hasExternalLinks = rawSources.some((t) => /href\s*=\s*["'](?:https?:\/\/|mailto:|tel:)/i.test(t));
 
   const layers = new Map<string, { nodes: IrNode[]; script: string | null; style: string | null }>();
   for (const f of pageFiles) {
@@ -272,9 +276,11 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
 
   assetMap = await copyDartAssets(root, path.join(out, 'assets', 'images'), warnings);
   await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route)), 'utf8');
+  const nativeDeps = nativeDependencies('flutter', native);
+  if (hasExternalLinks && !nativeDeps.includes('url_launcher')) nativeDeps.push('url_launcher');
+  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route), hasExternalLinks), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDependencies('flutter', native), app), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDeps, app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme, app), 'utf8');
 
   for (const comp of components) {
@@ -862,7 +868,7 @@ Text roseText(String text, RoseStyle? s, {TextStyle? base}) {
 /// cascade an input inherits on the web. The decoration carries the background,
 /// border and radius; the style carries the typed text colour and font.
 Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChanged,
-    {int? lines, TextEditingController? controller}) {
+    {int? lines, TextEditingController? controller, String keyboard = 'text', bool obscure = false, bool enabled = true, int? maxLength}) {
   final deco = s?.decoration;
   final cons = s?.constraints;
   final pad = s?.padding;
@@ -875,9 +881,23 @@ Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChange
     child: TextField(
       controller: controller,
       maxLines: lines ?? 1,
+      enabled: enabled,
+      maxLength: maxLength,
       onChanged: onChanged,
+      // The element's type= carries through: a password field masks, and a
+      // number/email/tel field opens the keyboard that fits it.
+      obscureText: obscure,
+      keyboardType: keyboard == 'number'
+          ? TextInputType.number
+          : keyboard == 'email'
+              ? TextInputType.emailAddress
+              : keyboard == 'tel'
+                  ? TextInputType.phone
+                  : TextInputType.text,
       decoration: InputDecoration(
         hintText: hint,
+        // A limit must not add Flutter's character counter under the field.
+        counterText: maxLength == null ? null : '',
         filled: deco != null && deco.color != null,
         fillColor: deco?.color,
         border: border,
@@ -952,7 +972,7 @@ CrossAxisAlignment? _roseCross(String? a) {
 `;
 }
 
-function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = []): string {
+function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = [], externalLinks = false): string {
   const q = JSON.stringify(apiBase);
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
@@ -1134,8 +1154,14 @@ ${native.includes('camera') ? `      case 'camera':
 
   return `import 'dart:convert';
 import 'dart:io';
-${native.length ? "import 'package:flutter/material.dart';\n" : ''}${nativeImports}
-${contentBlock}
+${native.length ? "import 'package:flutter/material.dart';\n" : ''}${externalLinks ? "import 'package:url_launcher/url_launcher.dart';\n" : ''}${nativeImports}
+${externalLinks ? `/// An <a href="https://..."> in a page: the system browser (or mail app),
+/// never a push of a route this app does not carry.
+Future<void> roseOpenUrl(String url) async {
+  final uri = Uri.tryParse(url);
+  if (uri != null) await launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+` : ''}${contentBlock}
 
 /// Trusted markup renders as markup: the inline HTML subset a content page
 /// uses becomes a Text.rich span tree, never escaped text.
@@ -2494,7 +2520,13 @@ function emitElementStyled(
     // area and the text half paints the label, so an `a {}`/`nav a {}` rule or a
     // class on the link actually shows instead of a bare InkWell.
     const linkChild = styleExpr ? `roseText(${JSON.stringify(label || '')}, ${styleExpr})` : `Text(${JSON.stringify(label || '')})`;
-    const link = `InkWell(onTap: () => Navigator.pushNamed(context, ${target}.toString()), child: ${linkChild})`;
+    // An external link is a URL the app cannot route: the kit hands it to the
+    // system browser / mail app instead of pushing a route that does not exist.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    const external = /^(https?:\/\/|mailto:|tel:)/i.test(hrefText);
+    const link = external
+      ? `InkWell(onTap: () => roseOpenUrl(${JSON.stringify(hrefText)}), child: ${linkChild})`
+      : `InkWell(onTap: () => Navigator.pushNamed(context, ${target}.toString()), child: ${linkChild})`;
     return styleExpr ? `roseBox(${styleExpr}, ${link})` : link;
   }
   if (tag === 'input' || tag === 'textarea') {
@@ -2557,7 +2589,14 @@ function emitElementStyled(
       const current = state ? state : num(valueAttr, min);
       return `roseSlider(${styleExpr ?? 'null'}, ${current}, ${min}, ${max}, ${set})`;
     }
-    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines})`;
+    const keyboard = type === 'number' || type === 'tel' || type === 'email' ? type : 'text';
+    const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+    const inputEnabled = disabledInput
+      ? (disabledInput.value.kind === 'expr' ? `!(${dartExpr(disabledInput.value.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames)})` : disabledInput.value.kind === 'text' ? `!(${disabledInput.value.text})` : 'false')
+      : 'true';
+    const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+    const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines}, keyboard: '${keyboard}', obscure: ${type === 'password'}, enabled: ${inputEnabled}${maxLen ? `, maxLength: ${maxLen}` : ''})`;
     // R257: the input IS the widget :focus was written for, and this branch
     // returns before the generic tail - so the Focus gate wraps it here (the
     // button-branch lesson, applied where the caret actually lands).
@@ -2584,7 +2623,13 @@ function emitElementStyled(
     // A styled button keeps its class: the box half wraps the control and the
     // text half styles its label.
     const btnChild = styleExpr ? `roseText(${JSON.stringify(label || 'Button')}, ${styleExpr})` : `Text(${JSON.stringify(label || 'Button')})`;
-    const btn = `ElevatedButton(onPressed: ${handler}, child: ${btnChild})`;
+    // disabled - static or bound - makes onPressed null, Flutter's disabled state.
+    const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+    const disabled = disabledAttr
+      ? (disabledAttr.value.kind === 'expr' ? dartExpr(disabledAttr.value.code, ctx.stateNames, ctx.mapBinds, ctx.dataNames) : disabledAttr.value.kind === 'text' ? disabledAttr.value.text : 'true')
+      : '';
+    const pressed = disabled ? `(${disabled}) ? null : ${handler}` : handler;
+    const btn = `ElevatedButton(onPressed: ${pressed}, child: ${btnChild})`;
     let boxed = styleExpr ? `roseBox(${styleExpr}, ${btn})` : btn;
     if (style.focusKey) boxed = `Focus(onFocusChange: (v) => __setFocus('${style.focusKey}', v), child: ${boxed})`;
     if (style.hoverKey) boxed = `MouseRegion(onEnter: (e) => __setHover('${style.hoverKey}', true), onExit: (e) => __setHover('${style.hoverKey}', false), child: ${boxed})`;

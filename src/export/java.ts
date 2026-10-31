@@ -1347,12 +1347,24 @@ ${rows || '        // no style rules'}
         return button;
     }
 
+    public static JButton button(JPanel parent, String text, ActionListener onClick, boolean enabled) {
+        JButton button = button(parent, text, onClick);
+        button.setEnabled(enabled);
+        return button;
+    }
+
     /** R199: the styled overloads. A button or link the stylesheet names keeps
      *  its type, colour, background, border and padding instead of the
      *  look-and-feel defaults. */
     public static JButton button(JPanel parent, String text, Style style, ActionListener onClick) {
         JButton button = button(parent, text, onClick);
         if (style != null) applyButton(button, style);
+        return button;
+    }
+
+    public static JButton button(JPanel parent, String text, Style style, ActionListener onClick, boolean enabled) {
+        JButton button = button(parent, text, style, onClick);
+        button.setEnabled(enabled);
         return button;
     }
 
@@ -1435,6 +1447,38 @@ ${rows || '        // no style rules'}
         });
         parent.add(field);
         return field;
+    }
+
+    public static JTextField textField(JPanel parent, String placeholder, RoseApp app, String stateKey, boolean enabled) {
+        JTextField field = textField(parent, placeholder, app, stateKey);
+        field.setEnabled(enabled);
+        return field;
+    }
+
+    public static JTextField textField(JPanel parent, String placeholder, RoseApp app, String stateKey, boolean enabled, int maxLength) {
+        JTextField field = textField(parent, placeholder, app, stateKey, enabled);
+        limitLength(field, maxLength);
+        return field;
+    }
+
+    public static JTextField passwordField(JPanel parent, String placeholder, RoseApp app, String stateKey, boolean enabled, int maxLength) {
+        JTextField field = textField(parent, placeholder, app, stateKey, enabled, maxLength);
+        field.setEchoChar('*');
+        return field;
+    }
+
+    /** JS maxlength on a Swing field: a DocumentFilter refuses input past the cap. */
+    public static void limitLength(JTextField field, final int max) {
+        if (!(field.getDocument() instanceof javax.swing.text.AbstractDocument)) return;
+        ((javax.swing.text.AbstractDocument) field.getDocument()).setDocumentFilter(new javax.swing.text.DocumentFilter() {
+            @Override
+            public void replace(FilterBypass fb, int offset, int length, String text, javax.swing.text.AttributeSet attrs) throws javax.swing.text.BadLocationException {
+                String next = text == null ? "" : text;
+                int room = max - (fb.getDocument().getLength() - length);
+                if (next.length() > room) next = next.substring(0, Math.max(0, room));
+                super.replace(fb, offset, length, next, attrs);
+            }
+        });
     }
 
     /** R229: a multi-line text area - a <textarea> is not a one-line field. */
@@ -3059,7 +3103,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     const target = href ? javaAttr(href, ctx) : '""';
     const label = javaText(node.children, ctx) || '""';
     const targetExpr = target.startsWith('"') ? target : `RoseTheme.text(${target})`;
-    const linkExpr = `RoseTheme.link(${ctx.parent}, ${javaCase(label, styled.model.textTransform)}${styleArg}, event -> ${ctx.app}.navigate(${targetExpr}))`;
+    // An external link is a URL the app cannot route: the desktop browser opens it.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    const external = /^(https?:\/\/|mailto:|tel:)/i.test(hrefText);
+    const handler = external
+      ? `event -> { try { java.awt.Desktop.getDesktop().browse(new java.net.URI(${JSON.stringify(hrefText)})); } catch (Exception ignored) { } }`
+      : `event -> ${ctx.app}.navigate(${targetExpr})`;
+    const linkExpr = `RoseTheme.link(${ctx.parent}, ${javaCase(label, styled.model.textTransform)}${styleArg}, ${handler})`;
     if (styleBinding.hasDynamic) named('JButton', linkExpr);
     else emit(`${linkExpr};`, ctx);
     return;
@@ -3069,6 +3119,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     const hint = placeholder ? javaAttr(placeholder, ctx) : '""';
     const typeAttr = node.attrs.find((a) => a.name === 'type');
     const type = typeAttr && typeAttr.value.kind === 'text' ? typeAttr.value.text : 'text';
+    const isPassword = type.trim().toLowerCase() === 'password';
+    const fieldFn = isPassword ? 'passwordField' : 'textField';
     const bindChecked = node.attrs.find((a) => a.name === 'bind:checked');
     const bindGroup = node.attrs.find((a) => a.name === 'bind:group');
     const bindValue = node.attrs.find((a) => a.name === 'bind:value');
@@ -3123,6 +3175,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     const activeWrap = (expr: string): string => (styled.activeKey && styleBinding.staticClasses.length)
       ? `RoseTheme.active(${expr}, "${ctx.file}", "${styleBinding.staticClasses[0]}__${ctx.file}", "${styled.activeKey}");`
       : `${expr};`;
+    const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+    const inputEnable = disabledInput ? (disabledInput.value.kind === 'expr' ? javaExpr(disabledInput.value.code, ctx) : 'true') : '';
+    const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+    const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
     // R229: a textarea is a multi-line text area, not a one-line field - the
     // block element was silently rendered as an input and its content clipped.
     if (tag === 'textarea') {
@@ -3136,6 +3192,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       ctx.depth++;
       emit(`JTextField field = new JTextField(String.valueOf(${propName}), 20);`, ctx);
       emit(`field.putClientProperty("JTextField.placeholderText", ${hint});`, ctx);
+      if (inputEnable) emit(`field.setEnabled(${inputEnable});`, ctx);
+      if (inputMax) emit(`RoseTheme.limitLength(field, ${inputMax});`, ctx);
+      if (isPassword) emit(`field.setEchoChar('*');`, ctx);
       emit(`field.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {`, ctx);
       ctx.depth++;
       emit(`public void insertUpdate(javax.swing.event.DocumentEvent e) { ${handler}.accept(field.getText()); }`, ctx);
@@ -3151,25 +3210,34 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       emit(`${ctx.parent}.add(field);`, ctx);
       ctx.depth--;
       emit(`}`, ctx);
-    } else if (boundName) emit(activeWrap(focusWrap(`RoseTheme.textField(${ctx.parent}, ${hint}, ${ctx.app}, "${boundName}")`)), ctx);
+    } else if (boundName) emit(activeWrap(focusWrap(`RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${boundName}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`)), ctx);
     else {
       const nameAttr = node.attrs.find((a) => a.name === 'name');
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const key = field ? formFieldKey(ctx.forms, field) : null;
-      if (key) emit(activeWrap(focusWrap(`RoseTheme.textField(${ctx.parent}, ${hint}, ${ctx.app}, "${key}")`)), ctx);
-      else emit(`${ctx.parent}.add(new JTextField(${hint}, 20));`, ctx);
+      if (key) emit(activeWrap(focusWrap(`RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`)), ctx);
+      else if (inputEnable || inputMax) {
+        const local = `__f${++ctx.counter.n}`;
+        emit(`JTextField ${local} = new JTextField(${hint}, 20);`, ctx);
+        if (inputEnable) emit(`${local}.setEnabled(${inputEnable});`, ctx);
+        if (inputMax) emit(`RoseTheme.limitLength(${local}, ${inputMax});`, ctx);
+        if (isPassword) emit(`${local}.setEchoChar('*');`, ctx);
+        emit(`${ctx.parent}.add(${local});`, ctx);
+      } else emit(`${ctx.parent}.add(new JTextField(${hint}, 20));`, ctx);
     }
     return;
   }
   if (tag === 'button') {
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
     const typeAttr = node.attrs.find((a) => a.name === 'type');
+    const disabledBtn = node.attrs.find((a) => a.name === 'disabled');
+    const btnEnable = disabledBtn ? (disabledBtn.value.kind === 'expr' ? javaExpr(disabledBtn.value.code, ctx) : 'true') : '';
     // A submit button inside a form runs the form's handler: the desktop has no
     // form element to carry it.
     if (!click && typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text === 'submit' && (ctx.formSubmit || ctx.pageAction)) {
       const submitLabel = javaCase(javaText(node.children, ctx) || '""', styled.model.textTransform);
       const run = ctx.formSubmit ? `${ctx.formSubmit}(${ctx.app})` : `${ctx.pageAction}(${ctx.app})`;
-      const submitExpr = `RoseTheme.button(${ctx.parent}, ${submitLabel}${styleArg}, event -> { ${run}; ${ctx.app}.render(); })`;
+      const submitExpr = `RoseTheme.button(${ctx.parent}, ${submitLabel}${styleArg}, event -> { ${run}; ${ctx.app}.render(); }${btnEnable ? `, ${btnEnable}` : ''})`;
       if (styleBinding.hasDynamic) named('JButton', submitExpr);
       else emit(`${submitExpr};`, ctx);
       return;
@@ -3190,7 +3258,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       }
     }
     const label = javaCase(javaText(node.children, ctx) || '""', styled.model.textTransform);
-    const buttonExpr = `RoseTheme.button(${ctx.parent}, ${label}${styleArg}, event -> { ${body} })`;
+    const buttonExpr = `RoseTheme.button(${ctx.parent}, ${label}${styleArg}, event -> { ${body} }${btnEnable ? `, ${btnEnable}` : ''})`;
     // R250/R255/R265: the hover, focus and active halves the container tail
     // applies, here because a button returns before it. Naming the widget lets
     // the adapters attach directly, whatever path built it.

@@ -2727,6 +2727,13 @@ function emitElementStyled(
     const href = node.attrs.find((a) => a.name === 'href');
     const target = href ? attrOf(href, ctx) : '""';
     const label = textOf(node.children, ctx) || '""';
+    // An external link is a URL the app cannot route: SwiftUI's Link hands it
+    // to Safari (or Mail), instead of pushing a route that does not exist.
+    const hrefText = href && href.value.kind === 'text' ? href.value.text.trim() : '';
+    if (/^(https?:\/\/|mailto:|tel:)/i.test(hrefText)) {
+      emitTextRun(`Link(destination: URL(string: ${JSON.stringify(hrefText)})!) { Text(${label})${textMods.join('')} }${boxMods.join('')}`, inlineConsts(node.children), ctx);
+      return;
+    }
     // A styled link keeps its colour/padding: the box half wraps the button and
     // the text half styles the label, so an `a {}`/`nav a {}` rule or a class on
     // the link actually shows instead of a hard-coded brand colour.
@@ -2764,10 +2771,27 @@ function emitElementStyled(
     const fieldMods = [...textMods, ...boxMods].join('');
     const boundName = bindValue && bindValue.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(bindValue.value.code.trim()) ? bindValue.value.code.trim() : '';
     const propName = ctx.componentProps.has(boundName) ? boundName : '';
+    // The element's type= carries through: a password field is a SecureField
+    // (masked), and number/email/tel open the keyboard that fits them.
+    const fieldKind = type === 'password' ? 'SecureField' : 'TextField';
+    const keyMod = type === 'number' ? '.keyboardType(.numberPad)'
+      : type === 'email' ? '.keyboardType(.emailAddress)'
+      : type === 'tel' ? '.keyboardType(.phonePad)'
+      : '';
+    // disabled - static or bound - greys the field on every path below.
+    const disabledInput = node.attrs.find((a) => a.name === 'disabled');
+    const disabledMod = disabledInput
+      ? `.disabled(${disabledInput.value.kind === 'expr' ? swiftExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'})`
+      : '';
+    // maxlength truncates in the binding's setter - SwiftUI has no limit
+    // parameter. Only a literal count is supported.
+    const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
+    const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    const clamp = (expr: string): string => (maxLen ? `String(${expr}.prefix(${maxLen}))` : expr);
     if (propName) {
-      emit(`TextField(${hint}, text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(v) }))${fieldMods}`, ctx);
+      emit(`${fieldKind}(${hint}, text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}`, ctx);
     } else if (boundName) {
-      emit(`TextField(${hint}, text: Binding(get: { ${boundName} }, set: { ${boundName} = $0 }))${fieldMods}`, ctx);
+      emit(`${fieldKind}(${hint}, text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}`, ctx);
     } else {
       // A named input inside a submitting form binds to its name, like the
       // desktop channel: the handler reads the same state key.
@@ -2775,14 +2799,14 @@ function emitElementStyled(
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const formKey = field ? formFieldKey(ctx.forms, field) : null;
       if (formKey) {
-        emit(`TextField(${hint}, text: Binding(get: { ${formKey} }, set: { ${formKey} = $0 }))${fieldMods}`, ctx);
+        emit(`${fieldKind}(${hint}, text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}`, ctx);
         return;
       }
       const valueProp = valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '';
       if (valueProp) {
-        emit(`TextField(${hint}, text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(v) }))${fieldMods}`, ctx);
+        emit(`${fieldKind}(${hint}, text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}`, ctx);
       } else {
-        emit(`TextField(${hint}, text: .constant(""))${fieldMods}`, ctx);
+        emit(`${fieldKind}(${hint}, text: .constant(""))${keyMod}${fieldMods}${disabledMod}`, ctx);
       }
     }
     return;
@@ -2793,9 +2817,14 @@ function emitElementStyled(
     // A submit button in a form with no handler posts to the page's action.
     if (!click && isSubmitButton(node) && ctx.pageAction) action = `${ctx.pageAction}()`;
     const label = textOf(node.children, ctx) || '""';
+    // disabled - static or bound - greys the control and stops the action.
+    const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
+    const disabledMod = disabledAttr
+      ? `.disabled(${disabledAttr.value.kind === 'expr' ? swiftExpr(disabledAttr.value.code, ctx) : disabledAttr.value.kind === 'text' ? disabledAttr.value.text : 'true'})`
+      : '';
     // A styled button keeps its class, exactly like the other targets: the box
     // half dresses the control and the text half styles its label.
-    emitTextRun(`Button(action: { ${action} }) { Text(${label})${textMods.join('')} }${boxMods.join('')}`, inlineConsts(node.children), ctx);
+    emitTextRun(`Button(action: { ${action} }) { Text(${label})${textMods.join('')} }${boxMods.join('')}${disabledMod}`, inlineConsts(node.children), ctx);
     return;
   }
   if (tag === 'select') {
