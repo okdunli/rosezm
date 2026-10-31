@@ -1055,6 +1055,20 @@ function nativeKit(native: NativeCapability[]): string {
         let charging = UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
         return ["level": level, "charging": charging]
     }` : '',
+    native.includes('get-network-type') ? `    if capability == "get-network-type" {
+        // R426: SCNetworkReachability answers synchronously - the one sync
+        // network API iOS ships. A phone on a network reports wifi, matching
+        // the other targets (desktop cannot tell wifi from ethernet either).
+        var zero = sockaddr()
+        zero.sa_len = UInt8(MemoryLayout<sockaddr>.size)
+        zero.sa_family = sa_family_t(AF_INET)
+        guard let reach = SCNetworkReachabilityCreateWithAddress(nil, &zero) else { return ["type": "none"] }
+        var flags = SCNetworkReachabilityFlags()
+        if SCNetworkReachabilityGetFlags(reach, &flags), flags.contains(.reachable), !flags.contains(.connectionRequired) {
+            return ["type": "wifi"]
+        }
+        return ["type": "none"]
+    }` : '',
     native.includes('get-system-info') ? `    if capability == "get-system-info" {
         return ["platform": "ios", "system": UIDevice.current.systemName + " " + UIDevice.current.systemVersion]
     }` : '',
@@ -1069,7 +1083,7 @@ function nativeKit(native: NativeCapability[]): string {
     }` : '',
   ].filter(Boolean).join('\n');
   return `
-${['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'get-battery', 'get-system-info', 'save-image'].some((c) => native.includes(c as NativeCapability)) ? 'import UIKit\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
+${native.includes('get-network-type') ? 'import SystemConfiguration\n\n' : ''}${['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'get-battery', 'get-system-info', 'save-image'].some((c) => native.includes(c as NativeCapability)) ? 'import UIKit\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
 /// function because each platform API is shaped its own way and returns its own
 /// value type.
 ///   camera          -> a local image path/URL, or nil when cancelled

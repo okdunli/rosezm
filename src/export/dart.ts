@@ -911,7 +911,7 @@ Text roseText(String text, RoseStyle? s, {TextStyle? base, bool nowrap = false, 
 /// cascade an input inherits on the web. The decoration carries the background,
 /// border and radius; the style carries the typed text colour and font.
 Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChanged,
-    {int? lines, TextEditingController? controller, String keyboard = 'text', bool obscure = false, bool enabled = true, int? maxLength}) {
+    {int? lines, TextEditingController? controller, String keyboard = 'text', bool obscure = false, bool enabled = true, bool readOnly = false, int? maxLength}) {
   final deco = s?.decoration;
   final cons = s?.constraints;
   final pad = s?.padding;
@@ -925,6 +925,7 @@ Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChange
       controller: controller,
       maxLines: lines ?? 1,
       enabled: enabled,
+      readOnly: readOnly,
       maxLength: maxLength,
       onChanged: onChanged,
       // The element's type= carries through: a password field masks, and a
@@ -2687,7 +2688,9 @@ function emitElementStyled(
       : 'true';
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
-    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines}, keyboard: '${keyboard}', obscure: ${type === 'password'}, enabled: ${inputEnabled}${maxLen ? `, maxLength: ${maxLen}` : ''})`;
+    // R429: a readonly field keeps its value and selectable text, no caret edits.
+    const readOnly = node.attrs.some((a) => a.name === 'readonly');
+    const fieldWidget = `roseInputField(${styleExpr ?? 'null'}, ${hint}.toString(), ${cb ?? 'null'}, lines: ${lines}, keyboard: '${keyboard}', obscure: ${type === 'password'}, enabled: ${inputEnabled}, readOnly: ${readOnly}${maxLen ? `, maxLength: ${maxLen}` : ''})`;
     // R257: the input IS the widget :focus was written for, and this branch
     // returns before the generic tail - so the Focus gate wraps it here (the
     // button-branch lesson, applied where the caret actually lands).

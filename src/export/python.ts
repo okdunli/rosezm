@@ -450,24 +450,91 @@ ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `def
 ` : ''}def rose_native(capability, options=None):
     """One helper for every useNative(...) call this project's pages make."""
     options = options if isinstance(options, dict) else {}
-${native.includes('camera') ? `    if capability == 'camera':
+${native.includes('get-system-info') ? `    if capability == 'get-system-info':
+        import platform as _platform
+        return {
+            'platform': _platform.system().lower(),
+            'system': _platform.release(),
+            'machine': _platform.machine(),
+            'version': _platform.version(),
+        }
+` : ''}${native.includes('get-network-type') ? `    if capability == 'get-network-type':
+        import socket
+        try:
+            socket.create_connection(('1.1.1.1', 53), timeout=1.5).close()
+            return {'type': 'wifi'}
+        except Exception:
+            return {'type': 'none'}
+` : ''}${native.includes('get-battery') ? `    if capability == 'get-battery':
+        import sys as _sys
+        if _sys.platform.startswith('win'):
+            import ctypes
+            class _RosePower(ctypes.Structure):
+                _fields_ = [('ACLineStatus', ctypes.c_ubyte), ('BatteryFlag', ctypes.c_ubyte),
+                            ('BatteryLifePercent', ctypes.c_ubyte), ('Reserved1', ctypes.c_ubyte),
+                            ('BatteryLifeTime', ctypes.c_uint32), ('BatteryFullLifeTime', ctypes.c_uint32)]
+            _status = _RosePower()
+            if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(_status)):
+                return None
+            if _status.BatteryLifePercent == 255 or _status.BatteryFlag == 128:
+                return None
+            return {'level': int(_status.BatteryLifePercent), 'charging': _status.ACLineStatus == 1}
+        import glob as _glob
+        for _capacity in _glob.glob('/sys/class/power_supply/BAT*/capacity'):
+            try:
+                with open(_capacity) as _handle:
+                    _level = int(_handle.read().strip())
+            except Exception:
+                continue
+            _charging = False
+            try:
+                with open(_capacity.replace('capacity', 'status')) as _handle:
+                    _charging = _handle.read().strip().lower() == 'charging'
+            except Exception:
+                pass
+            return {'level': _level, 'charging': _charging}
+        return None
+` : ''}${native.includes('save-image') ? `    if capability == 'save-image':
+        import os as _os, shutil as _shutil
+        _path = str(options.get('filePath', ''))
+        if not _path or not _os.path.isfile(_path):
+            return False
+        _dir = _os.path.join(_os.path.expanduser('~'), 'Pictures')
+        try:
+            _os.makedirs(_dir, exist_ok=True)
+            _shutil.copy2(_path, _os.path.join(_dir, _os.path.basename(_path)))
+            return True
+        except Exception:
+            return False
+` : ''}${native.includes('camera') ? `    if capability == 'camera':
         # Tk cannot open a camera. An app that needs a real photo would need a
         # capture library (e.g. OpenCV's VideoCapture); the nearest Tk API,
         # tkinter.filedialog, only picks an EXISTING image file - it cannot
         # capture, so this answers None instead of pretending.
         return None
-` : ''}${native.includes('toast') || native.includes('modal') ? `    if capability in ('toast', 'modal'):
-        # stdlib only: tkinter.messagebox is the Tk way to answer both - the
-        # toast maps to showinfo (one OK button), the modal to askyesno
-        # (True/False). Both block until dismissed, which is the Tk shape.
+` : ''}${native.includes('toast') ? `    if capability == 'toast':
+        # R428: a borderless Toplevel near the bottom of the window - a
+        # non-modal overlay, unlike messagebox.
+        root = getattr(tk, '_default_root', None) or tk.Tk()
+        box = tk.Toplevel(root)
+        box.overrideredirect(True)
+        try:
+            box.attributes('-topmost', True)
+        except Exception:
+            pass
+        tk.Label(box, text=str(options.get('message', options.get('title', ''))), bg='#202020', fg='white', padx=18, pady=10).pack()
+        root.update_idletasks()
+        x = root.winfo_rootx() + max(0, (root.winfo_width() - box.winfo_reqwidth()) // 2)
+        y = root.winfo_rooty() + max(0, root.winfo_height() - box.winfo_reqheight() - 48)
+        box.geometry('+%d+%d' % (x, y))
+        box.after(2000, box.destroy)
+        return True
+` : ''}${native.includes('modal') ? `    if capability == 'modal':
+        # stdlib only: messagebox is the Tk way to ask, and it blocks until
+        # dismissed - the modal contract.
         from tkinter import messagebox
         root = getattr(tk, '_default_root', None) or tk.Tk()
-        title = str(options.get('title', ''))
-        message = str(options.get('message', ''))
-        if capability == 'toast':
-            messagebox.showinfo(title, message, parent=root)
-            return True
-        return messagebox.askyesno(title, message, parent=root)
+        return messagebox.askyesno(str(options.get('title', '')), str(options.get('message', '')), parent=root)
 ` : ''}${native.includes('geolocation') ? `    if capability == 'geolocation':
         # Tk has no location service. An app would need an OS location API
         # (WinRT Geolocator, CoreLocation) or a web geolocation service.
@@ -514,7 +581,7 @@ ${contentBlock}
 def roseThrow(message):
     """The await reject branch: it always raises, so the catch arm renders."""
     raise Exception(str(message))
-def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False):
+def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False, readonly=False):
     """A text field with the app's base font - a bare tk.Entry renders in the
     system default at a size that fights every styled label beside it."""
     from styles import STYLES
@@ -525,6 +592,8 @@ def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password
     for __k, __v in (style or {}).items():
         if __k in ('bg', 'background', 'fg', 'foreground', 'font', 'justify', 'state', 'highlightbackground', 'highlightthickness', 'padx', 'pady'):
             opts[__k] = __v
+    if readonly:
+        opts['state'] = 'readonly'
     if disabled:
         opts['state'] = 'disabled'
     if password:
@@ -2348,13 +2417,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const entryMaxArg = entryMax && entryMax.value.kind === 'text' && /^\d+$/.test(entryMax.value.text.trim()) ? `, maxlength=${entryMax.value.text.trim()}` : '';
     const entryType = node.attrs.find((a) => a.name === 'type');
     const entryPwArg = entryType && entryType.value.kind === 'text' && entryType.value.text.trim().toLowerCase() === 'password' ? ', password=True' : '';
+    // R430: a readonly entry keeps its text selectable but refuses edits.
+    const entryRoArg = node.attrs.some((a) => a.name === 'readonly') ? ', readonly=True' : '';
     if (fallbackFocus) {
       const w = `__e${ctx.seq.n++}`;
-      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg})`, ctx);
+      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg})`, ctx);
       focusPair(w, 'Entry');
       emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
     } else {
-      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg})`);
+      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg})`);
     }
     return;
   }

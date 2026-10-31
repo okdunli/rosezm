@@ -1617,7 +1617,7 @@ try {
   {
     const elp = join(scratch, 'elements-proj');
     mkdirSync(join(elp, 'src/pages'), { recursive: true });
-    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
+    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><input readonly value="fixed"><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
     const elf = await exportProject('flutter', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-flutter') });
     assert((elf.warnings ?? []).some((w: string) => /<canvas> \(dropped\)/.test(w) && /<iframe> \(dropped\)/.test(w)), 'flutter: canvas and iframe gaps are named');
     assert(!(elf.warnings ?? []).some((w: string) => /<table>/.test(w)), 'flutter: a table is not a gap - it renders as rows');
@@ -1669,6 +1669,8 @@ try {
     assert(elaTheme.includes('aspectRatio = 1.8f'), 'android: aspect-ratio reaches the class table');
     assert(elxSrc.includes('.aspectRatio(1.78, contentMode: .fit)'), 'xcode: aspect-ratio reaches the box modifiers');
     assert(elhSrc.includes('.aspectRatio(1.7778)'), 'arkts: aspect-ratio reaches the box modifiers');
+    assert(elfSrc.includes('readOnly: true'), 'flutter: a readonly input keeps its value uneditable');
+    assert(elaSrc.includes('readOnly = true'), 'android: a readonly input keeps its value uneditable');
     assert(elaSrc.includes('AsyncImage(model = "https://example.com/a.png"') && elaSrc.includes('import coil.compose.AsyncImage'), 'android: a remote image loads through Coil');
     assert(readFileSync(join(ela.outDir, 'app', 'build.gradle.kts'), 'utf8').includes('io.coil-kt:coil-compose:2.7.0'), 'android: the Coil dependency ships with the project');
     assert(elxSrc.includes('AsyncImage(url: URL(string: "https://example.com/a.png"))'), 'xcode: a remote image loads through AsyncImage');
@@ -1696,6 +1698,10 @@ try {
     assert(elnSrc.includes('Stretch.UniformToFill'), 'dotnet: object-fit cover reaches Stretch');
     assert(elcSrc.includes('rose_remote_image(') && readFileSync(join(elc.outDir, 'src', 'rose.cpp'), 'utf8').includes('QLabel* rose_remote_image('), 'cpp: a remote image loads through QNetworkAccessManager');
     assert(elpSrc.includes('rose_remote_image(') && elpKit.includes('def rose_remote_image(') && elpSrc.includes(', rose_remote_image'), 'python: a remote image downloads on a worker thread');
+    assert(elnSrc.includes('readOnly: true'), 'dotnet: a readonly input keeps its value uneditable');
+    assert(eljSrc.includes('.setEditable(false)'), 'java: a readonly input keeps its value uneditable');
+    assert(elcSrc.includes(', true, 0, false, true)'), 'cpp: a readonly input keeps its value uneditable');
+    assert(elpSrc.includes(', readonly=True'), 'python: a readonly input keeps its value uneditable');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.
@@ -4031,6 +4037,74 @@ try {
       // Nothing CALLS it in a project that never asked - that is the real invariant.
       assert(!/__rosezmNative\s*\(\s*['"]/.test(cleanBody), `${target}: no page calls the native bridge when the project never uses it`);
     }
+    // R421: the four desktop targets answer get-system-info from their runtime.
+    const infoProj = join(scratch, 'sysinfo-proj');
+    mkdirSync(join(infoProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(infoProj, 'src/pages/index.rose'), `<script>
+  let info = $state(null);
+  let net = $state(null);
+  let bat = $state(null);
+  let saved = $state(false);
+  let shown = $state(false);
+  async function check() { info = await useNative('get-system-info', {}); net = await useNative('get-network-type', {}); bat = await useNative('get-battery', {}); saved = await useNative('save-image', { filePath: '/tmp/rose.png' }); shown = await useNative('toast', { message: 'saved' }); }
+</script>
+<button on:click={check}>info</button>
+`);
+    const infoExpect: Record<string, RegExp> = {
+      python: /capability == 'get-system-info'[\s\S]*_platform\.system\(\)/,
+      dotnet: /case "get-system-info"[\s\S]*RuntimeInformation\.OSArchitecture/,
+      java: /case "get-system-info"[\s\S]*os\.arch/,
+      cpp: /capability == "get-system-info"[\s\S]*QSysInfo::prettyProductName/,
+    };
+    for (const [target, expect] of Object.entries(infoExpect)) {
+      const n = await exportProject(target as never, infoProj, { apiBase: 'x', outRoot: join(scratch, `sysinfo-${target}`) });
+      const body = walk(n.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      assert(expect.test(body), `${target}: get-system-info answers from the host runtime`);
+    }
+    const netExpect: Record<string, RegExp> = {
+      python: /capability == 'get-network-type'[\s\S]*create_connection/,
+      dotnet: /case "get-network-type"[\s\S]*GetIsNetworkAvailable/,
+      java: /case "get-network-type"[\s\S]*NetworkInterface\.getNetworkInterfaces/,
+      cpp: /capability == "get-network-type"[\s\S]*QNetworkInterface::allInterfaces/,
+      xcode: /capability == "get-network-type"[\s\S]*SCNetworkReachabilityGetFlags/,
+    };
+    for (const [target, expect] of Object.entries(netExpect)) {
+      const n = await exportProject(target as never, infoProj, { apiBase: 'x', outRoot: join(scratch, `netinfo-${target}`) });
+      const body = walk(n.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      assert(expect.test(body), `${target}: get-network-type answers from the host interfaces`);
+    }
+    const batteryExpect: Record<string, RegExp> = {
+      python: /capability == 'get-battery'[\s\S]*GetSystemPowerStatus/,
+      dotnet: /GetSystemPowerStatus[\s\S]*case "get-battery"/,
+    };
+    for (const [target, expect] of Object.entries(batteryExpect)) {
+      const n = await exportProject(target as never, infoProj, { apiBase: 'x', outRoot: join(scratch, `battery-${target}`) });
+      const body = walk(n.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      assert(expect.test(body), `${target}: get-battery answers from the host power status`);
+    }
+    const saveExpect: Record<string, RegExp> = {
+      python: /capability == 'save-image'[\s\S]*copy2/,
+      dotnet: /case "save-image"[\s\S]*MyPictures/,
+      java: /case "save-image"[\s\S]*Pictures/,
+      cpp: /capability == "save-image"[\s\S]*PicturesLocation/,
+      arkts: /capability === 'save-image'[\s\S]*picker\.save\(/,
+    };
+    for (const [target, expect] of Object.entries(saveExpect)) {
+      const n = await exportProject(target as never, infoProj, { apiBase: 'x', outRoot: join(scratch, `saveimg-${target}`) });
+      const body = walk(n.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      assert(expect.test(body), `${target}: save-image copies into the host picture folder`);
+    }
+    const toastExpect: Record<string, RegExp> = {
+      python: /capability == 'toast'[\s\S]*overrideredirect/,
+      dotnet: /public static bool Toast\([\s\S]*case "toast"/,
+      java: /public static boolean toast\([\s\S]*case "toast"/,
+      cpp: /capability == "toast"[\s\S]*activeWindow/,
+    };
+    for (const [target, expect] of Object.entries(toastExpect)) {
+      const n = await exportProject(target as never, infoProj, { apiBase: 'x', outRoot: join(scratch, `toast-${target}`) });
+      const body = walk(n.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      assert(expect.test(body), `${target}: toast is a non-modal overlay`);
+    }
     // The matrix is a promise in both directions. An advertised capability
     // with no kit branch answers null with no warning at all; a branch the
     // matrix omits is dead code the emitter never reaches. Check the source
@@ -5219,6 +5293,7 @@ h2 { font-size: 40px; }
     assert(/\.item:first-child" uses :first-child.*skipped/.test(p.warnings.join('\n')), ':first-child is named, and skipped rather than applied to every match');
     assert(/:nth-child/.test(p.warnings.join('\n')), ':nth-child is named too');
     assert(/:first-child|:nth-child/.test(p.warnings.join('\n')) && !/\.item:first-child.*bold/.test(p.warnings.join('\n')), 'the warning explains it would otherwise style every match');
+    assert(parseStylesheet('.memo { color: red }') === parseStylesheet('.memo { color: red }'), 'a stylesheet is parsed once per exact text (export all reuses it)');
   }
   // R242: ArkTS was the only target that neither applied :hover nor said so.
   {

@@ -1026,12 +1026,30 @@ function parseDeclarations(body: string): StyleModel {
 }
 
 /**
+ * Parsed sheets, keyed by the exact CSS text. `export all` compiles the same
+ * project once per target, so the site theme and SHELL_STYLES were parsed
+ * seventeen times with seventeen identical results. A sheet is read-only after
+ * parsing (the emitters only copy warnings), so one entry serves every target.
+ */
+const sheetCache = new Map<string, StyleSheet>();
+
+/**
  * Parse a stylesheet. `@media` guards are kept (min/max-width only - the rest
  * of the media vocabulary has no native meaning), `@font-face` and `@keyframes`
  * are skipped (the font half is read by the font collector, the animation half
  * has no native answer), and every dropped construct is named in `warnings`.
  */
 export function parseStylesheet(css: string): StyleSheet {
+  const hit = sheetCache.get(css);
+  if (hit) return hit;
+  const sheet = parseStylesheetUncached(css);
+  // A bounded cache: one test process exports many projects.
+  if (sheetCache.size >= 64) sheetCache.clear();
+  sheetCache.set(css, sheet);
+  return sheet;
+}
+
+function parseStylesheetUncached(css: string): StyleSheet {
   const warnings: string[] = [];
   const rules: StyleRule[] = [];
   const src = css.replace(/\/\*[\s\S]*?\*\//g, '');

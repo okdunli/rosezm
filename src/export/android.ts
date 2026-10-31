@@ -3017,7 +3017,9 @@ function emitElementStyled(
     const inputEnabled = disabledInput
       ? `, enabled = !(${disabledInput.value.kind === 'expr' ? ktExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'})`
       : '';
-    emit(`TextField(${valueExpr}${onChange}${keyboard}${visual}${inputEnabled}, label = { Text(${labelBody}) }, modifier = ${baseMod})`, ctx);
+    // R429: a readonly field keeps its value and selectable text, no caret edits.
+    const readOnly = node.attrs.some((a) => a.name === 'readonly') ? ', readOnly = true' : '';
+    emit(`TextField(${valueExpr}${onChange}${keyboard}${visual}${inputEnabled}${readOnly}, label = { Text(${labelBody}) }, modifier = ${baseMod})`, ctx);
     return;
   }
   if (tag === 'button') {

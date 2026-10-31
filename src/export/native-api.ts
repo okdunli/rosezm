@@ -183,13 +183,13 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   arkts: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
     platform: {
       camera: '@ohos.multimedia.camera / photoAccessHelper',
       'get-battery': '@ohos.batteryInfo (sync property)',
       'get-network-type': '@ohos.telephony.data (sync)',
       'get-system-info': '@ohos.deviceInfo (sync property)',
-      'save-image': 'photoAccessHelper (needs security component)',
+      'save-image': 'PhotoViewPicker.save + fileIo copy',
       toast: 'promptAction.showToast (UIKit)',
       modal: 'promptAction.showDialog (UIKit)',
       'scan-code': 'scanBarcode.launchScanner (ScanKit)',
@@ -235,7 +235,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   xcode: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-system-info', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
     platform: {
       camera: 'UIImagePickerController',
       toast: 'no first-party toast (a label overlay works)',
@@ -246,7 +246,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       share: 'UIActivityViewController',
       'make-phone-call': 'UIApplication.open(tel:)',
       'get-battery': 'UIDevice.batteryLevel (needs monitoring enabled)',
-      'get-network-type': 'NWPathMonitor (async, no first-party sync)',
+      'get-network-type': 'SCNetworkReachability (sync)',
       'get-system-info': 'UIDevice + ProcessInfo (sync)',
       'save-image': 'UIImageWriteToSavedPhotosAlbum (photo-add usage)',
       vibrate: 'UIImpactFeedbackGenerator',
@@ -289,7 +289,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // expands its useNative call to it.
   python: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image'],
     platform: {
       camera: 'tkinter.filedialog',
       toast: 'tkinter message label / Toplevel (a window, the Tk way)',
@@ -299,34 +299,45 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'clipboard-write': 'tkinter.clipboard_append',
       share: 'webbrowser.open',
       'make-phone-call': 'webbrowser.open(tel:)',
+      'get-system-info': 'platform (stdlib)',
+      'get-network-type': 'socket reachability probe (stdlib)',
+      'get-battery': 'GetSystemPowerStatus / sysfs (stdlib)',
+      'save-image': 'shutil.copy into ~/Pictures',
     },
   },
   dotnet: {
     helper: 'RoseKit.RoseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image'],
     platform: {
       camera: 'OpenFileDialog',
-      toast: 'a WPF overlay (no system toast)',
+      toast: 'a WPF Popup overlay (no system toast)',
       modal: 'MessageBox.Show',
       geolocation: 'GeoCoordinateWatcher (a package - not in the box for net8.0)',
       'clipboard-read': 'Clipboard.GetText',
       'clipboard-write': 'Clipboard.SetText',
       share: 'Process.Start',
       'make-phone-call': 'Process.Start(tel:)',
+      'get-system-info': 'Environment + RuntimeInformation',
+      'get-network-type': 'NetworkInterface.GetIsNetworkAvailable',
+      'get-battery': 'GetSystemPowerStatus (Win32)',
+      'save-image': 'File.Copy into MyPictures',
     },
   },
   java: {
     helper: 'RoseKit.roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image'],
     platform: {
       camera: 'no capture API (java.awt.Robot / third-party webcam lib)',
-      toast: 'a Swing overlay (no system toast)',
+      toast: 'a JWindow overlay (no system toast)',
       modal: 'JOptionPane (stdlib)',
       geolocation: 'no JDK API (third-party library)',
       'clipboard-read': 'Toolkit.getSystemClipboard',
       'clipboard-write': 'Toolkit.getSystemClipboard',
       share: 'Desktop.browse',
       'make-phone-call': 'Desktop.browse(tel:)',
+      'get-system-info': 'System.getProperty',
+      'get-network-type': 'NetworkInterface.getNetworkInterfaces',
+      'save-image': 'Files.copy into ~/Pictures',
     },
   },
   // Wired through the kit: rose.h declares rose_native(...), rose.cpp defines
@@ -334,7 +345,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // useNative call to it.
   cpp: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'modal'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image'],
     platform: {
       camera: 'QFileDialog',
       toast: 'a QLabel overlay (no system toast)',
@@ -344,6 +355,9 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'clipboard-write': 'QClipboard',
       share: 'QDesktopServices::openUrl',
       'make-phone-call': 'QDesktopServices::openUrl(tel:)',
+      'get-system-info': 'QSysInfo',
+      'get-network-type': 'QNetworkInterface::allInterfaces',
+      'save-image': 'QFile::copy into PicturesLocation',
     },
   },
 };

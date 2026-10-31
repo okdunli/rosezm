@@ -1565,6 +1565,17 @@ ${rows || '        // no style rules'}
         return field;
     }
 
+    /** R430: a readonly field keeps its text selectable but refuses edits. */
+    public static JTextField readOnly(JTextField field) {
+        field.setEditable(false);
+        return field;
+    }
+
+    public static JTextArea readOnly(JTextArea area) {
+        area.setEditable(false);
+        return area;
+    }
+
     /** JS maxlength on a Swing field: a DocumentFilter refuses input past the cap. */
     public static void limitLength(JTextField field, final int max) {
         if (!(field.getDocument() instanceof javax.swing.text.AbstractDocument)) return;
@@ -1930,6 +1941,40 @@ function nativeKit(native: NativeCapability[]): string {
                 // native GPS binding). Until one is wired this answers null.
                 return null;
 ` : '',
+    native.includes('get-system-info') ? `            case "get-system-info": {
+                java.util.Map<String, Object> info = new java.util.LinkedHashMap<>();
+                info.put("platform", System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT));
+                info.put("system", System.getProperty("os.version", ""));
+                info.put("machine", System.getProperty("os.arch", ""));
+                info.put("version", System.getProperty("java.version", ""));
+                return info;
+            }
+` : '',
+    native.includes('get-network-type') ? `            case "get-network-type": {
+                // R423: any up, non-loopback interface is a reachable network;
+                // a desktop host cannot tell wifi from ethernet.
+                try {
+                    java.util.Enumeration<java.net.NetworkInterface> nets = java.net.NetworkInterface.getNetworkInterfaces();
+                    while (nets != null && nets.hasMoreElements()) {
+                        java.net.NetworkInterface net = nets.nextElement();
+                        if (net.isUp() && !net.isLoopback()) return java.util.Map.of("type", "wifi");
+                    }
+                } catch (Exception ignored) { }
+                return java.util.Map.of("type", "none");
+            }
+` : '',
+    native.includes('save-image') ? `            case "save-image": {
+                // A desktop gallery is the Pictures folder the OS shows.
+                Object value = opts.get("filePath");
+                String path = value == null ? "" : String.valueOf(value);
+                java.io.File src = new java.io.File(path);
+                if (!src.isFile()) return false;
+                java.io.File dir = new java.io.File(System.getProperty("user.home", "."), "Pictures");
+                dir.mkdirs();
+                java.nio.file.Files.copy(src.toPath(), new java.io.File(dir, src.getName()).toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                return true;
+            }
+` : '',
     native.includes('clipboard-read') ? `            case "clipboard-read": {
                 java.awt.datatransfer.Transferable contents = java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().getContents(null);
                 if (contents == null || !contents.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.stringFlavor)) return "";
@@ -1956,6 +2001,11 @@ function nativeKit(native: NativeCapability[]): string {
                 return true;
             }
 ` : '',
+    native.includes('toast') ? `            case "toast": {
+                Object message = opts.get("message");
+                return toast(message == null ? "" : String.valueOf(message));
+            }
+` : '',
     native.includes('modal') ? `            case "modal": {
                 // JOptionPane is the Swing way to ask - the stdlib paints it.
                 Object msgObj = opts.get("message");
@@ -1976,6 +2026,31 @@ function nativeKit(native: NativeCapability[]): string {
 ` : '',
   ].filter(Boolean).join('');
   return `
+    /** R428: a non-modal toast window over the app frame (Swing has none). */
+    public static boolean toast(String message) {
+        java.awt.Window window = null;
+        for (java.awt.Window candidate : java.awt.Window.getWindows()) {
+            if (candidate.isShowing() && candidate instanceof javax.swing.JFrame) { window = candidate; break; }
+        }
+        if (window == null) return false;
+        javax.swing.JWindow box = new javax.swing.JWindow(window);
+        javax.swing.JLabel label = new javax.swing.JLabel(message);
+        label.setOpaque(true);
+        label.setBackground(new java.awt.Color(32, 32, 32, 230));
+        label.setForeground(java.awt.Color.WHITE);
+        label.setBorder(new javax.swing.border.EmptyBorder(10, 18, 10, 18));
+        box.add(label);
+        box.pack();
+        java.awt.Point at = window.getLocationOnScreen();
+        box.setLocation(at.x + (window.getWidth() - box.getWidth()) / 2, at.y + window.getHeight() - box.getHeight() - 48);
+        box.setAlwaysOnTop(true);
+        box.setVisible(true);
+        javax.swing.Timer timer = new javax.swing.Timer(2000, e -> { ((javax.swing.Timer) e.getSource()).stop(); box.dispose(); });
+        timer.setRepeats(false);
+        timer.start();
+        return true;
+    }
+
     /** The device capabilities this project's pages asked for through
      *  useNative(...): one dispatch, because every platform API is shaped its
      *  own way and every call site needs the same answer.
@@ -3316,11 +3391,14 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     const inputEnable = disabledInput ? (disabledInput.value.kind === 'expr' ? javaExpr(disabledInput.value.code, ctx) : 'true') : '';
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    // R430: a readonly field keeps its text selectable but refuses edits.
+    const readOnly = node.attrs.some((a) => a.name === 'readonly');
     // R229: a textarea is a multi-line text area, not a one-line field - the
     // block element was silently rendered as an input and its content clipped.
     if (tag === 'textarea') {
       const key = boundName || propName;
-      emit(activeWrap(focusWrap(`RoseTheme.textArea(${ctx.parent}, ${hint}, ${ctx.app}, "${key}")`)), ctx);
+      const area = `RoseTheme.textArea(${ctx.parent}, ${hint}, ${ctx.app}, "${key}")`;
+      emit(activeWrap(focusWrap(readOnly ? `RoseTheme.readOnly(${area})` : area)), ctx);
       return;
     }
     if (propName) {
@@ -3331,6 +3409,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       emit(`field.putClientProperty("JTextField.placeholderText", ${hint});`, ctx);
       if (inputEnable) emit(`field.setEnabled(${inputEnable});`, ctx);
       if (inputMax) emit(`RoseTheme.limitLength(field, ${inputMax});`, ctx);
+      if (readOnly) emit('field.setEditable(false);', ctx);
       if (isPassword) emit(`field.setEchoChar('*');`, ctx);
       emit(`field.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {`, ctx);
       ctx.depth++;
@@ -3347,17 +3426,23 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
       emit(`${ctx.parent}.add(field);`, ctx);
       ctx.depth--;
       emit(`}`, ctx);
-    } else if (boundName) emit(activeWrap(focusWrap(`RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${boundName}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`)), ctx);
-    else {
+    } else if (boundName) {
+      const call = `RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${boundName}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`;
+      emit(activeWrap(focusWrap(readOnly ? `RoseTheme.readOnly(${call})` : call)), ctx);
+    } else {
       const nameAttr = node.attrs.find((a) => a.name === 'name');
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const key = field ? formFieldKey(ctx.forms, field) : null;
-      if (key) emit(activeWrap(focusWrap(`RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`)), ctx);
-      else if (inputEnable || inputMax) {
+      if (key) {
+        const call = `RoseTheme.${fieldFn}(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${inputMax ? `, ${inputEnable || 'true'}, ${inputMax}` : (inputEnable ? `, ${inputEnable}` : '')})`;
+        emit(activeWrap(focusWrap(readOnly ? `RoseTheme.readOnly(${call})` : call)), ctx);
+      }
+      else if (inputEnable || inputMax || readOnly) {
         const local = `__f${++ctx.counter.n}`;
         emit(`JTextField ${local} = new JTextField(${hint}, 20);`, ctx);
         if (inputEnable) emit(`${local}.setEnabled(${inputEnable});`, ctx);
         if (inputMax) emit(`RoseTheme.limitLength(${local}, ${inputMax});`, ctx);
+        if (readOnly) emit(`${local}.setEditable(false);`, ctx);
         if (isPassword) emit(`${local}.setEchoChar('*');`, ctx);
         emit(`${ctx.parent}.add(${local});`, ctx);
       } else emit(`${ctx.parent}.add(new JTextField(${hint}, 20));`, ctx);

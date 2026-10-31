@@ -621,7 +621,8 @@ export function roseContentGet(coll: string, slug: string): Object | null {
   // project that never touches them keeps a kit that compiles everywhere.
   const nativeImports = [
     native.includes('clipboard-read') || native.includes('clipboard-write') ? "import { pasteboard } from '@kit.BasicServicesKit';" : '',
-    native.includes('camera') ? "import { photoAccessHelper } from '@kit.MediaLibraryKit';" : '',
+    native.includes('camera') || native.includes('save-image') ? "import { photoAccessHelper } from '@kit.MediaLibraryKit';" : '',
+    native.includes('save-image') ? "import { fileIo as fs } from '@kit.CoreFileKit';" : '',
     native.includes('geolocation') ? "import { geoLocationManager } from '@kit.LocationKit';" : '',
     native.includes('share') ? "import { systemShare } from '@kit.ShareKit';\nimport { uniformTypeDescriptor as utd } from '@kit.ArkData';\nimport { common } from '@kit.AbilityKit';" : '',
     native.includes('make-phone-call') ? "import { call } from '@kit.TelephonyKit';" : '',
@@ -637,6 +638,26 @@ export function roseContentGet(coll: string, slug: string): Object | null {
       const picker = new photoAccessHelper.PhotoViewPicker();
       const result = await picker.select({ MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: 1 });
       return result.photoUris.length > 0 ? result.photoUris[0] : null;
+    }` : '',
+    native.includes('save-image') ? `    if (capability === 'save-image') {
+      // The system picker owns the destination photo grant; the caller's file
+      // is then copied into the URI it returns.
+      const path = String(options['filePath'] ?? '');
+      if (!path) return false;
+      try {
+        const name = path.substring(path.lastIndexOf('/') + 1) || 'rosezm.png';
+        const picker = new photoAccessHelper.PhotoViewPicker();
+        const uris = await picker.save({ newFileNames: [name] });
+        if (!uris || uris.length === 0) return false;
+        const dest = fs.openSync(uris[0], fs.OpenMode.READ_WRITE);
+        const src = fs.openSync(path, fs.OpenMode.READ_ONLY);
+        fs.copyFileSync(src.fd, dest.fd);
+        fs.closeSync(src);
+        fs.closeSync(dest);
+        return true;
+      } catch (e) {
+        return false;
+      }
     }` : '',
     native.includes('geolocation') ? `    if (capability === 'geolocation') {
       const request: geoLocationManager.CurrentLocationRequest = {

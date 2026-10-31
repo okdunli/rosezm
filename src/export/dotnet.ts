@@ -1691,12 +1691,14 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return box;
     }
 
-    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0)
+    public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0, bool readOnly = false)
     {
         var box = new TextBox { Text = RoseTheme.Str(app.V(stateKey)), MinWidth = 220 };
         if (style != null) Apply(box, style);
         if (!enabled) box.IsEnabled = false;
         if (maxLength > 0) box.MaxLength = maxLength;
+        // R430: a readonly field keeps its text selectable but refuses edits.
+        if (readOnly) box.IsReadOnly = true;
         box.TextChanged += (_, _) => app.Set(stateKey, box.Text);
         parent.Children.Add(box);
         return box;
@@ -1780,6 +1782,41 @@ function nativeKit(native: NativeCapability[]): string {
                     return true;
                 }
 ` : '',
+    native.includes('get-system-info') ? `                case "get-system-info":
+                    // R421: the host OS and runtime the window runs on.
+                    return new Dictionary<string, object?>
+                    {
+                        ["platform"] = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? "windows"
+                            : System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX) ? "macos" : "linux",
+                        ["system"] = Environment.OSVersion.VersionString,
+                        ["machine"] = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
+                        ["version"] = Environment.Version.ToString(),
+                    };
+` : '',
+    native.includes('get-network-type') ? `                case "get-network-type":
+                    // R423: a desktop host cannot tell wifi from ethernet, so a
+                    // reachable network answers "wifi" like the web bridge does.
+                    return new Dictionary<string, object?>
+                    {
+                        ["type"] = System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable() ? "wifi" : "none",
+                    };
+` : '',
+    native.includes('get-battery') ? `                case "get-battery":
+                    return Battery();
+` : '',
+    native.includes('save-image') ? `                case "save-image":
+                {
+                    // A desktop gallery is the Pictures folder the OS shows.
+                    var path = RoseTheme.Str(opts.TryGetValue("filePath", out var fp) ? fp : null);
+                    if (path.Length == 0 || !System.IO.File.Exists(path)) return false;
+                    var pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+                    System.IO.File.Copy(path, System.IO.Path.Combine(pictures, System.IO.Path.GetFileName(path)), true);
+                    return true;
+                }
+` : '',
+    native.includes('toast') ? `                case "toast":
+                    return Toast(RoseTheme.Str(opts.TryGetValue("message", out var tm) ? tm : null));
+` : '',
     native.includes('modal') ? `                case "modal":
                 {
                     // MessageBox.Show is the WPF way to ask - the OS paints it.
@@ -1802,6 +1839,67 @@ function nativeKit(native: NativeCapability[]): string {
   ].filter(Boolean).join('');
   return `
     /// <summary>The device capabilities this project's pages asked for through
+    // R424: the Win32 power status - the one battery API every Windows host has.
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct RosePowerStatus
+    {
+        public byte ACLineStatus;
+        public byte BatteryFlag;
+        public byte BatteryLifePercent;
+        public byte Reserved1;
+        public uint BatteryLifeTime;
+        public uint BatteryFullLifeTime;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetSystemPowerStatus(out RosePowerStatus status);
+
+    /// <summary>{ level, charging }, or null on a host without a battery.</summary>
+    public static Dictionary<string, object?>? Battery()
+    {
+        try
+        {
+            if (!GetSystemPowerStatus(out var status)) return null;
+            if (status.BatteryLifePercent == 255 || status.BatteryFlag == 128) return null;
+            return new Dictionary<string, object?>
+            {
+                ["level"] = (int)status.BatteryLifePercent,
+                ["charging"] = status.ACLineStatus == 1,
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>R428: a non-modal toast over the main window (WPF has no
+    /// system toast). The Popup closes itself after two seconds.</summary>
+    public static bool Toast(string message)
+    {
+        var window = System.Windows.Application.Current?.MainWindow;
+        if (window == null) return false;
+        var border = new System.Windows.Controls.Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(230, 32, 32, 32)),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(16, 10, 16, 10),
+            Child = new System.Windows.Controls.TextBlock { Text = message, Foreground = Brushes.White },
+        };
+        var popup = new System.Windows.Controls.Primitives.Popup
+        {
+            Child = border,
+            PlacementTarget = window,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Center,
+            StaysOpen = true,
+            IsOpen = true,
+        };
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        timer.Tick += (_, _) => { timer.Stop(); popup.IsOpen = false; };
+        timer.Start();
+        return true;
+    }
+
     /// useNative(...): one dispatch, because every platform API is shaped its
     /// own way and every call site needs the same answer.
     ///   camera          -> a local image path, or null
@@ -3306,6 +3404,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const inputEnable = disabledInput ? (disabledInput.value.kind === 'expr' ? csExpr(disabledInput.value.code, ctx) : 'true') : '';
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
+    // R430: a readonly field keeps its text selectable but refuses edits.
+    const readOnly = node.attrs.some((a) => a.name === 'readonly');
     if (type === 'range') {
       // A range is a Slider - falling through emitted a text box for a number.
       const minAttr = node.attrs.find((a) => a.name === 'min');
@@ -3326,7 +3426,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
         emit(`box.PasswordChanged += (s, e) => ${handler}(box.Password);`, ctx);
       } else {
-        emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''} };`, ctx);
+        emit(`var box = new TextBox { Text = ${propName}?.ToString() ?? "", MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''} };`, ctx);
         if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
         emit(`box.TextChanged += (s, e) => ${handler}(box.Text);`, ctx);
       }
@@ -3340,7 +3440,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       const key = field ? formFieldKey(ctx.forms, field) : (bound || null);
       const call = isPassword
         ? `RoseTheme.Password(${ctx.parent}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`
-        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`;
+        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''}${readOnly ? ', readOnly: true' : ''})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const c = `input${++ctx.counter.c}`;
       emit(`var ${c} = ${call};`, ctx);

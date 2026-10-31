@@ -547,6 +547,7 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #include <QHBoxLayout>
 #include <QLayout>
 #include <QNetworkAccessManager>
+#include <QNetworkInterface>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QFont>
@@ -565,6 +566,11 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #include <QRadioButton>
 #include <QScrollArea>
 #include <QSettings>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
+#include <QSysInfo>
 #include <QString>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -884,7 +890,7 @@ QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::str
 QLabel* rose_rich_label(QWidget* parent, const std::vector<RoseRun>& runs, const RoseStyle& style = RoseStyle{});
 QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{}, bool enabled = true);
 QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{});
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false);
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false, bool readOnly = false);
 QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int min, int max);
 QWidget* rose_spacer(QWidget* parent, int height);
 QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& style = RoseStyle{});
@@ -998,6 +1004,34 @@ ${native.includes('camera') ? `    if (capability == "camera") {
         // or a web location service of its own.
         return RoseValue();
     }
+` : ''}${native.includes('get-system-info') ? `    if (capability == "get-system-info") {
+        // R421: QSysInfo names the host the window runs on.
+        return rose_obj({
+            {"platform", RoseValue::str(QSysInfo::productType().toStdString())},
+            {"system", RoseValue::str(QSysInfo::prettyProductName().toStdString())},
+            {"machine", RoseValue::str(QSysInfo::currentCpuArchitecture().toStdString())},
+            {"version", RoseValue::str(QSysInfo::kernelVersion().toStdString())},
+        });
+    }
+` : ''}${native.includes('get-network-type') ? `    if (capability == "get-network-type") {
+        // R423: an up, non-loopback interface is a reachable network. A desktop
+        // host cannot tell wifi from ethernet, so both answer "wifi".
+        for (const QNetworkInterface& net : QNetworkInterface::allInterfaces()) {
+            if (net.flags().testFlag(QNetworkInterface::IsUp) && !net.flags().testFlag(QNetworkInterface::IsLoopBack)) {
+                return rose_obj({{"type", RoseValue::str("wifi")}});
+            }
+        }
+        return rose_obj({{"type", RoseValue::str("none")}});
+    }
+` : ''}${native.includes('save-image') ? `    if (capability == "save-image") {
+        // A desktop gallery is the Pictures folder the OS shows.
+        const std::string path = rose_str(rose_get(options, "filePath"));
+        if (path.empty()) return RoseValue(false);
+        const QString dirPath = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+        QDir().mkpath(dirPath);
+        const QString target = QDir(dirPath).filePath(QFileInfo(QString::fromStdString(path)).fileName());
+        return RoseValue(QFile::copy(QString::fromStdString(path), target));
+    }
 ` : ''}${native.includes('clipboard-read') ? `    if (capability == "clipboard-read") {
         QClipboard* clipboard = QGuiApplication::clipboard();
         if (!clipboard) return RoseValue::str("");
@@ -1026,7 +1060,21 @@ ${native.includes('camera') ? `    if (capability == "camera") {
         if (tel.empty()) return RoseValue(false);
         return RoseValue(QDesktopServices::openUrl(QUrl(QString::fromStdString("tel:" + tel))));
     }
-    }` : ''}${native.includes('modal') ? `    if (capability == "modal") {
+    }` : ''}${native.includes('toast') ? `    if (capability == "toast") {
+        // R428: a label overlay on the active window - desktop has no system toast.
+        QWidget* host = QApplication::activeWindow();
+        if (!host) return RoseValue(false);
+        const QString message = QString::fromStdString(rose_str(rose_get(options, "message")));
+        auto* toast = new QLabel(message, host);
+        toast->setStyleSheet("background: rgba(32,32,32,230); color: white; padding: 10px 18px; border-radius: 8px;");
+        toast->adjustSize();
+        toast->move((host->width() - toast->width()) / 2, host->height() - toast->height() - 48);
+        toast->show();
+        toast->raise();
+        QTimer::singleShot(2000, toast, &QObject::deleteLater);
+        return RoseValue(true);
+    }
+` : ''}${native.includes('modal') ? `    if (capability == "modal") {
         // QMessageBox is the Qt way to ask - the toolkit paints it.
         const std::string message = rose_str(rose_get(options, "message"));
         const std::string title = rose_str(rose_get(options, "title"));
@@ -1039,6 +1087,7 @@ ${native.includes('camera') ? `    if (capability == "camera") {
 #include "pages.h"
 
 #include <QNetworkAccessManager>
+#include <QNetworkInterface>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPainter>
@@ -2135,7 +2184,7 @@ QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int 
     return slider;
 }
 
-QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int maxLength, bool password) {
+QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style, bool enabled, int maxLength, bool password, bool readOnly) {
     auto* input = new QLineEdit;
     input->setPlaceholderText(QString::fromStdString(placeholder));
     // A stylesheet the cascade resolved paints the field; a bare one keeps the
@@ -2167,6 +2216,8 @@ QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& 
     if (!enabled) input->setEnabled(false);
     if (maxLength > 0) input->setMaxLength(maxLength);
     if (password) input->setEchoMode(QLineEdit::Password);
+    // R430: a readonly field keeps its text selectable but refuses edits.
+    if (readOnly) input->setReadOnly(true);
     return input;
 }
 
@@ -3152,6 +3203,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
       const maxArg = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? `, ${maxAttr.value.text.trim()}` : '';
       const typeAttr = node.attrs.find((a) => a.name === 'type');
       const pwArg = typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text.trim().toLowerCase() === 'password' ? `${maxArg ? '' : ', 0'}, true` : '';
+      // R430: a readonly field keeps its text selectable but refuses edits.
+      const readOnly = node.attrs.some((a) => a.name === 'readonly');
+      const roArg = readOnly ? `${maxArg || ', 0'}${pwArg || ', false'}, true` : '';
       // R256/R266: rose_input RETURNS the widget, so the focus and active
       // halves wrap the call - one emit each, the Swing wrap trick.
       const wrap = (expr: string): string => {
@@ -3159,8 +3213,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
         if (activeKey) expr = `rose_active(${expr}, ${isEmptyModel(model) ? 'RoseStyle{}' : cppStyleLiteral(model)}, rose_style_of("${activeKey}") ? *rose_style_of("${activeKey}") : RoseStyle{})`;
         return expr;
       };
-      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg})`)};`, ctx);
-      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg})`)};`, ctx);
+      if (key) emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, "${key}"${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg})`)};`, ctx);
+      else emit(`${wrap(`rose_input(${ctx.parent}, ${hint}, ${ctx.app}, ""${hasStyle ? `, ${styleExpr}` : ', RoseStyle{}'}, ${enableExpr}${maxArg}${pwArg}${roArg})`)};`, ctx);
     }
     return;
   }
