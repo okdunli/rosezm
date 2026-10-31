@@ -43,6 +43,8 @@ import {
   elementStyleBinding,
   flexDirectionOf,
   sanitizeFor,
+  declarationsOf,
+  splitValues,
   type StyleModel,
   type StyleSheet,
   type StyleSubject,
@@ -568,13 +570,18 @@ function swiftTextModsOf(model: StyleModel, fontMap: Map<string, string>): strin
  * frame a container needs, then background/border/clip/shadow, the size, and
  * the margin last - so the background covers exactly what CSS says it should.
  */
-function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string }): string[] {
+function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string }, radial = false): string[] {
   const out: string[] = [];
   if (model.padding) out.push(`.padding(${edgeLiteral(model.padding)})`);
   if (opts.full) out.push(`.frame(maxWidth: .infinity, alignment: ${opts.align})`);
   if (model.gradient && model.gradient.stops.length >= 2) {
     const colors = model.gradient.stops.map((s) => `Color.rose(${JSON.stringify(hexOf(s.color))})`).join(', ');
-    out.push(`.background(LinearGradient(colors: [${colors}], startPoint: .top, endPoint: .bottom))`);
+    if (radial) {
+      const radius = model.width && model.width.u === 'px' ? n(model.width.n / 2) : '120';
+      out.push(`.background(RadialGradient(colors: [${colors}], center: .center, startRadius: 0, endRadius: ${radius}))`);
+    } else {
+      out.push(`.background(LinearGradient(colors: [${colors}], startPoint: .top, endPoint: .bottom))`);
+    }
   } else if (model.background) {
     out.push(`.background(Color.rose(${JSON.stringify(hexOf(model.background))}))`);
   }
@@ -707,11 +714,14 @@ import Foundation
 extension Color {
     static func rose(_ hex: String) -> Color {
         let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
-        guard cleaned.count >= 6, let value = UInt64(cleaned.prefix(6), radix: 16) else { return .primary }
+        // Eight digits carry CSS's own alpha: #rrggbbaa
+        let digits = cleaned.count >= 8 ? String(cleaned.prefix(8)) : String(cleaned.prefix(6))
+        guard digits.count >= 6, let value = UInt64(digits, radix: 16) else { return .primary }
         let red = Double((value >> 16) & 0xFF) / 255
         let green = Double((value >> 8) & 0xFF) / 255
         let blue = Double(value & 0xFF) / 255
-        return Color(red: red, green: green, blue: blue)
+        let alpha = digits.count >= 8 ? Double((value >> 24) & 0xFF) / 255 : 1
+        return Color(red: red, green: green, blue: blue, opacity: alpha)
     }
 }
 
@@ -2060,6 +2070,9 @@ interface SwiftCtx {
   /** R269: same exposure for the `__active_<class>__<scope>` keys - an element
    *  whose class is in here gets a pressing gesture on an @State flag. */
   activeKeys?: Set<string>;
+  /** Raw-CSS facts the shared model does not carry: a grid's fixed column
+   *  count, a radial gradient, and pseudo-element content, by class name. */
+  cssExtras?: SwiftCssExtras;
   /** Inside a component: its declared props, whose edits ride the change callbacks. */
   componentProps: Set<string>;
   /** The forms this page declares and the page's exported action. */
@@ -2201,6 +2214,7 @@ function renderPage(
       }
       return keys;
     })(),
+    cssExtras: swiftCssExtras([globalCss, page.style].filter((s) => s && s.trim()).join('\n'), warnings),
   };
   emitNodes(page.nodes, ctx);
   // R247: one @State flag per synthetic hover class. The element's .onHover
@@ -2759,6 +2773,73 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: SwiftCtx):
 }
 
 /**
+ * Facts the shared style model does not carry, read straight from the raw CSS:
+ * a grid's fixed column count, whether a class paints a radial gradient, and
+ * pseudo-element text. Keyed by plain class name, first declaration wins.
+ */
+interface SwiftCssExtras {
+  gridCols: Map<string, number>;
+  radial: Set<string>;
+  pseudo: Map<string, { before?: string; after?: string }>;
+}
+
+function swiftCssExtras(css: string, warnings: string[]): SwiftCssExtras {
+  const gridCols = new Map<string, number>();
+  const radial = new Set<string>();
+  const pseudo = new Map<string, { before?: string; after?: string }>();
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const classesOf = (sel: string): string[] => {
+    const base = sel.replace(/::?(before|after)\b.*/i, '');
+    const last = base.trim().split(/[\s>+~]+/).pop() ?? '';
+    return [...last.matchAll(/\.([A-Za-z_][\w-]*)/g)].map((m) => m[1]);
+  };
+  // Rule bodies without nested braces: an @media block is not matched as a
+  // whole, so its rules are read as if the width guard did not exist.
+  for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selectorText = m[1].trim();
+    if (/^@/.test(selectorText)) continue;
+    const body = m[2];
+    const decls = declarationsOf(body);
+    const display = decls.find((d) => d.prop === 'display')?.value.toLowerCase().trim();
+    const tpl = decls.find((d) => d.prop === 'grid-template-columns')?.value;
+    const isRadial = /radial-gradient\(/i.test(body);
+    const content = decls.find((d) => d.prop === 'content')?.value;
+    for (const raw of selectorText.split(',')) {
+      const sel = raw.trim();
+      if (!sel) continue;
+      const pt = /::?(before|after)\b/i.exec(sel);
+      if (pt) {
+        const cls = classesOf(sel);
+        if (!cls.length) {
+          warnings.push(`xcode: ${pt[0]} on a tag selector is not rendered`);
+          continue;
+        }
+        const lit = content ? /^(['"])([\s\S]*)\1$/.exec(content.trim()) : null;
+        if (content && !lit) {
+          warnings.push(`xcode: ${pt[0]} content is only supported as a quoted string - the pseudo element is dropped`);
+          continue;
+        }
+        if (!lit || !lit[2]) continue;
+        const key = cls[cls.length - 1];
+        const entry = pseudo.get(key) ?? {};
+        if (pt[1].toLowerCase() === 'before') entry.before = entry.before ?? lit[2];
+        else entry.after = entry.after ?? lit[2];
+        pseudo.set(key, entry);
+        continue;
+      }
+      if (display === 'grid' || display === 'inline-grid') {
+        if (!tpl) continue;
+        const repeat = /repeat\(\s*(\d+)\s*,/i.exec(tpl);
+        const cols = repeat ? Number(repeat[1]) : splitValues(tpl.replace(/\[[^\]]*\]/g, ' ')).length;
+        if (cols > 1) for (const c of classesOf(sel)) gridCols.set(c, cols);
+      }
+      if (isRadial) for (const c of classesOf(sel)) radial.add(c);
+    }
+  }
+  return { gridCols, radial, pseudo };
+}
+
+/**
  * The RoseStyle expression for one element, plus the model export time can
  * already see. ALL its classes take part in the cascade - not just the first,
  * which is what this emitter used to read - an inline style="" merges on top,
@@ -2769,7 +2850,16 @@ function swiftStyleOf(
   node: Extract<IrNode, { kind: 'element' }>,
   binding: ReturnType<typeof elementStyleBinding>,
   ctx: SwiftCtx,
-): { expr: string | null; model: StyleModel; hoverKey?: string | null; focusKey?: string | null; activeKey?: string | null } {
+): {
+  expr: string | null;
+  model: StyleModel;
+  hoverKey?: string | null;
+  focusKey?: string | null;
+  activeKey?: string | null;
+  grid?: { cols: number } | null;
+  radial?: boolean;
+  pseudo?: { before?: string; after?: string } | null;
+} {
   // The cascade is asked even for a classless element: a stylesheet may style
   // the tag itself (`h2 { ... }`), and the browser's own type scale is part
   // of the same answer.
@@ -2795,9 +2885,25 @@ function swiftStyleOf(
     const key = `__active_${c}__${ctx.file}`;
     if (ctx.activeKeys?.has(key)) { activeKey = key; break; }
   }
+  // Grid columns, radial gradients and pseudo-element text are not in the
+  // shared model; the raw-CSS scan keys them by plain class name.
+  let grid: { cols: number } | null = null;
+  let radial = false;
+  let pseudo: { before?: string; after?: string } | null = null;
+  for (const c of binding.staticClasses) {
+    const cols = ctx.cssExtras?.gridCols.get(c);
+    if (cols && !grid) grid = { cols };
+    if (ctx.cssExtras?.radial.has(c)) radial = true;
+    const p = ctx.cssExtras?.pseudo.get(c);
+    if (p) {
+      pseudo = pseudo ?? {};
+      if (p.before !== undefined && pseudo.before === undefined) pseudo.before = p.before;
+      if (p.after !== undefined && pseudo.after === undefined) pseudo.after = p.after;
+    }
+  }
   // R471: a project with a dark half resolves every class at runtime, so the
   // system appearance can switch the colours; inlined ones could not.
-  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey && swiftDarkRules === 0) return { expr: null, model, hoverKey, focusKey, activeKey };
+  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey && swiftDarkRules === 0) return { expr: null, model, hoverKey, focusKey, activeKey, grid, radial, pseudo };
   const classParts = [
     ...binding.staticClasses.map((c) => JSON.stringify(c)),
     ...binding.dynamicClassExprs.map((e) => swiftExpr(e, ctx)),
@@ -2811,7 +2917,7 @@ function swiftStyleOf(
     const entries = binding.dynamicStyle.map((s) => `${JSON.stringify(s.prop)}: ${swiftExpr(s.code, ctx)}`).join(', ');
     args.push(`props: [String: Any](${entries})`);
   }
-  return { expr: `roseResolve(${args.join(', ')})`, model, hoverKey, focusKey, activeKey };
+  return { expr: `roseResolve(${args.join(', ')})`, model, hoverKey, focusKey, activeKey, grid, radial, pseudo };
 }
 
 /** R247: the SwiftUI @State name backing one synthetic hover class. */
@@ -2868,7 +2974,16 @@ function swiftInlineRuns(children: IrNode[], ctx: SwiftCtx, mods: string[]): Arr
 function emitElementStyled(
   node: Extract<IrNode, { kind: 'element' }>,
   ctx: SwiftCtx,
-  style: { expr: string | null; model: StyleModel; hoverKey?: string | null; focusKey?: string | null; activeKey?: string | null },
+  style: {
+    expr: string | null;
+    model: StyleModel;
+    hoverKey?: string | null;
+    focusKey?: string | null;
+    activeKey?: string | null;
+    grid?: { cols: number } | null;
+    radial?: boolean;
+    pseudo?: { before?: string; after?: string } | null;
+  },
 ): void {
   const tag = node.tag.toLowerCase();
   // Declared here, at the top: every branch below (buttons, links, fields,
@@ -2895,7 +3010,7 @@ function emitElementStyled(
   }
   if (model.display === 'none') return; // `display: none` renders nothing at all
   const textMods = styleExpr ? [`.roseText(${styleExpr})`] : swiftTextModsOf(model, ctx.fontMap);
-  const boxMods = styleExpr ? [`.roseBox(${styleExpr})`] : swiftBoxModsOf(model, { full: false, align: 'leading' });
+  const boxMods = styleExpr ? [`.roseBox(${styleExpr})`] : swiftBoxModsOf(model, { full: false, align: 'leading' }, !!style.radial);
   // R247: a `:hover` half makes the element hoverable - the closure flips the
   // @State flag the synthetic class reads. On a phone (no pointer) it never
   // fires; on an iPad with a trackpad or a Mac it is real.
@@ -2918,7 +3033,12 @@ function emitElementStyled(
     const v = activeVarName(style.activeKey);
     variantMods.push(`.onLongPressGesture(minimumDuration: .infinity, pressing: { pressing in ${v} = pressing }, perform: {})`);
   }
-  boxMods.push(...variantMods);
+  // A `::before` / `::after` with a quoted string content becomes a small
+  // overlay text: the pseudo element itself has no box in SwiftUI.
+  const pseudoMods: string[] = [];
+  if (style.pseudo?.before) pseudoMods.push(`.overlay(alignment: .topLeading) { Text(${JSON.stringify(style.pseudo.before)}).font(.system(size: 12)).allowsHitTesting(false) }`);
+  if (style.pseudo?.after) pseudoMods.push(`.overlay(alignment: .bottomTrailing) { Text(${JSON.stringify(style.pseudo.after)}).font(.system(size: 12)).allowsHitTesting(false) }`);
+  boxMods.push(...variantMods, ...pseudoMods);
   const comp = ctx.components.find((c) => c.name.toLowerCase() === tag);
   if (comp) {
     const declared = componentProps(comp.script);
@@ -3254,8 +3374,11 @@ function emitElementStyled(
   const flexed = styleExpr !== null
     || model.display === 'flex' || model.direction !== undefined
     || model.justify !== undefined || model.align !== undefined || model.gap !== undefined;
-  const fullBox = styleExpr ? null : swiftBoxModsOf(model, { full: true, align: swiftFrameAlignOf(model.justify, dir) });
-  if (!flexed && !styleExpr && (!fullBox || fullBox.length === 0)) {
+  const fullBox = styleExpr ? null : swiftBoxModsOf(model, { full: true, align: swiftFrameAlignOf(model.justify, dir) }, !!style.radial);
+  // A fixed column count from `grid-template-columns`: the raw-CSS scan knows
+  // it even though the shared model folds grid into a wrapping flex row.
+  const gridCols = style.grid?.cols ?? 0;
+  if (!flexed && !styleExpr && (!fullBox || fullBox.length === 0) && gridCols <= 1) {
     // An unstyled container emits exactly what it always did.
     if (isRow) {
       emit(`HStack(alignment: .center, spacing: 8) {`, ctx);
@@ -3275,7 +3398,7 @@ function emitElementStyled(
   // A styled container takes its direction, alignment and gap from the style
   // instead of from the tag name alone - and justify becomes real Spacers on
   // the main axis, which collapse when there is no space to distribute.
-  if (model.wrap) ctx.warnings.push(`xcode: flex-wrap on <${tag}> has no SwiftUI layout - rendered as one ${dir}`);
+  if (model.wrap && gridCols <= 1) ctx.warnings.push(`xcode: flex-wrap on <${tag}> has no SwiftUI layout - rendered as one ${dir}`);
   const crossRow: Record<string, string> = { start: '.top', center: '.center', end: '.bottom', stretch: '.top' };
   const crossCol: Record<string, string> = { start: '.leading', center: '.center', end: '.trailing', stretch: '.leading' };
   const cross = dir === 'row' ? (crossRow[model.align ?? ''] ?? '.center') : (crossCol[model.align ?? ''] ?? '.leading');
@@ -3286,7 +3409,16 @@ function emitElementStyled(
   // a colour that flips with the appearance reaches the bare text inside.
   const chain = (styleExpr
     ? `.frame(maxWidth: .infinity, alignment: ${frameAlign}).roseText(${styleExpr}).roseBox(${styleExpr})`
-    : (fullBox ?? []).join('')) + variantMods.join('');
+    : (fullBox ?? []).join('')) + variantMods.join('') + pseudoMods.join('');
+  if (gridCols > 1) {
+    // CSS grid: a fixed column count is SwiftUI's LazyVGrid.
+    emit(`LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: ${gap}), count: ${gridCols}), spacing: ${gap}) {`, ctx);
+    ctx.depth++;
+    emitNodes(node.children, ctx);
+    ctx.depth--;
+    emit(`}${chain}`, ctx);
+    return;
+  }
   emit(`${dir === 'row' ? 'HStack' : 'VStack'}(alignment: ${cross}, spacing: ${gap}) {`, ctx);
   ctx.depth++;
   // The IR keeps whitespace text nodes between children; only the children a
@@ -4087,6 +4219,7 @@ function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; sc
     deferred: [],
     forms: [],
     pageAction: null,
+    cssExtras: swiftCssExtras([globalCss, comp.style].filter((s) => s && s.trim()).join('\n'), warnings),
   };
   emitNodes(comp.nodes, ctx);
   const defaults = new Map(componentProps(comp.script).map((p) => [p.name, swiftLiteral(p.init)]));

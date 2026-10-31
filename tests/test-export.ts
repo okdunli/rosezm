@@ -4157,15 +4157,20 @@ try {
     assert(/\.offset\(x: 6, y: 4\)\.zIndex\(5\)/.test(px), 'xcode: the same box is offset with its z-index on SwiftUI');
     const posWarns = [...(posK.warnings ?? []), ...(posA.warnings ?? []), ...(posX.warnings ?? [])];
     assert(!posWarns.some((w) => /position/i.test(w)), 'no target reports position as dropped any more');
-    // R225: Qt places the same box by moving it, and the toolkit that genuinely
-    // cannot (Tk) says so instead of leaving the element in the flow silently.
+    // R225: every target now places the out-of-flow box itself - Qt moves it,
+    // Tk pins it with place(), WPF sets Position + insets, and Swing folds the
+    // top/left inset into the margin its layouts already honour.
     const posC = await exportProject('cpp', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-c') });
     const pc = readFileSync(join(posC.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
     assert(/rose_apply_box\(panel\d+, RoseStyle\{.*, true, 6, 4/.test(pc), 'cpp: the out-of-flow box carries absolute + its offset into Qt');
     const posP = await exportProject('python', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-p') });
-    assert((posP.warnings ?? []).some((w) => /python: position: absolute on <div class="stack">/.test(w)), 'python: Tk names the position it cannot honour, rather than dropping it in silence');
+    const pp = readFileSync(join(posP.outDir, 'pages/index.py'), 'utf8');
+    assert(/\.place\(x=6, y=4, anchor='nw'\)/.test(pp), 'python: Tk places an absolute box from its top/left inset');
+    assert(/\.place\(relx=1\.0, x=-12, rely=1\.0, y=-10, anchor='se'\)/.test(pp), 'python: a bottom/right inset pins to the far edge');
     const posN = await exportProject('dotnet', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-n') });
-    assert((posN.warnings ?? []).some((w) => /dotnet: position: absolute on <div class="stack">/.test(w)), 'dotnet: WPF names the position it cannot honour');
+    const pn = readFileSync(join(posN.outDir, 'Pages/IndexPage.cs'), 'utf8');
+    assert(pn.includes('Position = "absolute"') && pn.includes('InsetTop = 4') && pn.includes('InsetLeft = 6'), 'dotnet: WPF places an absolute box from its insets');
+    assert(!(posN.warnings ?? []).some((w) => /position/i.test(w)), 'dotnet: position is placed, not reported as dropped');
     // R226: Flutter can place it for real - Positioned inside a Stack, which is
     // the only place a Positioned is legal, so roseBox emits the Stack itself.
     const posF = await exportProject('flutter', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-f') });
@@ -4716,6 +4721,59 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(/val __hovered__hover_btn__H by __hovered__hover_btn__HSource\.collectIsHoveredAsState\(\)/.test(page), 'the hover flag is a collected state');
     assert(/\.hoverable\(__hovered__hover_btn__HSource\)/.test(page), 'the element is hoverable');
     assert(/if \(__hovered__hover_btn__H\) "__hover_btn__H" else ""/.test(page), 'the synthetic class joins the resolve list while hovered');
+  }
+
+  // R497: Compose shadows, transforms and the hover half that only sets
+  // `border-color`. The hover rule used to land as its own inline model, so a
+  // page's base `border: 1px solid` vanished on hover; it now merges over the
+  // base entry. `box-shadow` reaches `.roseShadow(...)` and a translucent
+  // colour keeps its alpha instead of being flattened to opaque.
+  {
+    const k2Root = join(scratch, 'shadowkt');
+    mkdirSync(join(k2Root, 'src/pages'), { recursive: true });
+    writeFileSync(join(k2Root, 'src/pages/h.rose'), `<style>
+  .btn { border: 1px solid #000; }
+  .btn:hover { border-color: #e91e63; }
+  .card { box-shadow: 0 2px 6px rgba(0,0,0,0.3); transform: translateY(-2px); }
+</style>
+<button class="btn">press me</button>
+<div class="card">card</div>
+`);
+    const dir2 = join(scratch, 'shadowkt-out');
+    await exportProject('android', k2Root, { apiBase: 'http://x', outRoot: dir2 });
+    const base2 = join(dir2, 'android', 'app/src/main/java/dev/rosezm/app');
+    const theme2 = readFileSync(join(base2, 'kit/RoseTheme.kt'), 'utf8');
+    assert(/"__hover_btn__H" to RoseStyle\(borderWidth = 1f, borderColor = Color\(0xFFE91E63\)\)/.test(theme2), 'the hover half borrows the base border width it does not restate');
+    assert(/shadow = RoseShadow\(color = Color\(0x4D000000\), blur = 6f, dx = 0f, dy = 2f, spread = 0f\)/.test(theme2), 'a box-shadow becomes a RoseShadow and keeps its alpha');
+    const page2 = readFileSync(join(base2, 'pages/HPage.kt'), 'utf8');
+    assert(/graphicsLayer \{ translationY = -2f \}/.test(page2), 'a transform lands on one graphics layer');
+    assert(/\.roseShadow\(RoseShadow\(/.test(page2), 'the element carries the shadow modifier');
+  }
+
+  // R498: a page's own `:root` variables and `calc()` lengths. Both used to be
+  // dropped on the page `<style>` path - only global css went through the
+  // variable resolver - so a native target got no colour from `var(--brand)`
+  // and no width from `calc(100% - 24px)`.
+  {
+    const vRoot = join(scratch, 'varsandcal');
+    mkdirSync(join(vRoot, 'src/pages'), { recursive: true });
+    writeFileSync(join(vRoot, 'src/pages/t.rose'), `<style>
+  :root { --brand: #6d28d9; --pad: 12px; }
+  .card { color: var(--brand); padding: var(--pad); }
+  .wide { width: calc(100% - 24px); }
+</style>
+<div class="card wide">hi</div>
+`);
+    const vDir = join(scratch, 'varsandcal-out');
+    await exportProject('android', vRoot, { apiBase: 'http://x', outRoot: vDir });
+    await exportProject('weapp', vRoot, { outRoot: vDir });
+    const vTheme = readFileSync(join(vDir, 'android/app/src/main/java/dev/rosezm/app/kit/RoseTheme.kt'), 'utf8');
+    assert(/RoseStyle\(color = Color\(0xFF6D28D9\)/.test(vTheme), 'a page :root variable reaches the native colour');
+    assert(!/var\(--brand\)/.test(vTheme), 'no var() survives into the native theme');
+    assert(/RoseStyle\(width = 365\.8f/.test(vTheme), 'a calc() length lands as a resolved figure');
+    const vCss = readFileSync(join(vDir, 'weapp/pages/t/t.wxss'), 'utf8');
+    assert(/color: #6d28d9/.test(vCss), 'the web target gets the resolved colour too');
+    assert(/width: calc\(100% - 24px\)/.test(vCss), 'a browser keeps calc() as written');
   }
 
   // R247: SwiftUI `:hover`. The same shape a fourth time - a synthetic style
@@ -7319,6 +7377,40 @@ h2 { font-size: 40px; }
       'the cookie the middleware set rides the render result');
     const walled = await server.runMiddleware(new Request('http://localhost/walled'));
     assert(walled instanceof Response && walled.status === 302, 'the middleware wall still short-circuits - $setCookie did not swallow the guard');
+  }
+
+  {
+    // R501: a CSS grid with a real column count, and a radial gradient. Both
+    // used to be flattened into the wrapping flex row the shared model invents
+    // for display:grid, which is not what the stylesheet asked for. Each target
+    // now projects the column count onto the grid its toolkit actually has.
+    const nativeProj = join(scratch, 'nativeproj');
+    mkdirSync(join(nativeProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(nativeProj, 'src/pages/index.rose'), `<style>
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .cell { background: #eeeeee; padding: 8px; }
+  .hero { background: radial-gradient(circle, #ff0000, #0000ff); width: 200px; }
+</style>
+<div class="grid"><div class="cell">1</div><div class="cell">2</div></div>
+<div class="hero">hero</div>
+`);
+    const nArk = await exportProject('arkts', nativeProj, { apiBase: 'x', outRoot: join(scratch, 'native-ark') });
+    const nEts = readFileSync(join(nArk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
+    assert(/Grid\(\) \{[\s\S]*GridItem\(\) \{[\s\S]*\.columnsTemplate\('1fr 1fr'\)\.columnsGap\(8\)\.rowsGap\(8\)/.test(nEts), 'arkts: the grid is a real ArkUI Grid carrying its column template and both gaps');
+    const nFl = await exportProject('flutter', nativeProj, { apiBase: 'x', outRoot: join(scratch, 'native-fl') });
+    const nDart = readFileSync(join(nFl.outDir, 'lib/styles.dart'), 'utf8');
+    assert(nDart.includes("'grid__index': RoseStyle(gap: 8, direction: 'row', wrap: true, gridColumns: 2)"), 'flutter: the column count rides the compiled style table');
+    assert(nDart.includes('Widget roseGrid('), 'flutter: the runtime carries a real grid builder');
+    assert(nDart.includes("gradientKind: 'radial'"), 'flutter: a radial-gradient marks its kind so the runtime paints a RadialGradient');
+    const nX = await exportProject('xcode', nativeProj, { apiBase: 'x', outRoot: join(scratch, 'native-x') });
+    const nSw = walk(nX.outDir).filter((f) => f.endsWith('.swift')).map((f) => readFileSync(f, 'utf8')).join('\n');
+    assert(/LazyVGrid\(columns: Array\(repeating: GridItem\(\.flexible\(\), spacing: 8\), count: 2\)/.test(nSw), 'xcode: the grid becomes a LazyVGrid with two flexible columns and its spacing');
+    const nPy = await exportProject('python', nativeProj, { apiBase: 'x', outRoot: join(scratch, 'native-py') });
+    const nPySrc = readFileSync(join(nPy.outDir, 'pages/index.py'), 'utf8');
+    assert(/\.pack\(row=0, column=0\)/.test(nPySrc) && /\.pack\(row=0, column=1, padx=\(8, 0\)\)/.test(nPySrc), 'python: a grid cell names its row and column, with the gap as its leading padding');
+    const nJ = await exportProject('java', nativeProj, { apiBase: 'x', outRoot: join(scratch, 'native-j') });
+    const nJava = readFileSync(join(nJ.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
+    assert(/STYLES\.put\("grid__Index", new Style\(.*\)\.grid\(2, 0, 8, 0\)\)/.test(nJava), 'java: the column count and gap reach the theme grid manager');
   }
 
   console.log(`\nAll export checks passed - one source tree, ${result.pages.length} pages to WeChat, ${alipay.pages.length} to Alipay, ${flutter.pages.length} to Flutter/Dart, ${python.pages.length} to Python/Tkinter, ${arkts.pages.length} to HarmonyOS ArkTS, ${android.pages.length} to Android/Compose, ${xcode.pages.length} to Xcode/SwiftUI, ${java.pages.length} to Java/Swing, ${dotnet.pages.length} to .NET/WPF, ${cpp.pages.length} to C++/Qt; the Electron shell wraps the built site - ${checks} assertions.\nEvery target in the registry is ready - one .rose tree, every platform.`);

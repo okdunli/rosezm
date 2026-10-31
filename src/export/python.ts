@@ -35,7 +35,7 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject, type Justify, type Align, type ElementStyleBinding } from './style-engine.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, ruleMatches, type StyleSheet, type StyleModel, type StyleSubject, type StyleRule, type Justify, type Align, type ElementStyleBinding, type Gradient } from './style-engine.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, type HandlerDialect } from './handler-ir.js';
@@ -299,6 +299,330 @@ function tkColor(c: string | undefined): string | null {
   return `'#${hex.slice(0, 6)}'`;
 }
 
+/** A colour's RGB triple, or null when it is not a hex colour. */
+function rgbOf(c: string): [number, number, number] | null {
+  const hex = c.replace('#', '').toLowerCase();
+  if (hex.length !== 6 && hex.length !== 8) return null;
+  const n = parseInt(hex.slice(0, 6), 16);
+  if (!Number.isFinite(n)) return null;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** A gradient has no Tk equivalent, so it becomes one solid colour: the RGB
+ *  colour at the 50% mark of the 0-100 stop scale, mixed from its neighbours. */
+function blendStops(g: Gradient): string | null {
+  const stops = [...g.stops].sort((a, b) => a.at - b.at);
+  if (stops.length === 0) return null;
+  if (stops.length === 1) return stops[0].color;
+  const at = 50;
+  if (at <= stops[0].at) return stops[0].color;
+  if (at >= stops[stops.length - 1].at) return stops[stops.length - 1].color;
+  for (let i = 1; i < stops.length; i++) {
+    const lo = stops[i - 1];
+    const hi = stops[i];
+    if (at > hi.at) continue;
+    const t = hi.at === lo.at ? 0 : (at - lo.at) / (hi.at - lo.at);
+    const a = rgbOf(lo.color);
+    const b = rgbOf(hi.color);
+    if (!a || !b) return lo.color;
+    const mix = a.map((v, j) => Math.round(v + (b[j] - v) * t));
+    return `#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return stops[stops.length - 1].color;
+}
+
+/** The solid stand-in for a gradient, unquoted. */
+function gradientColor(g: Gradient | undefined): string | undefined {
+  return g ? blendStops(g) ?? undefined : undefined;
+}
+
+/** A shadow colour's alpha (1 when it has no alpha channel). */
+function alphaOf(c: string): number {
+  const hex = c.replace('#', '').toLowerCase();
+  return hex.length === 8 ? parseInt(hex.slice(6), 16) / 255 : 1;
+}
+
+/** `#rrggbbaa` composited over `surface` (a quoted Tk colour), so a translucent
+ *  shadow reads as the tint Tk can actually paint. Null when it is invisible. */
+function alphaOver(c: string, surface: string | null): string | null {
+  const hex = c.replace('#', '').toLowerCase();
+  if (hex.length !== 8) return tkColor(c);
+  const a = parseInt(hex.slice(6), 16) / 255;
+  if (!(a > 0)) return null;
+  if (a >= 1) return `'#${hex.slice(0, 6)}'`;
+  const fg = rgbOf(hex);
+  if (!fg) return null;
+  const bg = (surface ?? "'#ffffff'").replace(/['#]/g, '');
+  const under = rgbOf(bg) ?? [255, 255, 255];
+  const mix = fg.map((v, i) => Math.round(v * a + under[i] * (1 - a)));
+  return `'#${mix.map((v) => v.toString(16).padStart(2, '0')).join('')}'`;
+}
+
+/** One selector of a raw CSS block whose effect is placement, not paint: an
+ *  `:nth-child` rule is a position among siblings, a `::before/::after` rule is
+ *  a box of its own, and `display:grid` is a cell matrix. The shared cascade
+ *  resolves a model per element, so these three are lifted out of the sheet and
+ *  resolved against the parent chain and the child index instead. */
+interface RawRuleEntry {
+  kind: 'struct' | 'pseudo' | 'grid';
+  /** The selector without its structural suffix. */
+  base: string;
+  /** The `:nth-child` formula: 1-based index i matches when a is 0 ? i === b. */
+  nth?: { a: number; b: number };
+  pos?: 'before' | 'after';
+  content?: string;
+  guard?: { min?: number; max?: number };
+  grid?: { cols: number; gapX: number; gapY: number; weights: number[] };
+  decls: string;
+  rule?: StyleRule;
+}
+
+interface RawScan {
+  /** The CSS with comments blanked, so every span stays in source coordinates. */
+  src: string;
+  entries: RawRuleEntry[];
+  /** Blocks the shared cascade must not see (their rules are per-index). */
+  removed: Array<[number, number]>;
+}
+
+/** Split on top-level whitespace, so `repeat(3, 1fr)` stays one token. */
+function splitTopLevel(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of text) {
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+    if (/\s/.test(ch) && depth === 0) {
+      if (cur) { out.push(cur); cur = ''; }
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** A selector list split on commas that are not inside `()` or `[]`. */
+function splitSelectors(prelude: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of prelude) {
+    if (ch === '(' || ch === '[') depth++;
+    else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+/** `odd` / `even` / `3` / `2n+1` / `-n+3` as an {a, b} pair. */
+function parseNth(arg: string | undefined): { a: number; b: number } | null {
+  const v = (arg ?? '').replace(/\s+/g, '').toLowerCase();
+  if (v === 'odd') return { a: 2, b: 1 };
+  if (v === 'even') return { a: 2, b: 0 };
+  if (/^[+-]?\d+$/.test(v)) return { a: 0, b: Number(v) };
+  const m = /^([+-]?\d*)n([+-]\d+)?$/.exec(v);
+  if (!m) return null;
+  const a = m[1] === '' || m[1] === '+' ? 1 : m[1] === '-' ? -1 : Number(m[1]);
+  return { a, b: m[2] ? Number(m[2]) : 0 };
+}
+
+/** Does the 1-based child index match an nth-child formula? */
+function nthMatches(nth: { a: number; b: number }, i: number): boolean {
+  if (nth.a === 0) return i === nth.b;
+  const d = i - nth.b;
+  return d % nth.a === 0 && d / nth.a >= 0;
+}
+
+/** Is a rule's `@media` guard live at the window the emitter opens? */
+function mediaOk(guard?: { min?: number; max?: number }): boolean {
+  return !guard || ((guard.min ?? 0) <= REFERENCE_WIDTH && REFERENCE_WIDTH <= (guard.max ?? Infinity));
+}
+
+/** `repeat(N, ...)` expanded into tracks, each track's fr weight (0 otherwise). */
+function parseTracks(value: string): { count: number; weights: number[] } | null {
+  if (/auto-(fill|fit)/i.test(value)) return null; // the count is runtime, not CSS
+  const tracks: string[] = [];
+  for (const token of splitTopLevel(value.trim())) {
+    const rep = /^repeat\(\s*(\d+)\s*,(.*)\)$/is.exec(token);
+    if (rep) {
+      const inner = splitTopLevel(rep[2].trim());
+      for (let i = 0; i < Number(rep[1]); i++) tracks.push(...inner);
+    } else {
+      tracks.push(token);
+    }
+  }
+  if (!tracks.length) return null;
+  return {
+    count: tracks.length,
+    weights: tracks.map((t) => {
+      const fr = /^([\d.]+)fr$/i.exec(t);
+      return fr ? Math.max(0, Number(fr[1])) : 0;
+    }),
+  };
+}
+
+/** Walk the page CSS and lift out every rule the shared cascade cannot express.
+ *  A block whose selectors are ALL nth-child rules is removed from the sheet
+ *  (the engine strips the suffix, which would apply it to every sibling); a
+ *  mixed block stays for the engine's approximation and is also resolved here. */
+function scanRawCss(css: string): RawScan {
+  // Blank comments in place so every recorded span stays in source coordinates.
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+  const vars = new Map<string, string>();
+  for (const m of src.matchAll(/(--[\w-]+)\s*:\s*([^;{}]+)/g)) vars.set(m[1], m[2].trim());
+  const inlineVars = (text: string): string => {
+    let out = text;
+    for (let pass = 0; pass < 8; pass++) {
+      let changed = false;
+      out = out.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)/g, (whole, name: string, fallback?: string) => {
+        const v = vars.get(name);
+        if (v !== undefined) { changed = true; return v; }
+        if (fallback !== undefined) { changed = true; return fallback.trim(); }
+        return whole;
+      });
+      if (!changed) break;
+    }
+    return out;
+  };
+  const guardOf = (prelude: string): { min?: number; max?: number } | null => {
+    const g: { min?: number; max?: number } = {};
+    let found = false;
+    for (const m of prelude.matchAll(/\((min|max)-width\s*:\s*([\d.]+)px\)/gi)) {
+      found = true;
+      const v = Number(m[2]);
+      if (m[1].toLowerCase() === 'min') g.min = Math.max(g.min ?? 0, v);
+      else g.max = Math.min(g.max ?? Infinity, v);
+    }
+    return found ? g : null;
+  };
+  const classify = (part: string, body: string): Omit<RawRuleEntry, 'decls'> | null => {
+    const pseudo = /::?(before|after)\s*$/i.exec(part);
+    if (pseudo) {
+      const base = part.slice(0, pseudo.index).trim();
+      if (!base) return null;
+      const content = /content\s*:\s*(?:'([^']*)'|"([^"]*)")\s*;?/i.exec(body);
+      if (!content) return null;
+      return { kind: 'pseudo', base, pos: pseudo[1].toLowerCase() as 'before' | 'after', content: content[1] ?? content[2] ?? '' };
+    }
+    const nth = /:(first-child|nth-child\(\s*([^)]*)\s*\))\s*$/i.exec(part);
+    if (nth) {
+      const base = part.slice(0, nth.index).trim();
+      if (!base) return null;
+      const formula = nth[1].toLowerCase() === 'first-child' ? { a: 0, b: 1 } : parseNth(nth[2]);
+      if (!formula) return null;
+      return { kind: 'struct', base, nth: formula };
+    }
+    if (/display\s*:\s*grid/i.test(body)) {
+      const cols = /grid-template-columns\s*:\s*([^;]+)/i.exec(body);
+      const tracks = cols ? parseTracks(cols[1]) : null;
+      if (!tracks) return null;
+      const gap = /(?:^|[;{\s])gap\s*:\s*([^;]+)/i.exec(body);
+      const colGap = /column-gap\s*:\s*([^;]+)/i.exec(body);
+      const rowGap = /row-gap\s*:\s*([^;]+)/i.exec(body);
+      const px = (v: string | undefined): number => {
+        const m = v ? /([\d.]+)px/.exec(v) : null;
+        return m ? Number(m[1]) : 0;
+      };
+      return { kind: 'grid', base: part, grid: { cols: tracks.count, gapX: px(colGap?.[1] ?? gap?.[1]), gapY: px(rowGap?.[1] ?? gap?.[1]), weights: tracks.weights } };
+    }
+    return null;
+  };
+  const entries: RawRuleEntry[] = [];
+  const removed: Array<[number, number]> = [];
+  const walk = (from: number, to: number, guard?: { min?: number; max?: number }): void => {
+    let i = from;
+    while (i < to) {
+      while (i < to && /\s/.test(src[i])) i++;
+      if (i >= to) break;
+      if (src[i] === '}') { i++; continue; }
+      // Read the prelude up to `{` (or `;` for a statement) at nesting depth 0.
+      let j = i;
+      let depth = 0;
+      let quote: string | null = null;
+      while (j < to) {
+        const ch = src[j];
+        if (quote) {
+          if (ch === '\\') { j += 2; continue; }
+          if (ch === quote) quote = null;
+          j++;
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; j++; continue; }
+        if (ch === '(' || ch === '[') depth++;
+        else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+        else if (depth === 0 && (ch === '{' || ch === ';')) break;
+        j++;
+      }
+      if (j >= to) break;
+      if (src[j] === ';') { i = j + 1; continue; }
+      // Matching close brace for the block that opens at j.
+      let k = j + 1;
+      let d = 1;
+      let q: string | null = null;
+      while (k < to && d > 0) {
+        const ch = src[k];
+        if (q) {
+          if (ch === '\\') { k += 2; continue; }
+          if (ch === q) q = null;
+          k++;
+          continue;
+        }
+        if (ch === '"' || ch === "'") { q = ch; k++; continue; }
+        if (ch === '{') d++;
+        else if (ch === '}') d--;
+        k++;
+      }
+      const bodyEnd = d === 0 ? k - 1 : to;
+      const prelude = src.slice(i, j).trim();
+      const body = src.slice(j + 1, bodyEnd);
+      if (prelude.startsWith('@')) {
+        const at = prelude.slice(1).split(/[\s(]/)[0].toLowerCase();
+        if (at === 'media') {
+          const inner = guardOf(prelude);
+          if (inner) {
+            const merged = guard
+              ? { min: Math.max(guard.min ?? 0, inner.min ?? 0), max: Math.min(guard.max ?? Infinity, inner.max ?? Infinity) }
+              : inner;
+            walk(j + 1, bodyEnd, merged);
+          }
+        }
+        i = k;
+        continue;
+      }
+      const classified = splitSelectors(prelude).map((part) => classify(part, body));
+      // A block whose every selector is an nth rule is per-index throughout:
+      // leaving it in the sheet would paint every sibling.
+      const structOnly = classified.length > 0 && classified.every((c) => c !== null && c.kind === 'struct');
+      if (structOnly) removed.push([i, k]);
+      for (const c of classified) {
+        if (!c) continue;
+        entries.push({ ...c, guard, decls: inlineVars(body) });
+      }
+      i = k;
+    }
+  };
+  walk(0, src.length);
+  return { src, entries, removed };
+}
+
+/** The CSS with the given spans cut out. Spans are cut in source order; an
+ *  overlapping span is skipped rather than corrupting the result. */
+function dropSpans(src: string, spans: Array<[number, number]>): string {
+  const sorted = [...spans].sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let at = 0;
+  for (const [start, end] of sorted) {
+    if (start < at) continue;
+    out += src.slice(at, start);
+    at = end;
+  }
+  return out + src.slice(at);
+}
+
 /** The Tk font tuple. px become points at the 1.5 scale a Tk font runs at. */
 function tkFont(m: StyleModel, rawFamily?: string): string | null {
   if (m.fontSize === undefined && m.fontWeight === undefined && !m.italic && !m.fontFamily && !m.underline && !m.strike) return null;
@@ -326,7 +650,7 @@ function tkFont(m: StyleModel, rawFamily?: string): string | null {
  */
 function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
-  const bg = tkColor(m.background ?? m.gradient?.stops[0]?.color);
+  const bg = tkColor(m.background ?? gradientColor(m.gradient));
   // R230: an explicit width/height. Tk counts a Label's width in CHARACTERS and
   // a Frame's in PIXELS, so the same number means two things - the author asked
   // for pixels, which is what the Frame path honours; the Label path is right
@@ -1146,9 +1470,11 @@ specificity and @media at the 390px reference width. flexbox becomes pack
 inheritance is handled by carrying text properties down explicitly.
 
 Still beyond Tk, and warned by the exporter instead of silently dropped:
-border-radius, box-shadow, opacity, gradients (the first stop paints),
+border-radius, opacity, gradients (approximated by one blended solid colour),
 letter-spacing, line-height, flex-wrap, overflow clipping, transitions and
-media playback (a video or an audio becomes a placeholder label). A
+media playback (a video or an audio becomes a placeholder label). box-shadow is
+approximated on containers as a padded frame behind the widget, and dropped on
+text. A
 class bound to state (class={expr}) resolves at runtime from styles.py.
 ${renderWarningSection(warnings)}`;
 }
@@ -1408,7 +1734,20 @@ function renderPage(
   // same engine the web build uses - the reference width decides an
   // @media-guarded rule. The theme comes first so the page's own `<style>` wins.
   const pageCss = [globalCss, page.style, compCss].filter((s) => s.trim()).join('\n');
-  const sheet = parseStylesheet([pageCss, SHELL_STYLES].join('\n'));
+  // Placement rules the shared cascade cannot express are lifted out first:
+  // `:nth-child` is a position among siblings, `::before/::after` is a box of
+  // its own, `display:grid` is a cell matrix. The rest of the sheet parses as
+  // before (a block whose selectors are all nth rules is dropped, because the
+  // engine strips the suffix and would paint every sibling).
+  const raw = scanRawCss([pageCss, SHELL_STYLES].join('\n'));
+  const sheet = parseStylesheet(dropSpans(raw.src, raw.removed));
+  // Each lifted selector resolves through the same engine on its own, so the
+  // rule keeps full specificity and combinators - only the media guard and the
+  // child index are checked by the emitter.
+  for (const e of raw.entries) e.rule = parseStylesheet(`${e.base} { ${e.decls} }`).rules[0];
+  const nthRules = raw.entries.filter((e) => e.kind === 'struct' && e.rule);
+  const pseudoRules = raw.entries.filter((e) => e.kind === 'pseudo' && e.rule);
+  const gridRules = raw.entries.filter((e) => e.kind === 'grid' && e.rule && e.grid);
   // The same CSS is parsed by compileStyles above; reporting its warnings here
   // again would print every selector twice.
   const fontStacks = fontStacksOf(pageCss);
@@ -1439,6 +1778,9 @@ function renderPage(
     ancestors: [],
     inherited: textCarry(bodyModel),
     layout: { dir: 'column', gap: 0 },
+    nthRules,
+    pseudoRules,
+    gridRules,
     lastChild: false,
     seq: { n: 0 },
     fontStacks,
@@ -1591,8 +1933,26 @@ interface PyCtx {
   /** The text properties a container passes down (explicit CSS inheritance -
    *  Tk inherits nothing). */
   inherited: StyleModel;
-  /** The container a node is packed into: direction, gap and alignment. */
-  layout: { dir: 'row' | 'column'; justify?: Justify; align?: Align; gap: number };
+  /** The container a node is packed into: direction, gap and alignment, plus
+   *  the cell matrix when the container is a CSS grid. */
+  layout: {
+    dir: 'row' | 'column';
+    justify?: Justify;
+    align?: Align;
+    gap: number;
+    /** `display:grid`: the column count and fr weights drive Tk's grid; `next`
+     *  is the shared cursor every child advances as it is placed. */
+    grid?: { cols: number; gapX: number; gapY: number; weights: number[]; next: { r: number; c: number } };
+  };
+  /** The element's 1-based index among its parent's element children, so an
+   *  `:nth-child` rule resolves here (the shared cascade cannot).
+   *  `undefined` on non-element nodes and outside a child list. */
+  nth?: number;
+  /** The page's `:nth-child`, `::before/::after` and grid rules, resolved per
+   *  element instead of through the sheet. */
+  nthRules?: RawRuleEntry[];
+  pseudoRules?: RawRuleEntry[];
+  gridRules?: RawRuleEntry[];
   /** This child is the last in its parent (justify-between pins it to the far
    *  edge, which is the one placement Tk's pack can express directly). */
   lastChild: boolean;
@@ -1636,6 +1996,27 @@ interface PackOpts {
  * to the far edge (`side='right'` / `side='bottom'`).
  */
 function packArgs(ctx: PyCtx, opts: PackOpts = {}): string {
+  const grid = ctx.layout.grid;
+  if (grid) {
+    // A grid child names its cell; Tk's grid has no side/fill of pack's kind -
+    // alignment becomes sticky, and gap is leading padding on the cell.
+    const [top, right, bottom, left] = opts.model?.margin ?? [0, 0, 0, 0];
+    const { r, c } = grid.next;
+    const parts: string[] = [`row=${r}`, `column=${c}`];
+    const padx = Math.round(left + (c > 0 ? grid.gapX : 0));
+    const pady = Math.round(top + (r > 0 ? grid.gapY : 0));
+    if (padx || right) parts.push(`padx=(${padx}, ${Math.round(right)})`);
+    if (pady || bottom) parts.push(`pady=(${pady}, ${Math.round(bottom)})`);
+    if (ctx.layout.align === 'start') parts.push("sticky='w'");
+    else if (ctx.layout.align === 'end') parts.push("sticky='e'");
+    else if (ctx.layout.align === 'stretch') parts.push("sticky='ew'");
+    grid.next.c = c + 1;
+    if (grid.next.c >= grid.cols) {
+      grid.next.c = 0;
+      grid.next.r = r + 1;
+    }
+    return parts.join(', ');
+  }
   const dir = ctx.layout.dir;
   const parts: string[] = [];
   let anchor = 'w';
@@ -1663,6 +2044,10 @@ function packArgs(ctx: PyCtx, opts: PackOpts = {}): string {
  *  leftover space exactly where a browser would put it. It paints the
  *  container's own surface so it is invisible, never a grey dot. */
 function emitSpacer(ctx: PyCtx): void {
+  // A grid container places every child by cell; a pack spacer inside it would
+  // raise "cannot use geometry manager pack inside ..." - a grid has no flex
+  // leftover to distribute anyway.
+  if (ctx.layout.grid) return;
   // tkColor already carries its own quotes (it is a Tcl color literal).
   const bg = ctx.surface ? `, bg=${ctx.surface}` : '';
   if (ctx.layout.dir === 'row') emit(`tk.Frame(${ctx.parent}, width=1, height=1${bg}).pack(side='left', expand=True)`, ctx);
@@ -1809,6 +2194,8 @@ function emitNodes(nodes: IrNode[], ctx: PyCtx): void {
   const visible = items.filter((it) => it.kind === 'node' || it.nodes.some((n) => n.kind === 'expr' || (n.kind === 'text' && n.value.trim() !== '')));
   const justify = ctx.layout.justify;
   let emitted = 0;
+  // CSS counts ELEMENT children only, so a text run never advances the index.
+  let nthCount = 0;
   if ((justify === 'center' || justify === 'end') && ctx.layout.dir === 'row') emitSpacer(ctx);
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -1822,8 +2209,10 @@ function emitNodes(nodes: IrNode[], ctx: PyCtx): void {
         emit(`tk.Label(${ctx.parent}, text=${text}, wraplength=680${decls.length ? ', ' + declsKw(decls) : ''}).pack(${packArgs(ctx, { last: isLast })})`, ctx);
       }
     } else {
-      // The child ctx carries its own "is last" so justify-between can pin it.
-      emitNode(item.node, { ...ctx, lastChild: isLast, seq: ctx.seq });
+      // The child ctx carries its own "is last" so justify-between can pin it,
+      // and its 1-based element index so an :nth-child rule can land on it.
+      const nth = item.node.kind === 'element' ? ++nthCount : undefined;
+      emitNode(item.node, { ...ctx, lastChild: isLast, seq: ctx.seq, nth });
     }
     if (ctx.lines.length === before) continue;
     emitted++;
@@ -2070,7 +2459,7 @@ function rawFamilyOf(classes: string[], ctx: PyCtx): string | undefined {
  * asked for them. A native toolkit is allowed to be poorer than CSS - it is
  * not allowed to be silently poorer.
  */
-function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx): void {
+function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx, shadowApprox = false): void {
   // R257: the note is keyed by the FEATURE AND THE ELEMENT, not by the
   // feature alone. The bare feature name made the first element that asked
   // for it swallow the whole page: a card and a button with their own radii
@@ -2089,9 +2478,13 @@ function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx): void {
     const one = new Set(m.radius.filter((v) => v > 0)).size === 1;
     note('radius', `border-radius on ${who} has no Tk equivalent - the ${corners} corner${one ? '' : 's'} stay${one ? 's' : ''} square`);
   }
-  if (m.shadow) note('shadow', `box-shadow on ${who} is dropped - Tk draws no shadow`);
+  if (m.shadow) {
+    note('shadow', shadowApprox
+      ? `box-shadow on ${who} is approximated - a padded frame painted with the shadow colour stands in for the blur`
+      : `box-shadow on ${who} is dropped - Tk draws no shadow`);
+  }
   if (m.opacity !== undefined && m.opacity < 1) note('opacity', `opacity on ${who} is dropped - Tk widgets have no alpha`);
-  if (m.gradient) note('gradient', `a CSS gradient on ${who} is flattened to its first stop`);
+  if (m.gradient) note('gradient', `a CSS gradient on ${who} is approximated as one blended solid colour (the 50% stop)`);
   if (m.letterSpacing) note('spacing', `letter-spacing on ${who} is dropped - Tk fonts carry no tracking`);
   if (m.lineHeight !== undefined && m.lineHeight !== 1) note('leading', `line-height on ${who} is dropped - Tk line spacing follows the face`);
   if (m.wrap) note('wrap', `flex-wrap on ${who} is dropped - Tk pack lays a single line`);
@@ -2100,7 +2493,9 @@ function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx): void {
   if (m.borderStyle && m.borderStyle !== 'solid' && m.borderWidth?.some((w) => w > 0)) {
     note('border-style', `a ${m.borderStyle} border on ${who} is drawn solid - Tk has no dashed stroke`);
   }
-  if (m.position) note('position', `position: ${m.position} on ${who} is dropped - Tk pack/grid place every widget in the flow`);
+  // `absolute` is carried to Tk's place manager (an overlay is exactly what
+  // place does); only `fixed` still has no desktop equivalent.
+  if (m.position && m.position !== 'absolute') note('position', `position: ${m.position} on ${who} is dropped - Tk pack/grid place every widget in the flow`);
 }
 
 /** One resolved model as the dict literal the kit helpers accept. */
@@ -2199,26 +2594,63 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   const focusModel = cascadedAll.focus;
   // R263: the `:active` half - Tk's <ButtonPress-1>/<ButtonRelease-1> pair.
   const activeModel = cascadedAll.active;
-  const model = mergeModels(mergeModels(ctx.inherited, cascaded), binding.inlineStyle);
+  // An `:nth-child` rule is a position, not a paint: the shared sheet cannot
+  // carry it (the engine strips the suffix), so it merges here, after the
+  // element's own cascade and before the literal style="".
+  let structModel: StyleModel | undefined;
+  if (ctx.nth !== undefined && ctx.nthRules) {
+    for (const e of ctx.nthRules) {
+      if (!e.rule || !mediaOk(e.guard)) continue;
+      if (e.nth && !nthMatches(e.nth, ctx.nth)) continue;
+      if (!ruleMatches(e.rule, subject, ctx.ancestors)) continue;
+      structModel = structModel ? mergeModels(structModel, e.rule.model) : e.rule.model;
+    }
+  }
+  const model = mergeModels(mergeModels(mergeModels(ctx.inherited, cascaded), structModel ?? {}), binding.inlineStyle);
   if (model.display === 'none') return;
   const rawFamily = rawFamilyOf(binding.staticClasses, ctx);
   const who = binding.staticClasses.length ? `<${tag} class="${binding.staticClasses.join(' ')}">` : `<${tag}>`;
-  noteUnsupported(model, who, ctx);
+  // A shadow on a generic container becomes a padded frame behind it; on a
+  // leaf widget (a button, an input, a label) there is no such wrapper.
+  const shadowApprox = !['button', 'select', 'hr', 'br', 'video', 'audio', 'img', 'a', 'input', 'textarea', 'details', 'progress'].includes(tag) && !TEXT_TAGS.has(tag);
+  noteUnsupported(model, who, ctx, shadowApprox);
   ctx.seq.n++;
   const last = ctx.lastChild;
+
+  /** `position:absolute` -> Tk's place manager. An inset pins that edge; both
+   *  insets on one axis keep the start edge (a negative width is no widget). */
+  const absArgs = (): string => {
+    const left = model.insetLeft;
+    const right = model.insetRight;
+    const top = model.insetTop;
+    const bottom = model.insetBottom;
+    const pinX = right !== undefined && left === undefined;
+    const pinY = bottom !== undefined && top === undefined;
+    const parts: string[] = [];
+    if (pinX) parts.push('relx=1.0', `x=${-Math.round(right!)}`);
+    else parts.push(`x=${Math.round(left ?? 0)}`);
+    if (pinY) parts.push('rely=1.0', `y=${-Math.round(bottom!)}`);
+    else parts.push(`y=${Math.round(top ?? 0)}`);
+    parts.push(`anchor='${pinX && pinY ? 'se' : pinX ? 'ne' : pinY ? 'sw' : 'nw'}'`);
+    if (model.width && model.width.u === 'px') parts.push(`width=${Math.round(model.width.n)}`);
+    if (model.height && model.height.u === 'px') parts.push(`height=${Math.round(model.height.n)}`);
+    return parts.join(', ');
+  };
+  const absolute = model.position === 'absolute';
 
   /** Create the widget, pack it by the parent's layout, then paint the bound
    *  half - the three moves every widget on this target makes. Hover bindings
    *  ride emitPack, which every widget goes through. */
   const place = (widget: string): void => {
+    const attach = absolute ? `place(${absArgs()})` : `pack(${packArgs(ctx, { model, last })})`;
     if (binding.hasDynamic) {
       const name = `__w${ctx.lines.length}`;
       emit(`${name} = ${widget}`, ctx);
-      emit(`${name}.pack(${packArgs(ctx, { model, last })})`, ctx);
+      emit(`${name}.${attach}`, ctx);
       emit(dynApply(name, binding, ctx), ctx);
       return;
     }
-    emit(`${widget}.pack(${packArgs(ctx, { model, last })})`, ctx);
+    emit(`${widget}.${attach}`, ctx);
   };
 
   /**
@@ -2691,22 +3123,62 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   // would show through; in Tk "show through" is the toolkit's grey, never the
   // enclosing colour, so the background chain has to be carried explicitly.
   if (!model.background && ctx.surface && !decls.some((d) => d.key === 'bg')) decls.push({ key: 'bg', value: ctx.surface });
-  emit(`${varName} = tk.Frame(${ctx.parent}${decls.length ? ', ' + declsKw(decls) : ''})`, ctx);
   const grow = (model.grow ?? 0) > 0;
-  emit(`${varName}.pack(${packArgs(ctx, { model, fill: ctx.layout.dir === 'column' || grow, expand: grow, last })})`, ctx);
+  // A box-shadow has no Tk primitive, so a container approximates it: a frame
+  // one blur-radius larger, painted with the shadow colour composited over the
+  // page, with the real frame inset inside it - the offset shifts the rim.
+  const shadowBg = model.shadow ? alphaOver(model.shadow.color, ctx.surface ?? null) : null;
+  const wrapName = shadowBg && !absolute ? `__sh${ctx.depth}_${ctx.lines.length}` : null;
+  if (wrapName) {
+    emit(`${wrapName} = tk.Frame(${ctx.parent}, bg=${shadowBg})`, ctx);
+    emit(`${wrapName}.pack(${packArgs(ctx, { model, fill: ctx.layout.dir === 'column' || grow, expand: grow, last })})`, ctx);
+  }
+  emit(`${varName} = tk.Frame(${wrapName ?? ctx.parent}${decls.length ? ', ' + declsKw(decls) : ''})`, ctx);
+  if (absolute) {
+    emit(`${varName}.place(${absArgs()})`, ctx);
+  } else if (wrapName && model.shadow) {
+    const sh = model.shadow;
+    const rim = Math.max(1, Math.min(12, Math.round((sh.blur + Math.max(0, sh.spread)) / 2)));
+    const edge = (v: number): number => Math.max(0, Math.min(16, v));
+    emit(`${varName}.pack(fill='both', expand=${grow ? 'True' : 'False'}, padx=(${edge(rim - sh.x)}, ${edge(rim + sh.x)}), pady=(${edge(rim - sh.y)}, ${edge(rim + sh.y)}))`, ctx);
+  } else {
+    emit(`${varName}.pack(${packArgs(ctx, { model, fill: ctx.layout.dir === 'column' || grow, expand: grow, last })})`, ctx);
+  }
   if (binding.hasDynamic) emit(dynApply(varName, binding, ctx), ctx);
+  // A `display:grid` container places its children in a cell matrix: Tk's grid
+  // manager, one weighted column per fr track (a px/auto track gets weight 0).
+  const gridEntry = ctx.gridRules?.find((e) => e.grid && mediaOk(e.guard) && !!e.rule && ruleMatches(e.rule, subject, ctx.ancestors));
+  const grid = gridEntry?.grid;
+  if (grid) emit(`for __ci, __cw in enumerate(${JSON.stringify(grid.weights)}): ${varName}.columnconfigure(__ci, weight=__cw)`, ctx);
   const scoped: PyCtx = {
     ...ctx,
     parent: varName,
     surface: tkColor(model.background) ?? ctx.surface,
-    layout: layoutOf(model, tag),
+    layout: grid
+      ? { ...layoutOf(model, tag), grid: { cols: grid.cols, gapX: grid.gapX, gapY: grid.gapY, weights: grid.weights, next: { r: 0, c: 0 } } }
+      : layoutOf(model, tag),
     seq: { n: 0 },
     ancestors: [...ctx.ancestors, subject],
     inherited: textCarry(model),
     lastChild: false,
     rawFamily,
+    nth: undefined,
   };
+  // `::before` / `::after` are boxes of their own, so each becomes a Label
+  // packed around the container's children - the part Tk can stand in for.
+  const pseudoFor = (pos: 'before' | 'after'): void => {
+    for (const e of ctx.pseudoRules ?? []) {
+      if (e.pos !== pos || !e.rule || e.content === undefined || !mediaOk(e.guard)) continue;
+      if (!ruleMatches(e.rule, subject, ctx.ancestors)) continue;
+      const pdecls = filterDecls(tkDecls(mergeModels(scoped.inherited, e.rule.model), rawFamily), 'Label').filter((d) => d.key !== 'wraplength');
+      const inheritedBg = !pdecls.some((d) => d.key === 'bg') && e.rule.model.background === undefined && scoped.surface ? `, bg=${scoped.surface}` : '';
+      scoped.seq.n++;
+      emit(`tk.Label(${varName}, text=${pyText(e.content)}, wraplength=0${pdecls.length ? ', ' + declsKw(pdecls) : ''}${inheritedBg}).pack(${packArgs(scoped, { model: e.rule.model })})`, ctx);
+    }
+  };
+  pseudoFor('before');
   emitNodes(node.children, scoped);
+  pseudoFor('after');
 }
 
 /** The `place` move for a call expression whose widget was not named. */

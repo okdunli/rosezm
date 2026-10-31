@@ -464,6 +464,7 @@ export function parseLen(raw: string, rem = 16): Len | null {
   if (!v) return null;
   if (v === 'auto') return { n: 0, u: 'auto' };
   if (v === '0' || v === '0px') return { n: 0, u: 'px' };
+  if (v.startsWith('calc(') && v.endsWith(')')) return calcLen(v.slice(5, -1), rem);
   const m = /^(-?\d*\.?\d+)(px|%|rem|em|vw|vh)?$/.exec(v);
   if (!m) return null;
   const n0 = Number(m[1]);
@@ -476,6 +477,43 @@ export function parseLen(raw: string, rem = 16): Len | null {
     case 'vh': return { n: Math.round(n0 * 8.44 * 10) / 10, u: 'px' };
     default: return { n: n0, u: 'px' };
   }
+}
+
+/**
+ * `calc()` as one length. Only `a + b` / `a - b` between lengths is settled:
+ * a native layout has no expression of its own, and a mixed sum (`100% - 24px`)
+ * has no exact answer - the pixels are folded into the percentage against the
+ * same 390px reference phone the rest of the engine measures with, so a full
+ * width minus a gutter still tracks the screen instead of freezing at 366px.
+ */
+function calcLen(expr: string, rem: number): Len | null {
+  let px = 0;
+  let pct = 0;
+  let sign = 1;
+  let cur = '';
+  let depth = 0;
+  const flush = (): boolean => {
+    const t = cur.trim();
+    cur = '';
+    if (!t) return true;
+    const l = parseLen(t, rem);
+    if (!l || l.u === 'auto') return false;
+    if (l.u === '%') pct += sign * l.n;
+    else px += sign * l.n;
+    return true;
+  };
+  for (const ch of expr) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && (ch === '+' || ch === '-') && cur.trim()) {
+      if (!flush()) return null;
+      sign = ch === '-' ? -1 : 1;
+    } else cur += ch;
+  }
+  if (!flush()) return null;
+  if (pct && px) return { n: Math.round((pct + (px / 390) * 100) * 10) / 10, u: '%' };
+  if (pct) return { n: Math.round(pct * 10) / 10, u: '%' };
+  return { n: Math.round(px * 10) / 10, u: 'px' };
 }
 
 /** `padding: a b c d` -> four numbers; the 1/2/3/4 value forms of the box shorthand. */
@@ -1129,7 +1167,10 @@ export function parseStylesheet(css: string): StyleSheet {
 function parseStylesheetUncached(css: string): StyleSheet {
   const warnings: string[] = [];
   const rules: StyleRule[] = [];
-  const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  // A page's own `<style>` carries its theme tokens too (`:root { --brand }`
+  // then `var(--brand)`); a native emitter reads literals only, so the tokens
+  // are inlined here exactly as `sanitizeFor` does for a global sheet.
+  const src = resolveVars(css.replace(/\/\*[\s\S]*?\*\//g, ''));
   let order = 0;
 
   /** A block frame: `@media` pushes a width guard, `@keyframes`/`@font-face` push a skip. */
@@ -1140,6 +1181,9 @@ function parseStylesheetUncached(css: string): StyleSheet {
   let cur = '';
 
   const emitRules = (selectorList: string, body: string, guard: { min?: number; max?: number; dark?: boolean } | undefined): void => {
+    // Once the tokens are inlined this block declares nothing a model can hold;
+    // emitting it would report `:root` as an out-of-subset selector on every page.
+    if (isVarsOnly(body)) return;
     for (const sel of selectorList.split(',')) {
       const trimmed = sel.trim();
       if (!trimmed) continue;

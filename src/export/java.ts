@@ -25,7 +25,7 @@ import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
+import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, parseColor, parseLen, declarationsOf, splitValues, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
 import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
@@ -153,7 +153,7 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   for (const pg of pages) {
     const sheet = sheetFor(pg.style ?? '', globalCss);
     sheets.set(pg.cls, sheet);
-    for (const [k, v] of compileStyles(sheet, pg.style ?? '', warnings, pg.cls)) styles.set(k, v);
+    for (const [k, v] of compileStyles(sheet, pg.style ?? '', warnings, pg.cls, [globalCss, pg.style ?? ''].join('\n'))) styles.set(k, v);
   }
   // R199: a component's own <style> belongs in the same table. The old parser
   // only ever compiled page sheets, so a component kept emitting `"card__Card"`
@@ -162,7 +162,7 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
     warnJavaDrops(comp.style, warnings);
     const sheet = sheetFor(comp.style, globalCss);
     sheets.set(comp.cls, sheet);
-    for (const [k, v] of compileStyles(sheet, comp.style, warnings, comp.cls)) styles.set(k, v);
+    for (const [k, v] of compileStyles(sheet, comp.style, warnings, comp.cls, [globalCss, comp.style].join('\n'))) styles.set(k, v);
   }
   for (const [k, v] of compileStyles(parseStylesheet(SHELL_STYLES), SHELL_STYLES, warnings)) styles.set(k, v);
   const resources = path.join(out, 'src', 'main', 'resources');
@@ -273,6 +273,21 @@ interface JavaStyle {
   flex?: { direction: string; gap: number; justify: string; items: string };
   /** R199: `opacity`, which Swing does have - JComponent.setAlpha. */
   fade?: number;
+  /** R500: the CSS grid, projected onto the theme's own grid manager: a fixed
+   *  column count, a fixed row count, the gap between cells, and - for
+   *  `repeat(auto-fit, minmax(…))` - the minimum cell width the column count is
+   *  derived from. A zero means "not declared". */
+  grid?: GridSpec;
+}
+
+/** The grid a stylesheet asked for, in terms a Swing layout manager can honour.
+ *  `cols`/`rows` are declared track counts (0 when auto), `min` is the smallest
+ *  cell width an auto-fit template allows (0 when the columns are explicit). */
+interface GridSpec {
+  cols: number;
+  rows: number;
+  gap: number;
+  min: number;
 }
 
 /** A flex container's main axis: a flex display defaults to a row, and the
@@ -286,16 +301,30 @@ function javaFlexDirection(model: StyleModel, tag: string): 'row' | 'column' | u
   if (ROW_TAGS.has(tag)) return 'row';
   return undefined;
 }
+/** The colours a gradient names, in source order - hex, `rgb()`/`hsl()` and the
+ *  named words the colour table already knows. Geometry keywords (`circle`,
+ *  `at`, `closest-side`) are not colours and never enter the list. */
+function gradientColorsOf(background: string): string[] {
+  const re = /#[0-9a-fA-F]{3,8}\b|rgba?\([^()]*\)|hsla?\([^()]*\)|\b(?:white|black|red|green|blue|grey|gray|pink|yellow|orange|purple|transparent)\b/gi;
+  return background.match(re) ?? [];
+}
+
 /** R199: one shared-cascade model, seen through what Swing can actually draw.
  *  The table row and the inline `new RoseTheme.Style(...)` are both projections
- *  of this same mapping, which is what makes the two paths comparable. */
-function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
+ *  of this same mapping, which is what makes the two paths comparable.
+ *  R500: `grid` is the layout the CSS grid asked for, resolved from the raw
+ *  sheet because the shared model flattens a grid into a wrapping flex row. */
+function javaStyleOf(m: StyleModel, tag?: string, grid?: GridSpec): JavaStyle {
   const border = m.borderWidth ? Math.round(Math.max(...m.borderWidth)) : 0;
   const generic = m.fontFamily ? genericFontFamily(m.fontFamily) : '';
+  // R500: a radial gradient has no parsed form (the shared model only stands
+  // behind linear ones), so its first and last colour become a two-stop linear
+  // paint - a visible gradient instead of one flattened colour.
+  const radial = !m.gradient && m.background && /radial-gradient\(/i.test(m.background) ? gradientColorsOf(m.background) : [];
   const out: JavaStyle = {
     fontSize: Math.round(m.fontSize ?? 14),
     color: '#' + hexOf(m.color ?? '#222222'),
-    background: m.background ? '#' + hexOf(m.background) : '',
+    background: m.background && radial.length < 2 ? '#' + hexOf(m.background) : '',
     // The uniform shorthand still drives the scalar; a split one adds the
     // per-edge call below, so `padding: 1rem 2rem` no longer paints 16 sides.
     padding: m.padding ? Math.round(m.padding[0]) : 0,
@@ -321,13 +350,27 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
   // R257: the whole margin box, not a scalar - a `.rf { margin-top: 2rem }`
   // keeps its 32-top/0-everywhere-else shape.
   if (m.margin) out.margin = m.margin.map((v) => Math.round(v)) as [number, number, number, number];
+  // R500: Swing has no out-of-flow placement, so an absolutely positioned box
+  // is offset by folding its top/left inset into the margin the layouts already
+  // honour. A right/bottom inset needs a host size the style cannot know.
+  if ((m.position === 'absolute' || m.position === 'fixed') && (m.insetTop !== undefined || m.insetLeft !== undefined)) {
+    const base = out.margin ?? [0, 0, 0, 0];
+    out.margin = [base[0] + Math.round(m.insetTop ?? 0), base[1], base[2], base[3] + Math.round(m.insetLeft ?? 0)];
+  }
   if (m.lineHeight !== undefined && m.lineHeight !== 1) out.lineHeight = m.lineHeight;
   if (m.letterSpacing !== undefined) out.letterSpacing = m.letterSpacing;
   if (m.gradient) {
     out.gradient = { angle: Math.round(m.gradient.angle), stops: m.gradient.stops.map((s) => ({ at: s.at, color: '#' + hexOf(s.color) })) };
-  } else if (m.background && m.background.includes('gradient')) {
-    // The parser did not stand behind this gradient (a radial, a var(), ...)
-    // so the first colour it names is flattened, and named below.
+  } else if (radial.length >= 2) {
+    out.gradient = {
+      angle: 180,
+      stops: [
+        { at: 0, color: '#' + hexOf(radial[0]) },
+        { at: 100, color: '#' + hexOf(radial[radial.length - 1]) },
+      ],
+    };
+  } else if (radial.length === 1) {
+    out.background = '#' + hexOf(radial[0]);
   }
   if (m.shadow) out.shadow = { x: Math.round(m.shadow.x), y: Math.round(m.shadow.y), blur: Math.round(m.shadow.blur), spread: Math.round(m.shadow.spread), color: '#' + hexOf(m.shadow.color) };
   const minW = m.minWidth && m.minWidth.u === 'px' ? Math.round(m.minWidth.n) : 0;
@@ -341,12 +384,15 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
   if (m.basis && m.basis.u === 'px') out.basis = Math.round(m.basis.n);
   if (m.zIndex !== undefined) out.zIndex = Math.round(m.zIndex);
   if (m.radius) out.radius = m.radius.map((v) => Math.round(v)) as [number, number, number, number];
-  if (tag !== undefined) {
+  // R500: the grid wins the layout, so the wrapping flex row the shared model
+  // invents for `display: grid` is not also emitted as a second layout.
+  if (tag !== undefined && !grid) {
     const direction = javaFlexDirection(m, tag);
     if (direction && (m.display === 'flex' || m.gap !== undefined || m.justify !== undefined || m.align !== undefined)) {
       out.flex = { direction, gap: Math.round(m.gap ?? 0), justify: m.justify ?? 'start', items: m.align ?? 'stretch' };
     }
   }
+  if (grid) out.grid = grid;
   // An element the CSS faded is a Swing component that paints at that alpha.
   if (m.opacity !== undefined && m.opacity < 1) out.fade = Math.round(m.opacity * 100) / 100;
   // R230: an explicit size, when the CSS gave one in px. A percentage needs a
@@ -364,7 +410,8 @@ const sameJavaStyle = (a: JavaStyle, b: JavaStyle): boolean =>
   && a.fade === b.fade && a.lineHeight === b.lineHeight && a.letterSpacing === b.letterSpacing && a.grow === b.grow && a.shrink === b.shrink && a.basis === b.basis && a.zIndex === b.zIndex
   && JSON.stringify(a.margin ?? '') === JSON.stringify(b.margin ?? '') && JSON.stringify(a.gradient ?? '') === JSON.stringify(b.gradient ?? '')
   && JSON.stringify(a.shadow ?? '') === JSON.stringify(b.shadow ?? '') && JSON.stringify(a.minSize ?? '') === JSON.stringify(b.minSize ?? '')
-  && JSON.stringify(a.maxSize ?? '') === JSON.stringify(b.maxSize ?? '') && JSON.stringify(a.radius ?? '') === JSON.stringify(b.radius ?? '');
+  && JSON.stringify(a.maxSize ?? '') === JSON.stringify(b.maxSize ?? '') && JSON.stringify(a.radius ?? '') === JSON.stringify(b.radius ?? '')
+  && JSON.stringify(a.grid ?? '') === JSON.stringify(b.grid ?? '');
 
 /** The fluent tail a Style needs beyond its nine base fields. Padding edges,
  *  the flex axes and the alpha are optional in CSS, so they arrive as chained
@@ -378,6 +425,9 @@ function styleTail(s: JavaStyle): string {
   if (s.underline) out += '.underline()';
   if (s.strike) out += '.strike()';
   if (s.flex) out += `.flex("${s.flex.direction}", ${s.flex.gap}, "${s.flex.justify}", "${s.flex.items}")`;
+  // R500: the CSS grid the stylesheet asked for - column count (or the min
+  // width auto-fit derives it from), row count, the gap, all in px.
+  if (s.grid) out += `.grid(${s.grid.cols}, ${s.grid.rows}, ${s.grid.gap}, ${s.grid.min})`;
   if (s.fade !== undefined) out += `.fade(${s.fade})`;
   if (s.size) out += `.size(${s.size.join(', ')})`;
   // R257: the box extras Swing can express, each its own setter so the
@@ -404,8 +454,8 @@ function styleTail(s: JavaStyle): string {
 /** An element's resolved style as a Java expression. The constructor arity is
  *  the shape gate's business (`new RoseTheme.Style` must match the nine fields
  *  the emitted class declares), so this stays the only place that spells one. */
-function styleLiteral(m: StyleModel, tag?: string): string {
-  const s = javaStyleOf(m, tag);
+function styleLiteral(m: StyleModel, tag?: string, grid?: GridSpec): string {
+  const s = javaStyleOf(m, tag, grid);
   return `new RoseTheme.Style(${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : 'null'}, ${s.padding}, ${s.bold}, "${s.align}", "${s.fontName}", "${s.borderColor}", ${s.borderWidth})${styleTail(s)}`;
 }
 
@@ -450,6 +500,168 @@ function sheetClasses(sheet: StyleSheet): string[] {
   return [...out];
 }
 
+/** The index of the `}` closing the `{` at `open`, or -1 when unbalanced. */
+function matchingBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** How many tracks a `grid-template-*` value names, and the px floor an
+ *  `auto-fit`/`auto-fill` row derives its count from: `repeat(3, 1fr)` -> 3
+ *  tracks, `repeat(auto-fit, minmax(120px, 1fr))` -> 0 tracks with a 120px
+ *  floor (Swing measures the panel at layout time), `[line names]` are noise
+ *  and any other token counts as one track. */
+function trackCountOf(value: string): { n: number; min: number } {
+  const v = value.replace(/\[[^\]]*\]/g, ' ').trim();
+  if (!v || v === 'none') return { n: 0, min: 0 };
+  let n = 0;
+  let min = 0;
+  for (const t of splitValues(v)) {
+    const rep = /^repeat\(\s*(\d+|auto-fit|auto-fill)\s*,\s*([\s\S]*)\)$/.exec(t);
+    if (rep) {
+      if (/^\d+$/.test(rep[1])) {
+        const inner = trackCountOf(rep[2]);
+        n += Number(rep[1]) * Math.max(inner.n, 1);
+      } else {
+        const floor = /minmax\(\s*([\d.]+)px/i.exec(rep[2]);
+        if (floor) min = Math.max(min, Number(floor[1]));
+      }
+      continue;
+    }
+    const floor = /^minmax\(\s*([\d.]+)px/i.exec(t);
+    if (floor) min = Math.max(min, Number(floor[1]));
+    n += 1;
+  }
+  return { n, min };
+}
+
+/** Whether a `@media` condition list holds at the reference width. Only the
+ *  width features are decided - anything the guard also asks for (or nothing
+ *  at all) passes, and `not` stays pessimistically optimistic: the block is
+ *  kept, because the other half of the guard was never emitted either. */
+function mediaMatches(conditions: string): boolean {
+  return conditions.split(',').some((branch) => branch.split(/\band\b/i).every((term) => {
+    const t = term.trim();
+    if (!t || t === 'all' || t === 'screen') return true;
+    if (t.startsWith('not')) return true;
+    const w = /\(?\s*(max|min)-width\s*:\s*([\d.]+)(px|rem|em)?\s*\)?/i.exec(t);
+    if (!w) return true;
+    const n = Number(w[2]) * (w[3] && w[3].toLowerCase() !== 'px' ? 16 : 1);
+    return w[1].toLowerCase() === 'max' ? REFERENCE_WIDTH <= n : REFERENCE_WIDTH >= n;
+  }));
+}
+
+/** The grid one rule body declares, as Swing's uniform cell count - `undefined`
+ *  when the declarations name no grid. The shared cascade flattens
+ *  `display: grid` into a wrapped flex row (a StyleModel has no grid shape),
+ *  so the track counts are lifted off the declarations and re-carried beside
+ *  the model. `grid-template-areas`, `grid-auto-flow: column` and mixed `fr`
+ *  weights are not a uniform grid and stay on the flex path with the gap. */
+function gridSpecOf(decls: Array<{ prop: string; value: string }>): GridSpec | undefined {
+  let display = false;
+  let templated = false;
+  let cols = 0;
+  let rows = 0;
+  let min = 0;
+  let gapRow = 0;
+  let gapCol = 0;
+  const px = (v: string): number => {
+    const l = parseLen(v);
+    return l && l.u === 'px' && l.n > 0 ? Math.round(l.n) : 0;
+  };
+  for (const d of decls) {
+    const prop = d.prop.toLowerCase().trim();
+    const value = d.value.toLowerCase().trim();
+    if (prop === 'display') {
+      if (/(^|[\s,])grid([\s,]|$)/.test(value)) display = true;
+    } else if (prop === 'grid-template-columns' || prop === 'grid-template-rows') {
+      const t = trackCountOf(value);
+      if (t.n > 0 || t.min > 0) templated = true;
+      if (prop === 'grid-template-columns') {
+        if (t.n > 0) cols = t.n;
+        min = Math.max(min, t.min);
+      } else if (t.n > 0) rows = t.n;
+    } else if (prop === 'grid-template') {
+      // The shorthand: `<rows> / <columns>`. In the areas flavour each quoted
+      // string names one row and the track list after the `/` the columns.
+      templated = true;
+      const slash = (() => {
+        let depth = 0;
+        for (let i = 0; i < value.length; i++) {
+          if (value[i] === '(') depth++;
+          else if (value[i] === ')') depth--;
+          else if (value[i] === '/' && depth === 0) return i;
+        }
+        return -1;
+      })();
+      const rowPart = slash >= 0 ? value.slice(0, slash) : value;
+      const colPart = slash >= 0 ? value.slice(slash + 1) : '';
+      const strings = rowPart.match(/"[^"]*"/g);
+      const r = strings ? strings.length : trackCountOf(rowPart).n;
+      if (r > 0) rows = r;
+      const c = trackCountOf(colPart);
+      if (c.n > 0) cols = c.n;
+      min = Math.max(min, c.min);
+    } else if (prop === 'gap') {
+      const parts = splitValues(value);
+      const a = px(parts[0] ?? '');
+      gapRow = a;
+      gapCol = parts.length > 1 ? px(parts[1]) : a;
+    } else if (prop === 'column-gap') {
+      gapCol = px(value);
+    } else if (prop === 'row-gap') {
+      gapRow = px(value);
+    }
+  }
+  if (!display && !templated) return undefined;
+  // `display: grid` with no template is a one-column stack.
+  if (cols === 0 && rows === 0 && min === 0) cols = 1;
+  return { cols, rows, gap: gapCol || gapRow, min };
+}
+
+/** Every plain class rule that declares a grid, read straight from the CSS
+ *  text the sheet was parsed from - only rules the theme table can key (a
+ *  single class, at the reference width) are collected, and a later rule
+ *  wins, as the cascade would. */
+function gridRulesOf(css: string): Map<string, GridSpec> {
+  const out = new Map<string, GridSpec>();
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const scan = (src: string): void => {
+    let i = 0;
+    for (;;) {
+      const open = src.indexOf('{', i);
+      if (open < 0) break;
+      const close = matchingBrace(src, open);
+      if (close < 0) break;
+      const prelude = src.slice(i, open).trim();
+      const body = src.slice(open + 1, close);
+      i = close + 1;
+      if (prelude.startsWith('@')) {
+        const at = /^@([a-z-]+)/.exec(prelude);
+        const kind = at ? at[1].toLowerCase() : '';
+        if (kind === 'media' && mediaMatches(prelude.slice(6))) scan(body);
+        else if (kind === 'supports') scan(body);
+        continue;
+      }
+      const spec = gridSpecOf(declarationsOf(body));
+      if (!spec) continue;
+      for (const sel of prelude.split(',')) {
+        const name = /^\.([A-Za-z0-9_-]+)$/.exec(sel.trim());
+        if (name) out.set(name[1], spec);
+      }
+    }
+  };
+  scan(text);
+  return out;
+}
+
 /**
  * R199: the theme table is now a projection of the shared cascade instead of a
  * private `.cls { }` parser. A class row carries everything the cascade decides
@@ -459,12 +671,15 @@ function sheetClasses(sheet: StyleSheet): string[] {
  * (the old parser only ever compiled page sheets, so a component's CSS was
  * dropped on the floor while its view still emitted `"card__Card"`).
  */
-function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope?: string): Map<string, JavaStyle> {
+function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope?: string, gridCss = css): Map<string, JavaStyle> {
   const rules = new Map<string, JavaStyle>();
+  // R500: the grid specs ride beside the cascade - a `display: grid` the model
+  // only carries as a wrapped flex row is re-attached here, per class row.
+  const grids = gridRulesOf(gridCss);
   for (const cls of sheetClasses(sheet)) {
     const model = cascadeFor(sheet, { tag: 'div', classes: [cls] }, [], { viewport: REFERENCE_WIDTH }).model;
     if (isEmptyModel(model)) continue;
-    rules.set(scope ? `${cls}__${scope}` : cls, javaStyleOf(model, 'div'));
+    rules.set(scope ? `${cls}__${scope}` : cls, javaStyleOf(model, 'div', grids.get(cls)));
   }
   // R250: `:hover` is not dropped - it becomes a second style row keyed
   // `__hover_<class>`, applied while the pointer is over the widget
@@ -475,7 +690,7 @@ function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope
     const last = rule.parts[rule.parts.length - 1];
     for (const cls of last.classes) {
       const key = scope ? `__hover_${cls}__${scope}` : `__hover_${cls}`;
-      rules.set(key, javaStyleOf(rule.hover, 'div'));
+      rules.set(key, javaStyleOf(rule.hover, 'div', grids.get(cls)));
     }
   }
   // R255: the `:focus` half, same shape with Swing's FocusListener. Every
@@ -490,7 +705,7 @@ function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope
     const last = rule.parts[rule.parts.length - 1];
     for (const cls of last.classes) {
       const key = scope ? `__focus_${cls}__${scope}` : `__focus_${cls}`;
-      const row = javaStyleOf(rule.focus, 'div');
+      const row = javaStyleOf(rule.focus, 'div', grids.get(cls));
       const baseRow = rules.get(scope ? `${cls}__${scope}` : cls);
       if (row.borderWidth === 0 && rule.focus.borderColor && baseRow && baseRow.borderWidth > 0) {
         row.borderWidth = baseRow.borderWidth;
@@ -506,7 +721,7 @@ function compileStyles(sheet: StyleSheet, css: string, warnings: string[], scope
     const last = rule.parts[rule.parts.length - 1];
     for (const cls of last.classes) {
       const key = scope ? `__active_${cls}__${scope}` : `__active_${cls}`;
-      const row = javaStyleOf(rule.active, 'div');
+      const row = javaStyleOf(rule.active, 'div', grids.get(cls));
       const baseRow = rules.get(scope ? `${cls}__${scope}` : cls);
       if (row.borderWidth === 0 && rule.active.borderColor && baseRow && baseRow.borderWidth > 0) {
         row.borderWidth = baseRow.borderWidth;
@@ -542,13 +757,20 @@ function styleArgFor(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx, s
   const focusKey = binding.staticClasses.map((c) => `__focus_${c}__${ctx.file}`).find((k) => ctx.styles.has(k));
   // R265: same walk for the `:active` half - the row mousePressed repaints.
   const activeKey = binding.staticClasses.map((c) => `__active_${c}__${ctx.file}`).find((k) => ctx.styles.has(k));
+  // R500: the grid is stylesheet-only (the cascade model has no grid shape),
+  // so it is fetched from the compiled row the table keeps, or lifted off a
+  // literal `style=""` - and the fast path compares both sides with it
+  // attached, or a grid class would degrade to an inline Style.
+  const rowGrid = binding.staticClasses.map((c) => ctx.styles.get(`${c}__${ctx.file}`)?.grid).find(Boolean);
+  const inlineGrid = gridSpecOf(declarationsOf(binding.inlineDecls.join(';')));
+  const grid = inlineGrid ?? rowGrid;
   if (binding.staticClasses.length === 1 && !binding.inlineStyle) {
     const cls = binding.staticClasses[0];
     const row = cascadeFor(sheet, { tag: 'div', classes: [cls] }, [], { viewport: REFERENCE_WIDTH }).model;
-    if (sameJavaStyle(javaStyleOf(own, tag), javaStyleOf(row, 'div'))) return { arg: `"${cls}__${ctx.file}"`, kind: 'name', model: own, hoverKey, focusKey, activeKey };
+    if (sameJavaStyle(javaStyleOf(own, tag, rowGrid), javaStyleOf(row, 'div', rowGrid))) return { arg: `"${cls}__${ctx.file}"`, kind: 'name', model: own, hoverKey, focusKey, activeKey };
   }
   if (isEmptyModel(own)) return { arg: '', kind: 'none', model: own, hoverKey, focusKey, activeKey };
-  return { arg: styleLiteral(own, tag), kind: 'style', model: own, hoverKey, focusKey, activeKey };
+  return { arg: styleLiteral(own, tag, grid), kind: 'style', model: own, hoverKey, focusKey, activeKey };
 }
 
 /**
@@ -580,13 +802,16 @@ function javaDynamicStyle(widget: string, binding: ElementStyleBinding, ctx: Jav
   return calls;
 }
 
+/** A CSS colour as the bare hex the theme's `color()` reads. Named colours
+ *  keep the palette the earlier table pinned (so `red` stays `#e53935`), while
+ *  everything else goes through the shared parser, which understands hex
+ *  shorthand, `rgba()` and `hsl()` and keeps an alpha channel as `rrggbbaa`. */
 function hexOf(v: string): string {
   const key = v.toLowerCase().trim();
   const named: Record<string, string> = { white: 'ffffff', black: '000000', red: 'e53935', green: '43a047', blue: '1e88e5', grey: '9e9e9e', gray: '9e9e9e', pink: 'e91e63' };
   if (named[key]) return named[key];
-  const hex = /#([0-9a-fA-F]{3,8})/.exec(key)?.[1];
-  if (!hex) return '222222';
-  return hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6);
+  const parsed = parseColor(key);
+  return parsed ? parsed.slice(1) : '222222';
 }
 
 function renderTheme(styles: Map<string, JavaStyle>): string {
@@ -641,6 +866,10 @@ public final class RoseTheme {
         public int gap;
         public String justify;
         public String items;
+        /** R500: the CSS grid - column count (0 = derive from min), row count
+         *  (0 = as many as the children need), the gap, and the min column
+         *  width an auto-fit row derives its count from, all in px. */
+        public int gridCols, gridRows, gridGap, gridMin;
         /** R230: an explicit width/height, in px. 0 means "let Swing decide". */
         public int width, height;
         /** R257: the min/max box Swing must respect when it lays out. */
@@ -745,6 +974,12 @@ public final class RoseTheme {
             return this;
         }
 
+        /** R500: the CSS grid the stylesheet asked for. */
+        public Style grid(int cols, int rows, int gap, int min) {
+            this.gridCols = cols; this.gridRows = rows; this.gridGap = gap; this.gridMin = min;
+            return this;
+        }
+
         /** R199: opacity, which Swing does have: a JComponent alpha. */
         public double alpha = 1;
 
@@ -755,6 +990,9 @@ public final class RoseTheme {
 
         /** Whether the panel lays its children out as a flex box. */
         public boolean isFlex() { return direction != null; }
+
+        /** R500: whether the panel lays its children out as a CSS grid. */
+        public boolean isGrid() { return gridCols > 0 || gridMin > 0; }
 
         /** The four insets, uniform shorthand folded into the scalar. */
         public int[] insets() {
@@ -778,6 +1016,7 @@ ${rows || '        // no style rules'}
     public static Color color(String hex) {
         String value = hex.startsWith("#") ? hex.substring(1) : hex;
         if (value.length() < 6) return new Color(0x222222);
+        if (value.length() >= 8) return new Color(Integer.parseInt(value.substring(0, 2), 16), Integer.parseInt(value.substring(2, 4), 16), Integer.parseInt(value.substring(4, 6), 16), Integer.parseInt(value.substring(6, 8), 16));
         return new Color(Integer.parseInt(value.substring(0, 6), 16));
     }
 
@@ -816,7 +1055,8 @@ ${rows || '        // no style rules'}
 
     /** R199: a styled container is a flex box when the stylesheet says so -
      *  BoxLayout has no gap and no space-between, so the layout the CSS asked
-     *  for is applied by the hand-written Flex manager below instead. */
+     *  for is applied by the hand-written Flex manager below instead. A CSS
+     *  grid goes through the hand-written Grid manager, which wins the layout. */
     private static JPanel panelOf(JPanel parent, Style style, boolean horizontal) {
         // R485: the panel is the image-capable one; a plain JPanel would need a
         // second class at every call site.
@@ -826,7 +1066,10 @@ ${rows || '        // no style rules'}
             // R257: the child stamp the Flex manager reads its margins and grow
             // weights from; the panel itself paints through applyBox.
             panel.putClientProperty("rosezm.style", style);
-            if (style.isFlex()) panel.setLayout(new Flex(style.direction, style.gap, style.justify, style.items));
+            // R500: a grid rule wins the layout - the wrapping flex row the
+            // cascade invents for display: grid is not what the CSS asked for.
+            if (style.isGrid()) panel.setLayout(new Grid(style.gridCols, style.gridRows, style.gridGap, style.gridMin));
+            else if (style.isFlex()) panel.setLayout(new Flex(style.direction, style.gap, style.justify, style.items));
             else panel.setLayout(new BoxLayout(panel, horizontal ? BoxLayout.X_AXIS : BoxLayout.Y_AXIS));
         } else panel.setLayout(new BoxLayout(panel, horizontal ? BoxLayout.X_AXIS : BoxLayout.Y_AXIS));
         parent.add(panel);
@@ -1346,6 +1589,101 @@ ${rows || '        // no style rules'}
                 if (row) c.setBounds(at + mBefore, off, size, thick);
                 else c.setBounds(off, at + mBefore, thick, size);
                 at += size + mBefore + mAfter + gap + extra;
+            }
+        }
+    }
+
+    /** R500: a real CSS grid. The children flow row-major into equal-width
+     *  cells - the column count comes from the rule, or from how many min-width
+     *  cells an auto-fit row fits; an explicit row count shares the leftover
+     *  height evenly, the one approximation a hand-rolled manager can keep. */
+    public static final class Grid implements LayoutManager {
+        private final int cols;
+        private final int rows;
+        private final int gap;
+        private final int min;
+
+        public Grid(int cols, int rows, int gap, int min) {
+            this.cols = cols;
+            this.rows = rows;
+            this.gap = gap;
+            this.min = min;
+        }
+
+        public void addLayoutComponent(String name, Component comp) {}
+
+        public void removeLayoutComponent(Component comp) {}
+
+        private static Component[] kids(Container parent) {
+            java.util.List<Component> out = new java.util.ArrayList<>();
+            for (Component c : parent.getComponents()) if (c.isVisible()) out.add(c);
+            return out.toArray(new Component[0]);
+        }
+
+        /** A child's Style margins, the same stamp the Flex manager reads. */
+        private static int[] margins(Component c) {
+            if (c instanceof JComponent j) {
+                Object s = j.getClientProperty("rosezm.style");
+                if (s instanceof Style style) return new int[]{style.marginTop, style.marginRight, style.marginBottom, style.marginLeft};
+            }
+            return new int[]{0, 0, 0, 0};
+        }
+
+        /** Columns per row: the rule's count, or how many min-width cells fit. */
+        private int perRow(int width) {
+            if (cols > 0) return cols;
+            if (min > 0) return Math.max(1, (width + gap) / (min + gap));
+            return 1;
+        }
+
+        public Dimension preferredLayoutSize(Container parent) {
+            Component[] kids = kids(parent);
+            Insets i = parent.getInsets();
+            int per = cols > 0 ? cols : 1;
+            int cellW = 0;
+            int[] rh = new int[Math.max(1, (kids.length + per - 1) / per)];
+            for (int k = 0; k < kids.length; k++) {
+                Dimension d = kids[k].getPreferredSize();
+                int[] m = margins(kids[k]);
+                cellW = Math.max(cellW, d.width + m[1] + m[3]);
+                rh[k / per] = Math.max(rh[k / per], d.height + m[0] + m[2]);
+            }
+            int w = per * cellW + Math.max(0, per - 1) * gap;
+            int h = Math.max(0, rh.length - 1) * gap;
+            for (int r = 0; r < rh.length; r++) h += rh[r];
+            return new Dimension(w + i.left + i.right, h + i.top + i.bottom);
+        }
+
+        public Dimension minimumLayoutSize(Container parent) { return preferredLayoutSize(parent); }
+
+        public void layoutContainer(Container parent) {
+            Component[] kids = kids(parent);
+            Insets i = parent.getInsets();
+            int width = parent.getWidth() - i.left - i.right;
+            int height = parent.getHeight() - i.top - i.bottom;
+            int per = perRow(width);
+            int[] rh = new int[Math.max(1, (kids.length + per - 1) / per)];
+            for (int k = 0; k < kids.length; k++) {
+                int[] m = margins(kids[k]);
+                rh[k / per] = Math.max(rh[k / per], kids[k].getPreferredSize().height + m[0] + m[2]);
+            }
+            // R500: an explicit row count shares the leftover height evenly -
+            // the one part of grid-template-rows a hand-rolled manager can keep.
+            if (rows > 0 && rh.length > 0) {
+                int total = Math.max(0, rh.length - 1) * gap;
+                for (int r = 0; r < rh.length; r++) total += rh[r];
+                int extra = Math.max(0, (height - total) / rh.length);
+                for (int r = 0; r < rh.length; r++) rh[r] += extra;
+            }
+            int cellW = Math.max(1, (width - Math.max(0, per - 1) * gap) / per);
+            int at = i.top;
+            for (int k = 0; k < kids.length; k++) {
+                int r = k / per;
+                int col = k % per;
+                int[] m = margins(kids[k]);
+                int x = i.left + col * (cellW + gap);
+                kids[k].setBounds(x + m[3], at + m[0], Math.max(0, cellW - m[1] - m[3]), Math.max(0, rh[r] - m[0] - m[2]));
+                if (col == per - 1 || k == kids.length - 1) at += rh[r] + gap;
             }
         }
     }
@@ -3326,11 +3664,11 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
   // `style=""` is not a warning either: the cascade merges it into `styled`.
   const styled = styleArgFor(node, ctx, ctx.sheet);
   const styleArg = styled.arg ? `, ${styled.arg}` : '';
-  // R226: Swing lays every child out through a BoxLayout, so an out-of-flow
-  // element cannot be placed. Say so instead of letting it sit in the flow.
+  // R226: Swing lays every child out in the flow, so an out-of-flow element
+  // has no true placement - top/left are folded into the margin offsets.
   if (styled.model.position) {
     const who = styleBinding.staticClasses.length ? `<${node.tag} class="${styleBinding.staticClasses.join(' ')}">` : `<${node.tag}>`;
-    ctx.warnings.push(`java: position: ${styled.model.position} on ${who} is dropped - Swing lays every child out in a box`);
+    ctx.warnings.push(`java: position: ${styled.model.position} on ${who} is approximated as a margin offset - Swing has no out-of-flow placement`);
   }
   // R257: a non-solid border style is drawn solid - the LineBorder family Swing
   // ships has no dashed stroke. The radius itself is painted now (the theme's

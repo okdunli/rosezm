@@ -561,18 +561,16 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
   const focusRules: Array<{ last: { classes: string[] }; focus: StyleModel }> = [];
   // R268: active rows register in the same second pass (see below).
   const activeRules: Array<{ last: { classes: string[] }; active: StyleModel }> = [];
+  // R495: hover joins the second pass so a recolor-only half borrows the base
+  // border width like focus and active already do.
+  const hoverRules: Array<{ last: { classes: string[] }; hover: StyleModel }> = [];
   for (const rule of sheet.rules) {
     const last = rule.parts[rule.parts.length - 1];
     // R246: `:hover` is not dropped - it becomes a second style class keyed
     // `__hover_<class>`, applied while the pointer is over the element
     // (hoverable + InteractionSource). A phone has no pointer, so the flag
     // simply never flips there; on a tablet or desktop build it is real.
-    if (rule.hover && last.classes.length) {
-      for (const cls of last.classes) {
-        const key = scope ? `__hover_${cls}__${scope}` : `__hover_${cls}`;
-        merged.set(key, mergeModels(merged.get(key) ?? null, rule.hover));
-      }
-    }
+    if (rule.hover && last.classes.length) hoverRules.push({ last, hover: rule.hover });
     // R258: the `:focus` half, registered in a SECOND pass below (after every
     // base row) so a recolor-only half can borrow the base border width
     // whatever order the stylesheet listed.
@@ -610,6 +608,15 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
     for (const cls of last.classes) {
       const key = scope ? `${cls}__${scope}` : cls;
       merged.set(key, mergeModels(merged.get(key) ?? null, rule.model));
+    }
+  }
+  // R495: hover rows go in first of the second pass, the same adopt rule.
+  for (const f of hoverRules) {
+    for (const cls of f.last.classes) {
+      const key = scope ? `__hover_${cls}__${scope}` : `__hover_${cls}`;
+      const baseKey = scope ? `${cls}__${scope}` : cls;
+      const adopt = f.hover.borderColor && !f.hover.borderWidth ? { ...f.hover, borderWidth: (merged.get(baseKey)?.borderWidth) ?? f.hover.borderWidth } : f.hover;
+      merged.set(key, mergeModels(merged.get(key) ?? null, adopt));
     }
   }
   // R258: focus rows go in second - a recolor-only half borrows the base row's
@@ -741,15 +748,21 @@ function composeModifiersOf(model: StyleModel): string[] {
   }
   // R488: the CSS transform rides Compose's own layer (translation, rotation,
   // scale) - no wrapper composable, so layout is untouched.
-  if (model.translateX !== undefined || model.translateY !== undefined || model.rotate !== undefined || model.scale !== undefined) {
+  if (model.translateX !== undefined || model.translateY !== undefined || model.rotate !== undefined || model.scale !== undefined || model.opacity !== undefined) {
     const parts: string[] = [];
     if (model.translateX !== undefined) parts.push(`translationX = ${n2(model.translateX)}f`);
     if (model.translateY !== undefined) parts.push(`translationY = ${n2(model.translateY)}f`);
     if (model.rotate !== undefined) parts.push(`rotationZ = ${n2(model.rotate)}f`);
     if (model.scale !== undefined) parts.push(`scaleX = ${n2(model.scale)}f`, `scaleY = ${n2(model.scale)}f`);
+    // R497: alpha joins the same layer - two graphicsLayer calls would each own
+    // one field and the second would overwrite the first.
+    if (model.opacity !== undefined) parts.push(`alpha = ${n2(model.opacity)}f`);
     out.push(`.graphicsLayer { ${parts.join('; ')} }`);
   }
-  if (model.opacity !== undefined) out.push(`.graphicsLayer { alpha = ${n2(model.opacity)}f }`);
+  if (model.shadow) {
+    const sh = model.shadow;
+    out.push(`.roseShadow(RoseShadow(color = ${composeColor(sh.color)}, blur = ${n2(sh.blur)}f, dx = ${n2(sh.x)}f, dy = ${n2(sh.y)}f, spread = ${n2(sh.spread)}f), ${shape ?? 'null'})`);
+  }
   if (model.padding) out.push(`.padding(${composeEdgeInsets(model.padding)})`);
   if (model.width) {
     if (model.width.u === '%') out.push('.fillMaxWidth()');
@@ -893,6 +906,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clip as clipModifier
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalUriHandler
@@ -915,7 +932,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 
 /**
  * One CSS class, compiled: the text half (a TextStyle) and the box half (a
@@ -957,6 +974,13 @@ data class RoseStyle(
     val maxHeight: Float? = null,
     val hidden: Boolean = false,
     val aspectRatio: Float? = null,
+    // R497: the CSS transform and box-shadow ride the same model as everything
+    // else, so a class-bound box keeps them when it resolves at runtime.
+    val translateX: Float? = null,
+    val translateY: Float? = null,
+    val rotate: Float? = null,
+    val scale: Float? = null,
+    val shadow: RoseShadow? = null,
 ) {
     /** Every property other actually sets wins - one field at a time. */
     fun merge(other: RoseStyle?): RoseStyle {
@@ -981,6 +1005,11 @@ data class RoseStyle(
             minHeight = other.minHeight ?: minHeight, maxHeight = other.maxHeight ?: maxHeight,
             hidden = other.hidden || hidden,
             aspectRatio = other.aspectRatio ?: aspectRatio,
+            translateX = other.translateX ?: translateX,
+            translateY = other.translateY ?: translateY,
+            rotate = other.rotate ?: rotate,
+            scale = other.scale ?: scale,
+            shadow = other.shadow ?: shadow,
         )
     }
 
@@ -1030,6 +1059,28 @@ data class RoseStyle(
 private fun List<Float>.roseEdges(): PaddingValues =
     PaddingValues(start = this[3].dp, top = this[0].dp, end = this[1].dp, bottom = this[2].dp)
 
+// R497: box-shadow. Compose has no shadow modifier that also works on a plain
+// Box, so the layer does it: a translucent shape drawn behind the content.
+data class RoseShadow(val color: Color, val blur: Float, val dx: Float, val dy: Float, val spread: Float)
+
+fun Modifier.roseShadow(s: RoseShadow?, shape: Shape?): Modifier {
+    if (s == null || (s.blur <= 0f && s.spread <= 0f)) return this
+    return drawWithContent {
+        drawIntoCanvas { canvas ->
+            val paint = android.graphics.Paint().apply {
+                color = android.graphics.Color.TRANSPARENT
+                // setShadowLayer only paints on the hardware layer from API 28;
+                // older devices drop the shadow and keep the box.
+                setShadowLayer(s.blur, s.dx, s.dy, s.color.toArgb())
+            }
+            val r = s.spread
+            // shortcut: square-corner shadow even on a rounded box; upgrade when Shape exposes its outline
+            canvas.nativeCanvas.drawRoundRect(android.graphics.RectF(-r, -r, size.width + r, size.height + r), 0f, 0f, paint)
+        }
+        drawContent()
+    }
+}
+
 /** The box half, applied to a Modifier in CSS's own order. */
 fun Modifier.roseBox(s: RoseStyle?): Modifier {
     if (s == null) return this
@@ -1044,7 +1095,18 @@ fun Modifier.roseBox(s: RoseStyle?): Modifier {
     if (s.borderWidth != null && s.borderColor != null && s.borderWidth > 0f) {
         m = m.border(s.borderWidth.dp, s.borderColor, shape ?: RectangleShape)
     }
-    s.opacity?.let { alpha -> m = m.graphicsLayer { this.alpha = alpha } }
+    // R497: transform and alpha share one layer; a second graphicsLayer would
+    // overwrite the first instead of adding to it.
+    if (s.opacity != null || s.translateX != null || s.translateY != null || s.rotate != null || s.scale != null) {
+        m = m.graphicsLayer {
+            s.opacity?.let { a -> alpha = a }
+            s.translateX?.let { v -> translationX = v.dp.toPx() }
+            s.translateY?.let { v -> translationY = v.dp.toPx() }
+            s.rotate?.let { v -> rotationZ = v }
+            s.scale?.let { v -> scaleX = v; scaleY = v }
+        }
+    }
+    if (s.shadow != null) m = m.roseShadow(s.shadow, shape)
     s.padding?.let { m = m.padding(it.roseEdges()) }
     if (s.width != null) m = m.width(s.width.dp)
     if (s.height != null) m = m.height(s.height.dp)
@@ -1082,7 +1144,7 @@ fun roseColorOf(v: Any?): Color? {
     var s = v?.toString()?.trim()?.lowercase() ?: return null
     if (s.startsWith("#")) s = s.substring(1)
     if (s.length == 3) s = s.map { "$it$it" }.joinToString("")
-    if (s.length == 8) s = s.substring(6) + s.substring(0, 6)
+    if (s.length == 8) return try { Color(s.toLong(16)) } catch (e: Exception) { null }
     if (s.length != 6) return null
     return try { Color(0xFF000000 + s.toLong(16)) } catch (e: Exception) { null }
 }
@@ -1290,6 +1352,14 @@ function roseThemeArgs(model: StyleModel, fontMap: Map<string, string>): string[
   }
   if (model.radius) args.push(`radius = listOf(${model.radius.map(f).join(', ')})`);
   if (model.aspectRatio !== undefined) args.push(`aspectRatio = ${f(model.aspectRatio)}`);
+  if (model.translateX !== undefined) args.push(`translateX = ${f(model.translateX)}`);
+  if (model.translateY !== undefined) args.push(`translateY = ${f(model.translateY)}`);
+  if (model.rotate !== undefined) args.push(`rotate = ${f(model.rotate)}`);
+  if (model.scale !== undefined) args.push(`scale = ${f(model.scale)}`);
+  if (model.shadow) {
+    const sh = model.shadow;
+    args.push(`shadow = RoseShadow(color = ${composeColor(sh.color)}, blur = ${f(sh.blur)}, dx = ${f(sh.x)}, dy = ${f(sh.y)}, spread = ${f(sh.spread)})`);
+  }
   if (model.opacity !== undefined) args.push(`opacity = ${f(model.opacity)}`);
   if (model.direction) args.push(`direction = "${model.direction}"`);
   if (model.wrap) args.push('wrap = true');
@@ -1370,8 +1440,10 @@ function composeColor(v: string): string {
   if (named[key]) return named[key];
   const hex = /#([0-9a-fA-F]{3,8})/.exec(key)?.[1];
   if (!hex) return 'Color.Black';
-  const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6);
-  return `Color(0xFF${full.toUpperCase()})`;
+  const full = hex.length === 3 || hex.length === 4 ? hex.split('').map((c) => c + c).join('') : hex;
+  const rgb = full.slice(0, 6).toUpperCase();
+  const alpha = full.length === 8 ? full.slice(6).toUpperCase() : 'FF';
+  return `Color(0x${alpha}${rgb})`;
 }
 
 /**

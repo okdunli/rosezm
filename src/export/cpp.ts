@@ -276,14 +276,17 @@ interface CppStyle {
   radiusBl: number;
   /** R414: CSS letter-spacing in px - QFont::AbsoluteSpacing carries it. */
   letterSpacing: number;
-  /** R414: box-shadow x/y/blur; Qt's effect has no spread. */
+  /** R414: box-shadow x/y/blur and the R415 spread Qt's effect approximates. */
   shadowX: number;
   shadowY: number;
   shadowBlur: number;
   shadowColor: string;
+  shadowSpread: number;
   /** R415: white-space: nowrap / text-overflow: ellipsis. */
   nowrap: boolean;
   ellipsis: boolean;
+  /** R415: flex-wrap - the container lays its children out as a flow. */
+  wrap: boolean;
 }
 
 /** R225: an out-of-flow model contributes its offset; anything else stays put. */
@@ -366,6 +369,15 @@ function compileStyles(css: string, warnings: string[], scope?: string): Map<str
   if (/(^|[\s,])body\b|(^|[\s,])html\b/.test(stripped)) warnings.push('cpp: body/html rules become the window default (Qt has no document)');
   // R489: a plain QWidget has no transform hook (only QGraphicsView items do).
   if (/transform\s*:/i.test(stripped)) warnings.push('cpp: transform has no QWidget equivalent - the element renders untransformed');
+  // R415: display:grid is folded to a wrapping flex row by the shared engine -
+  // it carries no column count, so say what Qt actually draws.
+  if (/display\s*:\s*grid|grid-template/i.test(stripped)) {
+    warnings.push('cpp: grid renders as a wrapping flex row - the shared model carries no column count');
+  }
+  // R415: the model's gradient has no shape field, so a radial is a linear sweep.
+  if (/radial-gradient/i.test(stripped)) {
+    warnings.push('cpp: radial-gradient renders as a linear sweep (the shared model carries no shape)');
+  }
   for (const fam of customFontFamilies(stripped)) warnings.push(`cpp: font-family '${fam}' needs a registered font family - the Qt default is used`);
   return rules;
 }
@@ -451,13 +463,22 @@ function cppStyleOf(m: StyleModel): CppStyle {
     shadowY: m.shadow ? Math.round(m.shadow.y) : 0,
     shadowBlur: m.shadow ? Math.round(m.shadow.blur) : 0,
     shadowColor: m.shadow ? m.shadow.color : '',
+    shadowSpread: m.shadow ? Math.round(m.shadow.spread) : 0,
     nowrap: m.nowrap === true,
     ellipsis: m.ellipsis === true,
+    wrap: m.wrap === true,
     // R484: a copied asset keeps its export-time path; a remote URL stays a URL.
     image: m.backgroundImage ? (assetMap.get(m.backgroundImage) ?? m.backgroundImage) : '',
     imageFit: m.backgroundSize ?? 'cover',
     pointer: m.cursor === 'pointer',
   };
+}
+
+/** Qt reads an eight-digit hex as #AARRGGBB; CSS writes #rrggbbaa. A translucent
+ *  stop must be reordered, or Qt paints the wrong channel as the alpha. */
+function qtColor(color: string): string {
+  const m = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})$/.exec(color);
+  return m ? `#${m[2]}${m[1]}` : color;
 }
 
 /** R257: a CSS gradient as the QSS value Qt's stylesheet parses natively - every
@@ -469,7 +490,7 @@ function qssGradient(g: { angle: number; stops: Array<{ at: number; color: Color
   const y1 = (0.5 + Math.cos(rad) / 2).toFixed(3);
   const x2 = (0.5 + Math.sin(rad) / 2).toFixed(3);
   const y2 = (0.5 - Math.cos(rad) / 2).toFixed(3);
-  const stops = g.stops.map((s) => `stop:${(Math.max(0, Math.min(100, s.at)) / 100).toFixed(3)} ${s.color}`).join(', ');
+  const stops = g.stops.map((s) => `stop:${(Math.max(0, Math.min(100, s.at)) / 100).toFixed(3)} ${qtColor(s.color)}`).join(', ');
   return `qlineargradient(x1:${x1}, y1:${y1}, x2:${x2}, y2:${y2}, ${stops})`;
 }
 
@@ -478,7 +499,7 @@ function qssGradient(g: { angle: number; stops: Array<{ at: number; color: Color
  *  table row could not (a descendant rule, an inherited colour, style=""). */
 function cppStyleLiteral(m: StyleModel): string {
   const s = cppStyleOf(m);
-  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}`;
+  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.shadowSpread}, ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, ${s.wrap ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}`;
 }
 
 /** The typography a container hands its children: Qt has no CSS inheritance, so
@@ -499,7 +520,7 @@ function textCarry(m: StyleModel): StyleModel | null {
 }
 
 function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false): string {
-  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}},`).join('\n');
+  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.shadowSpread}, ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, ${s.wrap ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}},`).join('\n');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, which return raw JSON the same way
@@ -726,8 +747,13 @@ struct RoseStyle {
     double letter_spacing = 0;
     int shadow_x = 0, shadow_y = 0, shadow_blur = 0;
     std::string shadow_color;
+    /// R415: the CSS spread; Qt's drop-shadow has no spread of its own, so the
+    /// blur absorbs it (blur + 2x spread in rose_apply_shadow).
+    int shadow_spread = 0;
     /// R415: one line (nowrap); QLabel clips without an ellipsis.
     bool nowrap = false, ellipsis = false;
+    /// R415: flex-wrap - a wrapping row is laid out by RoseFlowLayout.
+    bool wrap = false;
     /// R484: a CSS background picture (a copied asset path, or a remote URL).
     std::string image;
     std::string image_fit;
@@ -1136,6 +1162,14 @@ ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `#in
 /// A QSS colour: the compiled table stores "#rrggbb", a dynamic style:prop may
 /// store a bare hex or a CSS name - exactly one hash belongs in front.
 static std::string rose_css_color(const std::string& value) {
+    // CSS writes #rrggbbaa; Qt's QColor and QSS read eight digits as #AARRGGBB.
+    if (value.size() == 9 && value[0] == '#') {
+        bool hex = true;
+        for (char c : value) {
+            if (c != '#' && !std::isxdigit(static_cast<unsigned char>(c))) { hex = false; break; }
+        }
+        if (hex) return "#" + value.substr(7, 2) + value.substr(1, 6);
+    }
     if (value.empty() || value[0] == '#') return value;
     if (value.rfind("rgb", 0) == 0 || value.rfind("hsl", 0) == 0) return value;
     bool hex = true;
@@ -1157,13 +1191,15 @@ static std::string rose_radius_qss(const RoseStyle& style) {
         + "border-bottom-left-radius: " + std::to_string(style.radius_bl) + "px;";
 }
 
-/// R414: CSS box-shadow through Qt's drop-shadow effect. spread has no Qt
-/// equivalent; blur carries the softness. shortcut: no spread, upgrade to a
-/// nine-patch when a design depends on an exact spread.
+/// R414: CSS box-shadow through Qt's drop-shadow effect. Qt's effect has no
+/// spread of its own, so the spread folds into the blur (blur + 2x spread) -
+/// the shadow grows the way a spread grows it. shortcut: the exact spread shape
+/// needs a nine-patch; upgrade when a design depends on it.
 static void rose_apply_shadow(QWidget* widget, const RoseStyle& style) {
-    if (style.shadow_blur <= 0 && style.shadow_x == 0 && style.shadow_y == 0) return;
+    if (style.shadow_blur <= 0 && style.shadow_x == 0 && style.shadow_y == 0 && style.shadow_spread == 0) return;
     auto* shadow = new QGraphicsDropShadowEffect(widget);
-    shadow->setBlurRadius(style.shadow_blur);
+    const int radius = style.shadow_blur + 2 * style.shadow_spread;
+    shadow->setBlurRadius(radius > 0 ? radius : 0);
     shadow->setOffset(style.shadow_x, style.shadow_y);
     shadow->setColor(QColor(QString::fromStdString(rose_css_color(style.shadow_color))));
     widget->setGraphicsEffect(shadow);
@@ -1987,12 +2023,14 @@ RoseStyle rose_merge_style(const RoseStyle& base, const RoseStyle& over) {
     if (over.radius_br != 0) out.radius_br = over.radius_br;
     if (over.radius_bl != 0) out.radius_bl = over.radius_bl;
     if (over.letter_spacing != 0) out.letter_spacing = over.letter_spacing;
-    if (over.shadow_x != 0 || over.shadow_y != 0 || over.shadow_blur != 0 || !over.shadow_color.empty()) {
+    if (over.shadow_x != 0 || over.shadow_y != 0 || over.shadow_blur != 0 || !over.shadow_color.empty() || over.shadow_spread != 0) {
         out.shadow_x = over.shadow_x; out.shadow_y = over.shadow_y;
         out.shadow_blur = over.shadow_blur; out.shadow_color = over.shadow_color;
+        out.shadow_spread = over.shadow_spread;
     }
     if (over.nowrap) out.nowrap = true;
     if (over.ellipsis) out.ellipsis = true;
+    if (over.wrap) out.wrap = true;
     return out;
 }
 

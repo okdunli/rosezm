@@ -303,6 +303,12 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
   // R484: a background picture travels as the asset path every other target uses.
   if (model.backgroundImage) put('BackgroundImage', JSON.stringify(assetMap.get(model.backgroundImage) ?? model.backgroundImage));
   if (model.backgroundSize) put('BackgroundSize', JSON.stringify(model.backgroundSize));
+  // R224: an out-of-flow box; the insets are pixels from the engine.
+  if (model.position) put('Position', JSON.stringify(model.position));
+  if (model.insetTop !== undefined) put('InsetTop', csNum(model.insetTop));
+  if (model.insetRight !== undefined) put('InsetRight', csNum(model.insetRight));
+  if (model.insetBottom !== undefined) put('InsetBottom', csNum(model.insetBottom));
+  if (model.insetLeft !== undefined) put('InsetLeft', csNum(model.insetLeft));
   if (model.gradient) {
     const stops = model.gradient.stops.map((s) => JSON.stringify(`${csNum(s.at)}:${s.color}`)).join(', ');
     put('Gradient', `new RoseGradient(${csNum(model.gradient.angle)}, new[] { ${stops} })`);
@@ -378,7 +384,9 @@ function noteWpf(model: StyleModel, who: string, ctx: NetCtx): void {
   };
   if (model.letterSpacing) note('spacing', `letter-spacing on ${who} is dropped - WPF text has no tracking`);
   if (model.height?.u === '%') note('height', `a percentage height on ${who} needs a host height - WPF measures its content`);
-  if (model.position) note('position', `position: ${model.position} on ${who} is dropped - the page is a stack of panels, so nothing leaves the flow`);
+  // R224: absolute boxes are placed by RosePanel from their insets; `fixed`
+  // has no viewport hook here, so it anchors to its containing panel.
+  if (model.position === 'fixed') note('fixed', `position: fixed on ${who} is anchored to its containing panel, not the window`);
 }
 
 function renderTheme(pageStyles: Array<{ scope: string; styles: NetStyles }>, shell: NetStyles, theme: NetStyles | null): string {
@@ -513,6 +521,12 @@ public sealed class RoseStyle
     public RoseLen? MaxHeight;
     public string? Overflow;
     public int? ZIndex;
+    /* position (R224) */
+    public string? Position;
+    public double? InsetTop;
+    public double? InsetRight;
+    public double? InsetBottom;
+    public double? InsetLeft;
 }
 
 /// <summary>
@@ -572,14 +586,69 @@ public class RosePanel : Panel
     public static double GetHeightFraction(DependencyObject target) => (double)target.GetValue(HeightFractionProperty);
     public static void SetHeightFraction(DependencyObject target, double value) => target.SetValue(HeightFractionProperty, value);
 
+    /* R224: an out-of-flow box. Position is "absolute" or "fixed"; the insets
+       are pixels from the engine, NaN when the edge is not anchored. */
+    public static readonly DependencyProperty PositionProperty = DependencyProperty.RegisterAttached(
+        "Position", typeof(string), typeof(RosePanel),
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsParentMeasure | FrameworkPropertyMetadataOptions.AffectsParentArrange));
+
+    public static string? GetPosition(DependencyObject target) => target.GetValue(PositionProperty) as string;
+    public static void SetPosition(DependencyObject target, string value) => target.SetValue(PositionProperty, value);
+
+    public static readonly DependencyProperty InsetTopProperty = DependencyProperty.RegisterAttached(
+        "InsetTop", typeof(double), typeof(RosePanel),
+        new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsParentMeasure | FrameworkPropertyMetadataOptions.AffectsParentArrange));
+
+    public static double GetInsetTop(DependencyObject target) => (double)target.GetValue(InsetTopProperty);
+    public static void SetInsetTop(DependencyObject target, double value) => target.SetValue(InsetTopProperty, value);
+
+    public static readonly DependencyProperty InsetRightProperty = DependencyProperty.RegisterAttached(
+        "InsetRight", typeof(double), typeof(RosePanel),
+        new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsParentMeasure | FrameworkPropertyMetadataOptions.AffectsParentArrange));
+
+    public static double GetInsetRight(DependencyObject target) => (double)target.GetValue(InsetRightProperty);
+    public static void SetInsetRight(DependencyObject target, double value) => target.SetValue(InsetRightProperty, value);
+
+    public static readonly DependencyProperty InsetBottomProperty = DependencyProperty.RegisterAttached(
+        "InsetBottom", typeof(double), typeof(RosePanel),
+        new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsParentMeasure | FrameworkPropertyMetadataOptions.AffectsParentArrange));
+
+    public static double GetInsetBottom(DependencyObject target) => (double)target.GetValue(InsetBottomProperty);
+    public static void SetInsetBottom(DependencyObject target, double value) => target.SetValue(InsetBottomProperty, value);
+
+    public static readonly DependencyProperty InsetLeftProperty = DependencyProperty.RegisterAttached(
+        "InsetLeft", typeof(double), typeof(RosePanel),
+        new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsParentMeasure | FrameworkPropertyMetadataOptions.AffectsParentArrange));
+
+    public static double GetInsetLeft(DependencyObject target) => (double)target.GetValue(InsetLeftProperty);
+    public static void SetInsetLeft(DependencyObject target, double value) => target.SetValue(InsetLeftProperty, value);
+
     private Thickness PadOf() => Pad == null ? new Thickness(0) : new Thickness(Pad[3], Pad[0], Pad[1], Pad[2]);
 
-    private List<UIElement> Kids()
+    private static bool OutOfFlow(UIElement child)
+    {
+        var position = GetPosition(child);
+        return position == "absolute" || position == "fixed";
+    }
+
+    /* R224: in-flow children drive the flex layout; out-of-flow children are
+       measured and placed apart from it. */
+    private List<UIElement> FlowKids()
     {
         var kids = new List<UIElement>();
         foreach (UIElement child in InternalChildren)
         {
-            if (child.Visibility != Visibility.Collapsed) kids.Add(child);
+            if (child.Visibility != Visibility.Collapsed && !OutOfFlow(child)) kids.Add(child);
+        }
+        return kids;
+    }
+
+    private List<UIElement> AbsKids()
+    {
+        var kids = new List<UIElement>();
+        foreach (UIElement child in InternalChildren)
+        {
+            if (child.Visibility != Visibility.Collapsed && OutOfFlow(child)) kids.Add(child);
         }
         return kids;
     }
@@ -589,7 +658,20 @@ public class RosePanel : Panel
         var pad = PadOf();
         var availW = double.IsPositiveInfinity(availableSize.Width) ? double.PositiveInfinity : Math.Max(0, availableSize.Width - pad.Left - pad.Right);
         var availH = double.IsPositiveInfinity(availableSize.Height) ? double.PositiveInfinity : Math.Max(0, availableSize.Height - pad.Top - pad.Bottom);
-        var kids = Kids();
+        var kids = FlowKids();
+        foreach (var child in AbsKids())
+        {
+            var left = GetInsetLeft(child);
+            var right = GetInsetRight(child);
+            var top = GetInsetTop(child);
+            var bottom = GetInsetBottom(child);
+            var width = double.IsPositiveInfinity(availW) ? double.PositiveInfinity
+                : Math.Max(0, availW - (double.IsNaN(left) ? 0 : left) - (double.IsNaN(right) ? 0 : right));
+            var height = (double.IsNaN(top) && double.IsNaN(bottom)) || double.IsPositiveInfinity(availH)
+                ? double.PositiveInfinity
+                : Math.Max(0, availH - (double.IsNaN(top) ? 0 : top) - (double.IsNaN(bottom) ? 0 : bottom));
+            child.Measure(new Size(width, height));
+        }
         if (kids.Count == 0) return new Size(pad.Left + pad.Right, pad.Top + pad.Bottom);
 
         var main = 0.0;
@@ -651,7 +733,7 @@ public class RosePanel : Panel
         var pad = PadOf();
         var availW = Math.Max(0, finalSize.Width - pad.Left - pad.Right);
         var availH = Math.Max(0, finalSize.Height - pad.Top - pad.Bottom);
-        var kids = Kids();
+        var kids = FlowKids();
         if (kids.Count > 0)
         {
             if (Horizontal && WrapLines)
@@ -672,12 +754,36 @@ public class RosePanel : Panel
                 ArrangeLine(kids, Horizontal, pad.Left, pad.Top, Horizontal ? availW : availH, Horizontal ? availH : availW);
             }
         }
+        foreach (var child in AbsKids()) ArrangeAbs(child, pad, availW, availH);
         if (ClipContent)
         {
             var radius = Radii == null ? 0 : Radii[0];
             Clip = new RectangleGeometry(new Rect(0, 0, finalSize.Width, finalSize.Height), radius, radius);
         }
         return finalSize;
+    }
+
+    /* R224: place an out-of-flow child from its insets, inside the padding box.
+       Both edges given: the child stretches between them. One edge: it is
+       anchored there at its desired size. Neither: the top-left corner. */
+    private static void ArrangeAbs(UIElement child, Thickness pad, double availW, double availH)
+    {
+        var left = GetInsetLeft(child);
+        var right = GetInsetRight(child);
+        var top = GetInsetTop(child);
+        var bottom = GetInsetBottom(child);
+        var margin = child.Margin;
+        var stretchX = !double.IsNaN(left) && !double.IsNaN(right) && !double.IsPositiveInfinity(availW);
+        var stretchY = !double.IsNaN(top) && !double.IsNaN(bottom) && !double.IsPositiveInfinity(availH);
+        var width = stretchX ? Math.Max(0, availW - left - right - margin.Left - margin.Right) : child.DesiredSize.Width;
+        var height = stretchY ? Math.Max(0, availH - top - bottom - margin.Top - margin.Bottom) : child.DesiredSize.Height;
+        var x = !double.IsNaN(left) ? left + margin.Left
+            : !double.IsNaN(right) ? availW - right - width - margin.Right
+            : margin.Left;
+        var y = !double.IsNaN(top) ? top + margin.Top
+            : !double.IsNaN(bottom) ? availH - bottom - height - margin.Bottom
+            : margin.Top;
+        child.Arrange(new Rect(pad.Left + x, pad.Top + y, width, height));
     }
 
     private List<List<UIElement>> WrapLinesOf(List<UIElement> kids, double width)
@@ -1284,6 +1390,12 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (style.Margin != null) element.Margin = Margins(style.Margin);
         if (style.Opacity != null) element.Opacity = Math.Max(0, Math.Min(1, style.Opacity.Value));
         if (style.ZIndex != null) Panel.SetZIndex(element, style.ZIndex.Value);
+        // R224: an out-of-flow box; the parent RosePanel places it from the insets.
+        if (style.Position != null) RosePanel.SetPosition(element, style.Position);
+        if (style.InsetTop != null) RosePanel.SetInsetTop(element, style.InsetTop.Value);
+        if (style.InsetRight != null) RosePanel.SetInsetRight(element, style.InsetRight.Value);
+        if (style.InsetBottom != null) RosePanel.SetInsetBottom(element, style.InsetBottom.Value);
+        if (style.InsetLeft != null) RosePanel.SetInsetLeft(element, style.InsetLeft.Value);
         if (style.AlignSelf != null) RosePanel.SetAlignSelf(element, style.AlignSelf);
         if (style.Grow != null) RosePanel.SetGrow(element, style.Grow.Value);
         if (style.Width != null) Dimension(element, style.Width, true);

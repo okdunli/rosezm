@@ -225,14 +225,14 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // only style table and every row in it is scoped, so a theme rule that rode in
   // one scope only would miss all the others.
   for (const page of pages) {
-    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), page.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, page.struct, allFonts);
     if (rows) pageStyleRows.push(rows);
     if (tagRows) pageTagRows.push(tagRows);
     if (darkRows) { pageDarkRows.push(darkRows); arkDarkRules++; }
     if (darkTagRows) { pageDarkTagRows.push(darkTagRows); arkDarkRules++; }
   }
   for (const comp of components) {
-    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n'), comp.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, comp.struct, allFonts);
     if (rows) compStyleRows.push(rows);
     if (tagRows) compTagRows.push(tagRows);
     if (darkRows) { compDarkRows.push(darkRows); arkDarkRules++; }
@@ -440,6 +440,451 @@ function arkJustifyOf(j: Justify): string {
   return j === 'center' ? 'Center' : j === 'between' ? 'SpaceBetween' : j === 'around' ? 'SpaceAround' : j === 'evenly' ? 'SpaceEvenly' : j === 'end' ? 'End' : 'Start';
 }
 
+/** The grid tracks an ArkUI Grid can host, kept raw until arkGridTracksOk validates them. */
+type ArkGridExtra = { columns?: string; rows?: string; colGap?: number; rowGap?: number };
+
+/** A radial gradient the engine models as `center/radius/stops` because it has no radial of its own. */
+type ArkRadialExtra = { center: [string, string]; radius?: string; stops?: Array<{ color: string; at: number }> };
+
+/** A `::before`/`::after` rule: its content plus the properties the engine could parse. */
+type ArkPseudoEntry = { content: string; model: StyleModel };
+
+interface ArkCssExtras {
+  grids: Map<string, ArkGridExtra>;
+  radials: Map<string, ArkRadialExtra>;
+  before: Map<string, ArkPseudoEntry>;
+  after: Map<string, ArkPseudoEntry>;
+}
+
+/** A rewritten `.rose-sN` selector: which structural pseudo-class it stood for and what a match needs. */
+interface ArkStructuralEntry {
+  pseudo: 'first' | 'last' | 'nth';
+  expr?: string;
+  needs: string[];
+  tag?: string;
+}
+
+/** The model plus the grid/radial facts the emitter bolted on for this element. */
+type ArkGridModel = StyleModel & { __arkGrid?: ArkGridExtra };
+type ArkRadialModel = StyleModel & { __arkRadial?: ArkRadialExtra };
+
+/** Skip a quoted string that starts at css[i]; i is on the quote, the return is past it. */
+function arkSkipString(css: string, i: number): number {
+  const q = css[i];
+  let j = i + 1;
+  while (j < css.length) {
+    if (css[j] === '\\') { j += 2; continue; }
+    if (css[j] === q) return j + 1;
+    j++;
+  }
+  return css.length;
+}
+
+/**
+ * Top-level CSS blocks: head is everything from the previous block's end to `{`
+ * (leading whitespace included), body is the brace-matched interior. Comments,
+ * strings and nested braces are tracked so a `}` inside `content: "}"` cannot
+ * close the rule early.
+ */
+function arkCssSegments(css: string): Array<{ head: string; body: string; at: boolean; start: number; end: number }> {
+  const segs: Array<{ head: string; body: string; at: boolean; start: number; end: number }> = [];
+  let pos = 0;
+  while (pos < css.length) {
+    const open = css.indexOf('{', pos);
+    if (open < 0) break;
+    let depth = 1;
+    let i = open + 1;
+    while (i < css.length && depth > 0) {
+      const c = css[i];
+      if (c === '"' || c === "'") { i = arkSkipString(css, i); continue; }
+      if (c === '/' && css[i + 1] === '*') { const close = css.indexOf('*/', i + 2); i = close < 0 ? css.length : close + 2; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      i++;
+    }
+    const head = css.slice(pos, open);
+    segs.push({ head, body: css.slice(open + 1, depth === 0 ? i - 1 : css.length), at: /^\s*@/.test(head), start: pos, end: Math.min(i, css.length) });
+    pos = Math.min(i, css.length);
+  }
+  return segs;
+}
+
+/** Split on a one-character separator at nesting depth 0, outside quotes. */
+function arkSplitTop(text: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"' || c === "'") { i = arkSkipString(text, i); continue; }
+    if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    else if (c === sep && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
+    i++;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** The `(min-width:..px)` / `(max-width:..px)` guards of an @media head, or null when it has none. */
+function arkMediaGuardOf(head: string): { min?: number; max?: number } | null {
+  const min = /\(min-width:\s*([\d.]+)px\)/.exec(head);
+  const max = /\(max-width:\s*([\d.]+)px\)/.exec(head);
+  if (!min && !max) return null;
+  return { min: min ? Number(min[1]) : undefined, max: max ? Number(max[1]) : undefined };
+}
+
+/** A guard holds at the reference width the emitter lays every page out for. */
+function arkMediaMatches(g: { min?: number; max?: number }): boolean {
+  return (!g.min || REFERENCE_WIDTH >= g.min) && (!g.max || REFERENCE_WIDTH <= g.max);
+}
+
+/** Rewrite structural pseudo-class selectors to synthetic `.rose-sN` classes. */
+function arkRewriteStructural(css: string): { css: string; structural: Map<string, ArkStructuralEntry> } {
+  const structural = new Map<string, ArkStructuralEntry>();
+  let counter = 0;
+  const walk = (text: string): string => {
+    const segs = arkCssSegments(text);
+    if (!segs.length) return text;
+    let out = '';
+    let pos = 0;
+    for (const seg of segs) {
+      out += text.slice(pos, seg.start);
+      if (seg.at) {
+        out += seg.head + '{' + walk(seg.body) + '}';
+      } else {
+        out += rewriteRule(seg.head) + '{' + seg.body + '}';
+      }
+      pos = seg.end;
+    }
+    return out + text.slice(pos);
+  };
+  const rewriteRule = (head: string): string => {
+    const parts = arkSplitTop(head, ',');
+    const kept: string[] = [];
+    for (const rawPart of parts) {
+      const part = rawPart;
+      if (/:hover\b|:focus\b|:active\b/.test(part)) { kept.push(part); continue; }
+      const re = /(^|[^\\]):(first|last|nth)-child(\(([^)]*)\))?/g;
+      let m: RegExpExecArray | null;
+      let matched = false;
+      while ((m = re.exec(part))) {
+        if (part.slice(0, m.index).trimEnd().endsWith(':not(')) continue;
+        const compoundStart = compoundBounds(part, m.index)[0];
+        const name = `rose-s${counter++}`;
+        const cls = `.${name}`;
+        const kind = m[2] as 'first' | 'last' | 'nth';
+        const expr = kind === 'nth' ? (m[4] ?? '').trim() : undefined;
+        const compound = part.slice(compoundStart.start, compoundStart.end);
+        const needs = [...compound.matchAll(/\.([A-Za-z_][\w-]*)/g)].map((x) => x[1]);
+        const tagMatch = /^([A-Za-z][\w-]*)/.exec(compound.trim());
+        const entry: ArkStructuralEntry = { pseudo: kind, expr, needs, tag: tagMatch ? tagMatch[1] : undefined };
+        // m[0] swallows one non-backslash char before the `:` so an escaped
+        // `\:nth-child` cannot match; that prefix must survive the cut.
+        const pseudoStart = m.index + m[1].length;
+        const pseudoLen = m[0].length - m[1].length;
+        const without = part.slice(0, pseudoStart) + part.slice(pseudoStart + pseudoLen);
+        const cutStart = pseudoStart - compoundStart.start;
+        const cutEnd = cutStart + pseudoLen;
+        const cut = compound.slice(0, cutStart) + compound.slice(cutEnd);
+        const pe = /::(before|after)\s*$/.exec(cut);
+        const rewritten = pe ? cut.slice(0, pe.index) + cls + pe[0] : cut + cls;
+        structural.set(name, entry);
+        kept.push(without.slice(0, compoundStart.start) + rewritten + without.slice(compoundStart.end));
+        matched = true;
+        break;
+      }
+      if (!matched) kept.push(part);
+    }
+    return kept.join(',');
+  };
+  const compoundBounds = (part: string, at: number): Array<{ start: number; end: number }> => {
+    let s = at;
+    while (s > 0) {
+      const c = part[s - 1];
+      if (c === '"' || c === "'") { s = arkSkipStringBack(part, s - 1); continue; }
+      if (/\s/.test(c) || c === '>' || c === '+' || c === '~' || c === ',') break;
+      s--;
+    }
+    let e = at;
+    while (e < part.length) {
+      const c = part[e];
+      if (c === '"' || c === "'") { e = arkSkipString(part, e); continue; }
+      if (/\s/.test(c) || c === '>' || c === '+' || c === '~' || c === ',') break;
+      e++;
+    }
+    return [{ start: s, end: e }];
+  };
+  const arkSkipStringBack = (text: string, quoteAt: number): number => {
+    let j = quoteAt - 1;
+    while (j >= 0) {
+      if (text[j] === '\\') { j -= 2; continue; }
+      if (text[j] === text[quoteAt]) return j;
+      j--;
+    }
+    return 0;
+  };
+  return { css: walk(css), structural };
+}
+
+/** Drop the `::before`/`::after` rules - the emitter renders them as real widgets. */
+function stripPseudoElementRules(css: string): string {
+  const walk = (text: string): string => {
+    const segs = arkCssSegments(text);
+    if (!segs.length) return text;
+    let out = '';
+    let pos = 0;
+    for (const seg of segs) {
+      out += text.slice(pos, seg.start);
+      if (seg.at && /^@media\b/.test(seg.head.trim())) out += seg.head + '{' + walk(seg.body) + '}';
+      else if (seg.at) out += text.slice(seg.start, seg.end);
+      else {
+        const parts = arkSplitTop(seg.head, ',');
+        const kept = parts.filter((p) => !/::(before|after)\b/i.test(p));
+        if (!kept.length) {
+          // The whole rule was pseudo-elements; drop it with its braces.
+          pos = seg.end;
+          continue;
+        }
+        out += (kept.length === parts.length ? seg.head : kept.join(',')) + '{' + seg.body + '}';
+      }
+      pos = seg.end;
+    }
+    return out + text.slice(pos);
+  };
+  return walk(css);
+}
+
+/**
+ * The selector keys a rule's extras land on: the LAST compound's classes and
+ * tag, because `.card::before` targets the element carrying `.card` while
+ * `.list .card::before` still keys `.card`.
+ */
+function arkSelectorKeys(part: string): string[] {
+  const compounds = part.trim().split(/\s+|\s*[>+~]\s*/).filter(Boolean);
+  const last = (compounds[compounds.length - 1] ?? '').replace(/::(before|after)\b/gi, '');
+  const synth = /\.rose-s\d+\b/.exec(last);
+  if (synth) return [synth[0].slice(1)];
+  const keys = [...last.matchAll(/\.([A-Za-z_][\w-]*)/g)].map((m) => m[1]);
+  const tag = /^([A-Za-z][\w-]*)/.exec(last.trim());
+  if (tag) keys.push(tag[1]);
+  return keys;
+}
+
+/** The `content:` value of a pseudo-element body, or null when it renders nothing. */
+function arkContentOf(body: string): string | null {
+  const decls = arkSplitTop(body, ';');
+  for (const d of decls) {
+    const m = /^\s*content\s*:\s*(.*?)\s*$/.exec(d);
+    if (!m) continue;
+    const v = m[1];
+    if (!v || /^(none|normal|open-quote|close-quote)$/i.test(v) || /^attr\(/i.test(v) || /^url\(/i.test(v)) return null;
+    if (v.startsWith('"') && v.endsWith('"')) {
+      try { const parsed = JSON.parse(v) as string; return parsed; } catch { return null; }
+    }
+    if (v.startsWith("'") && v.endsWith("'")) return v.slice(1, -1).replace(/\\(['\\])/g, '$1');
+    return null;
+  }
+  return null;
+}
+
+/** Parse the inside of a `radial-gradient(...)`: center, radius and colour stops. */
+function arkParseRadial(inner: string): ArkRadialExtra {
+  const segs = arkSplitTop(inner, ',');
+  let center: [string, string] | undefined;
+  let radius: string | undefined;
+  const stops: Array<{ color: string; at: number }> = [];
+  const kw: Record<string, string> = { left: '0%', top: '0%', center: '50%', right: '100%', bottom: '100%' };
+  for (const seg of segs) {
+    const s = seg.trim();
+    if (!/(^|[\s,(])(#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\()/i.test(s)) {
+      const at = /\bat\s+([\d.]+%|left|top|center|right|bottom)(?:\s+([\d.]+%|left|top|center|right|bottom))?/.exec(s);
+      if (at) {
+        const x = at[1] in kw ? kw[at[1]] : at[1];
+        const y = at[2] ? (at[2] in kw ? kw[at[2]] : at[2]) : '50%';
+        center = [x, y];
+        radius = /([\d.]+)%/.exec(s.slice(0, at.index))?.[1] ? `${/([\d.]+)%/.exec(s.slice(0, at.index))![1]}%` : radius;
+      } else {
+        const pct = /([\d.]+)%/.exec(s);
+        if (pct) radius = `${pct[1]}%`;
+      }
+      continue;
+    }
+    const m = /^\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|[a-zA-Z]+)\s*(?:([\d.]+)%)?\s*$/.exec(s);
+    if (m) stops.push({ color: m[1], at: m[2] ? Number(m[2]) : Number.NaN });
+  }
+  const defined = stops.map((s) => s.at).filter((a) => !Number.isNaN(a));
+  if (!defined.length) {
+    stops.forEach((s, i) => { s.at = stops.length > 1 ? (i / (stops.length - 1)) * 100 : 0; });
+  } else {
+    let last = 0;
+    stops.forEach((s) => {
+      if (Number.isNaN(s.at)) s.at = last;
+      else last = s.at;
+    });
+  }
+  return { center: center ?? ['50%', '50%'], radius, stops };
+}
+
+/**
+ * The grid/radial/pseudo-element facts a sheet carries, keyed by the class (or
+ * tag) of the element they style. `@media` blocks are entered only when their
+ * width guard holds at the reference width; the dark-scheme half is skipped -
+ * the runtime modifier already owns it.
+ */
+function arkCssExtras(css: string): ArkCssExtras {
+  const extras: ArkCssExtras = { grids: new Map(), radials: new Map(), before: new Map(), after: new Map() };
+  const walk = (text: string, guard: { min?: number; max?: number } | null): void => {
+    for (const seg of arkCssSegments(text)) {
+      if (seg.at) {
+        const head = seg.head.trim();
+        if (/prefers-color-scheme/.test(head)) continue;
+        if (/^@media\b/.test(head)) {
+          const g = arkMediaGuardOf(head);
+          if (g && !arkMediaMatches(g)) continue;
+          walk(seg.body, g ?? guard);
+        }
+        continue;
+      }
+      for (const part of arkSplitTop(seg.head, ',')) {
+        const keys = arkSelectorKeys(part);
+        if (!keys.length) continue;
+        const decls = arkSplitTop(seg.body, ';');
+        if (/::(before|after)\b/i.test(part)) {
+          const kind = /::after\b/i.test(part) ? 'after' : 'before';
+          const content = arkContentOf(seg.body);
+          if (content === null) continue;
+          const probe = parseStylesheet(`.roseprobe{${seg.body}}`);
+          const model = probe.rules[0]?.model ?? {};
+          const map = kind === 'before' ? extras.before : extras.after;
+          for (const k of keys) {
+            const prev = map.get(k);
+            map.set(k, prev ? { content, model: mergeModels(prev.model, model) } : { content, model });
+          }
+          continue;
+        }
+        const grid: ArkGridExtra = {};
+        for (const d of decls) {
+          const m = /^\s*([a-zA-Z-]+)\s*:\s*(.*?)\s*$/.exec(d);
+          if (!m) continue;
+          const prop = m[1].toLowerCase();
+          const value = m[2].replace(/\s+/g, ' ').trim();
+          if (prop === 'grid-template-columns') grid.columns = value;
+          else if (prop === 'grid-template-rows') grid.rows = value;
+          else if (prop === 'gap' || prop === 'grid-gap') {
+            const nums = value.split(' ').map((v) => /^([\d.]+)px$/.exec(v)?.[1]);
+            if (nums[0]) {
+              grid.rowGap = Number(nums[0]);
+              grid.colGap = nums[1] ? Number(nums[1]) : Number(nums[0]);
+            }
+          } else if (prop === 'column-gap') { const n = /^([\d.]+)px$/.exec(value)?.[1]; if (n) grid.colGap = Number(n); }
+          else if (prop === 'row-gap') { const n = /^([\d.]+)px$/.exec(value)?.[1]; if (n) grid.rowGap = Number(n); }
+          else if ((prop === 'background' || prop === 'background-image') && value.includes('radial-gradient(')) {
+            const open = value.indexOf('radial-gradient(') + 'radial-gradient('.length;
+            let depth = 1;
+            let i = open;
+            while (i < value.length && depth > 0) {
+              if (value[i] === '(') depth++;
+              else if (value[i] === ')') depth--;
+              i++;
+            }
+            const parsed = arkParseRadial(value.slice(open, depth === 0 ? i - 1 : value.length));
+            for (const k of keys) {
+              const prev = extras.radials.get(k);
+              extras.radials.set(k, prev ? { ...prev, ...parsed } : parsed);
+            }
+          }
+        }
+        if (grid.columns !== undefined || grid.rows !== undefined || grid.colGap !== undefined || grid.rowGap !== undefined) {
+          for (const k of keys) {
+            const prev = extras.grids.get(k);
+            extras.grids.set(k, prev ? { ...prev, ...grid } : grid);
+          }
+        }
+      }
+    }
+  };
+  walk(css, null);
+  return extras;
+}
+
+/** Grid tracks ArkUI can express: plain `fr`/`px` runs, with `repeat(n, …)` expanded. */
+function arkGridTracksOk(value: string): string | null {
+  let v = value.trim();
+  const rep = /^repeat\(\s*(\d+)\s*,\s*([^)]*?)\s*\)$/.exec(v);
+  if (rep) v = Array.from({ length: Number(rep[1]) }, () => rep[2].trim()).join(' ');
+  const toks = v.split(/\s+/).filter(Boolean);
+  if (!toks.length || !toks.every((t) => /^([\d.]+(fr|px|vp)?|auto)$/.test(t))) return null;
+  return toks.join(' ');
+}
+
+/** The Grid attributes a validated `grid-template-*` value becomes. */
+function arkGridMods(g: ArkGridExtra): string {
+  const mods: string[] = [];
+  const cols = g.columns ? arkGridTracksOk(g.columns) : null;
+  const rows = g.rows ? arkGridTracksOk(g.rows) : null;
+  if (cols) mods.push(`.columnsTemplate('${cols}')`);
+  if (rows) mods.push(`.rowsTemplate('${rows}')`);
+  if (g.colGap !== undefined) mods.push(`.columnsGap(${g.colGap})`);
+  if (g.rowGap !== undefined) mods.push(`.rowsGap(${g.rowGap})`);
+  return mods.join('');
+}
+
+/** Does 1-based child number `index + 1` satisfy the nth expression? odd/even/integer/An+B. */
+function arkStructuralMatches(entry: ArkStructuralEntry, index: number, count: number): boolean {
+  if (entry.pseudo === 'first') return index === 0;
+  if (entry.pseudo === 'last') return index === count - 1;
+  const expr = (entry.expr ?? '').replace(/\s+/g, '');
+  if (expr === 'odd') return index % 2 === 0;
+  if (expr === 'even') return index % 2 === 1;
+  if (/^[+-]?\d+$/.test(expr)) return index + 1 === Number(expr);
+  const m = /^([+-]?\d*)n([+-]\d+)?$/.exec(expr);
+  if (!m) return false;
+  const a = m[1] === '' || m[1] === undefined ? 1 : m[1] === '+' ? 1 : m[1] === '-' ? -1 : Number(m[1]);
+  const b = m[2] ? Number(m[2]) : 0;
+  if (a === 0) return index + 1 === b;
+  return (index + 1 - b) % a === 0 && (index + 1 - b) / a >= 0;
+}
+
+/** The synthetic `.rose-sN` classes this element earns by its position among its siblings. */
+function arkMatchedSynthetic(ctx: ArkCtx, classes: string[], tag: string): string[] {
+  const structural = ctx.structural;
+  if (!structural || !structural.size || ctx.siblingIndex === undefined || ctx.siblingIndex < 0 || !ctx.siblingCount || ctx.siblingCount <= 0) return [];
+  const hit: string[] = [];
+  for (const [name, entry] of structural) {
+    if (entry.tag && entry.tag !== tag) continue;
+    if (!entry.needs.every((c) => classes.includes(c))) continue;
+    if (arkStructuralMatches(entry, ctx.siblingIndex, ctx.siblingCount)) hit.push(name);
+  }
+  return hit;
+}
+
+/** First hit wins: a synthetic class, else the element's own classes in order, else its tag. */
+function arkExtrasFor<T>(map: Map<string, T>, synthetic: string[], classes: string[], tag: string): T | undefined {
+  for (const s of synthetic) { const v = map.get(s); if (v !== undefined) return v; }
+  for (const c of classes) { const v = map.get(c); if (v !== undefined) return v; }
+  return map.get(tag);
+}
+
+/** A pseudo-element rendered as the Text widget ArkUI has no pseudo-node for. */
+function arkPseudoText(p: ArkPseudoEntry | undefined, ctx: ArkCtx): void {
+  if (!p) return;
+  emit(`Text(${JSON.stringify(p.content)})${arkBoxMods(p.model).join('')}${arkTextMods(mergeModels(ctx.inherited, p.model), ctx.fonts).join('')}`, ctx);
+}
+
+/**
+ * One stylesheet's road to the emitter: sanitize, rewrite the structural
+ * pseudo-classes to synthetic classes, harvest the extras, then strip the
+ * pseudo-element rules before the engine's own parse.
+ */
+function arkSheetPipeline(css: string): { css: string; extras: ArkCssExtras; structural: Map<string, ArkStructuralEntry> } {
+  const clean = sanitizeFor('arkts', css);
+  const { css: rewritten, structural } = arkRewriteStructural(clean);
+  const extras = arkCssExtras(rewritten);
+  return { css: stripPseudoElementRules(rewritten), extras, structural };
+}
+
 /**
  * Box modifiers, valid on every ArkUI component. The engine's model is the
  * source of truth: the same `.hero` rule that drives Flutter/Compose/SwiftUI
@@ -459,7 +904,13 @@ function arkBoxMods(m: StyleModel): string[] {
     const size = m.backgroundSize === 'contain' ? 'Contain' : m.backgroundSize === 'auto' ? 'Auto' : 'Cover';
     mods.push(`.backgroundImage(${src}, ImageRepeat.NoRepeat).backgroundImageSize(ImageSize.${size})`);
   }
-  if (m.gradient) {
+  // A sheet-level radial gradient rides the model as __arkRadial - the engine
+  // parses only linear gradients, so the emitter carries the radial itself.
+  const rad = (m as ArkRadialModel).__arkRadial;
+  if (rad) {
+    const stops = (rad.stops ?? (m.gradient ? m.gradient.stops : [])).map((s) => `['${arkColor(s.color)}', ${Math.round(s.at) / 100}]`).join(', ');
+    mods.push(`.radialGradient({ center: ['${rad.center[0]}', '${rad.center[1]}'], radius: '${rad.radius ?? '50%'}', colors: [${stops}] })`);
+  } else if (m.gradient) {
     const stops = m.gradient.stops.map((s) => `['${arkColor(s.color)}', ${Math.round(s.at) / 100}]`).join(', ');
     mods.push(`.linearGradient({ angle: ${m.gradient.angle}, colors: [${stops}] })`);
   }
@@ -555,6 +1006,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   const darkClasses = new Map<string, StyleModel>();
   const darkTags = new Map<string, StyleModel>();
   for (const rule of sheet.rules) {
+    if (rule.media && !arkMediaMatches(rule.media)) continue;
     const last = rule.parts[rule.parts.length - 1];
     if (rule.dark) {
       if (!last.classes.length && last.tag) darkTags.set(last.tag, mergeModels(darkTags.get(last.tag) ?? null, rule.model));
@@ -605,6 +1057,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   // the element looked up '__h_button_btn'), so the runtime lookup missed the
   // row. Both sides now spell the same class-only flag.
   for (const rule of sheet.rules) {
+    if (rule.media && !arkMediaMatches(rule.media)) continue;
     if (!rule.hover) continue;
     const last = rule.parts[rule.parts.length - 1];
     const flag = `__h_${last.classes.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
@@ -613,6 +1066,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   // R260: the `:focus` half, same shape with ArkUI's onFocus/onBlur - a half
   // that only recolors the border borrows the base row's border width.
   for (const rule of sheet.rules) {
+    if (rule.media && !arkMediaMatches(rule.media)) continue;
     if (!rule.focus) continue;
     const last = rule.parts[rule.parts.length - 1];
     const flag = `__f_${last.classes.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
@@ -624,6 +1078,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   // R270: the `:active` half, same shape with ArkUI's onTouch Down/Up - a half
   // that only recolors the border borrows the base row's border width.
   for (const rule of sheet.rules) {
+    if (rule.media && !arkMediaMatches(rule.media)) continue;
     if (!rule.active) continue;
     const last = rule.parts[rule.parts.length - 1];
     const flag = `__a_${last.classes.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
@@ -1488,7 +1943,8 @@ export class RoseModifier {
 
 function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, fontMap: Map<string, string>, warnings: string[], kitExports: { values: Set<string>; types: Set<string> }, globalCss: string): string {
   const propNames = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-  const sheet = parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const pip = arkSheetPipeline([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const sheet = parseStylesheet(pip.css);
   for (const w of sheet.warnings) warnings.push(`arkts: component ${comp.name}: ${w}`);
   const ctx: ArkCtx = {
     warnings,
@@ -1518,6 +1974,8 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     vectorRenderers: [],
     inline: new Map(),
     inlineBodies: [],
+    extras: pip.extras,
+    structural: pip.structural,
     scope: comp.struct,
   };
   emitNodes(comp.nodes, ctx);
@@ -1712,6 +2170,12 @@ interface ArkCtx {
   inlineBodies: string[];
   /** This page/component's scope - the key suffix the style table uses. */
   scope: string;
+  /** The sheet's structural pseudo-classes, rewritten to synthetic `.rose-sN` keys. */
+  extras?: ArkCssExtras;
+  structural?: Map<string, ArkStructuralEntry>;
+  /** This element's 0-based position among its element siblings, and how many there are. */
+  siblingIndex?: number;
+  siblingCount?: number;
 }
 
 function emit(line: string, ctx: ArkCtx): void {
@@ -1755,14 +2219,15 @@ function renderPage(
   // it, and on a desktop build the action runs locally.
   let pageAction: string | null = null;
   try { pageAction = extractExports(page.script).actions[0]?.name ?? null; } catch { /* unparsable script keeps no action */ }
-  const sheet = parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const pip = arkSheetPipeline([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
+  const sheet = parseStylesheet(pip.css);
   for (const w of sheet.warnings) warnings.push(`arkts: ${w}`);
   // R257: the page root IS the body. SHELL_STYLES feeds this sheet, but no
   // .rose node is ever `body`, so the shell's `body { padding: ... }` matched
   // nothing and every page rendered edge to edge; resolve the body rule once
   // here and paint it on the page root (python/dotnet seed the same rule).
   const bodyModel = cascadeFor(sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model;
-  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], detailsStates: [], scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
+  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], detailsStates: [], extras: pip.extras, structural: pip.structural, scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
   emitNodes(page.nodes, ctx);
   const body = ctx.lines.join('\n');
   const knownBinds = new Set(binds.map((b) => b.name));
@@ -1940,7 +2405,7 @@ function wrapPage(body: string, ctx: ArkCtx): string {
   // R470: the page root is `body`; with a dark half its colour has to come from
   // the runtime resolve, not the light value baked above.
   const darkBody = arkDarkRules > 0 ? `.attributeModifier(roseModifier('body', [], '${ctx.scope}'))` : '';
-  if (trimmed.startsWith('Column(') || trimmed.startsWith('Row(') || trimmed.startsWith('Text(') || trimmed.startsWith('Scroll(')) return trimmed + mods + darkBody;
+  if (trimmed.startsWith('Column(') || trimmed.startsWith('Row(') || trimmed.startsWith('Text(') || trimmed.startsWith('Scroll(') || trimmed.startsWith('Grid(')) return trimmed + mods + darkBody;
   return `Column() {\n${'    ' + body.trim().split('\n').join('\n    ')}\n  }\n  .width('100%')${mods}${darkBody}`;
 }
 
@@ -1956,15 +2421,29 @@ function emitNodes(nodes: IrNode[], ctx: ArkCtx): void {
     if (text && !/^`\s*`$/.test(text)) emit(`Text(${text})${textModsFor(ctx)}`, ctx);
     run.length = 0;
   };
+  // Structural pseudo-classes (:first-child and friends) resolve against the
+  // element siblings of THIS container, so each level saves and restores its own.
+  const elements = nodes.filter((n) => n.kind === 'element');
+  const count = elements.length;
+  const prevIndex = ctx.siblingIndex;
+  const prevCount = ctx.siblingCount;
+  let idx = 0;
   for (const node of nodes) {
     if (node.kind === 'text' || node.kind === 'expr') {
       run.push(node);
       continue;
     }
     flush();
+    if (node.kind === 'element') {
+      ctx.siblingIndex = idx;
+      ctx.siblingCount = count;
+      idx++;
+    }
     emitNode(node, ctx);
   }
   flush();
+  ctx.siblingIndex = prevIndex;
+  ctx.siblingCount = prevCount;
 }
 
 /** One TS template literal for a text run: `${this.x}` for expressions. */
@@ -2146,12 +2625,32 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): void {
   const tag = node.tag.toLowerCase();
   const binding = elementStyleBinding(node);
-  const subject: StyleSubject = { tag, classes: binding.staticClasses };
+  // Structural pseudo-classes became synthetic .rose-sN classes at sheet parse
+  // time; the ones this element earns by its position join its class list, so
+  // the cascade - and any descendant rule - resolves them like real classes.
+  const matchedSynthetic = arkMatchedSynthetic(ctx, binding.staticClasses, tag);
+  const subject: StyleSubject = { tag, classes: [...binding.staticClasses, ...matchedSynthetic] };
   // The cascade is asked even for a classless element: a stylesheet may style
   // the tag itself (`h2 { ... }`), and the browser's own type scale is part
   // of the same answer.
   const resolved = cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH });
   const model = mergeModels(resolved.model, binding.inlineStyle);
+  // The sheet's extras keyed by this element: a grid template, a radial gradient
+  // (the engine has no radial of its own) and the ::before/::after entries.
+  let styledModel = model;
+  let pseudo: { before?: ArkPseudoEntry; after?: ArkPseudoEntry } | undefined;
+  if (ctx.extras) {
+    const grid = arkExtrasFor(ctx.extras.grids, matchedSynthetic, binding.staticClasses, tag);
+    const radial = arkExtrasFor(ctx.extras.radials, matchedSynthetic, binding.staticClasses, tag);
+    const before = arkExtrasFor(ctx.extras.before, matchedSynthetic, binding.staticClasses, tag);
+    const after = arkExtrasFor(ctx.extras.after, matchedSynthetic, binding.staticClasses, tag);
+    styledModel = {
+      ...model,
+      ...(grid ? { __arkGrid: grid } : {}),
+      ...(radial ? { __arkRadial: radial } : {}),
+    };
+    if (before || after) pseudo = { before, after };
+  }
   // R243: ArkUI has no `:hover` pseudo-class, but it does have `.onHover()` and
   // @State - so the rule becomes a flag the element flips on pointer enter/leave,
   // and the hover model's modifiers are applied while it is set. Same shape WPF
@@ -2220,13 +2719,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
   // R470: the runtime modifier carries the colours when a dark half exists;
   // leaving the inlined ones on the chain would fight it in unspecified order.
   const staticModel = arkDarkRules > 0 && binding.staticClasses.length && dynamicMods
-    ? { ...model, color: undefined, background: undefined }
-    : model;
+    ? { ...styledModel, color: undefined, background: undefined }
+    : styledModel;
   ctx.ancestors.push(subject);
   const outerInherited = ctx.inherited;
   ctx.inherited = mergeModels(outerInherited, textCarry(model));
   try {
-    emitElementStyled(node, ctx, staticModel, dynamicMods, hoverTail);
+    emitElementStyled(node, ctx, staticModel, dynamicMods, hoverTail, pseudo);
   } finally {
     ctx.ancestors.pop();
     ctx.inherited = outerInherited;
@@ -2268,7 +2767,7 @@ function arkInlineRuns(children: IrNode[], ctx: ArkCtx, mods: string[]): string[
   return runs;
 }
 
-function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx, model: StyleModel, dynamicMods: string, hoverTail: string): void {
+function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx, model: StyleModel, dynamicMods: string, hoverTail: string, pseudo?: { before?: ArkPseudoEntry; after?: ArkPseudoEntry }): void {
   const tag = node.tag.toLowerCase();
   // A box modifier chain with the runtime `roseModifier` tail appended. The tail
   // is a chainable .attributeModifier(...) call, so it folds in after the static
@@ -2330,13 +2829,17 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     // not a Column of separate Text widgets.
     const runs = arkInlineRuns(node.children, ctx, []);
     if (runs && runs.length) {
+      arkPseudoText(pseudo?.before, ctx);
       emit(box(`Text() {\n${runs.map((r) => '  ' + r).join('\n')}\n}${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
+      arkPseudoText(pseudo?.after, ctx);
       return;
     }
   }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = templateOf(node.children, ctx);
+    arkPseudoText(pseudo?.before, ctx);
     emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
+    arkPseudoText(pseudo?.after, ctx);
     return;
   }
   // R452: <details>/<summary> folds on a @State flag - the header toggles it and
@@ -2599,6 +3102,40 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     emit('Blank(8)', ctx);
     return;
   }
+  // A grid template the sheet carries as an extra: real Grid/GridItem widgets
+  // when the children are a plain element list, a warning + Flex fallback when
+  // they are not (a text node would break GridItem's one-child contract).
+  const grid = (model as ArkGridModel).__arkGrid;
+  if (grid && (grid.columns || grid.rows)) {
+    const cols = grid.columns ? arkGridTracksOk(grid.columns) : null;
+    const rows = grid.rows ? arkGridTracksOk(grid.rows) : null;
+    const kids = node.children.filter((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element');
+    if ((cols || rows) && kids.length && kids.length === node.children.length) {
+      const scrolls = model.overflow === 'scroll';
+      if (scrolls) {
+        emit(`Scroll() {`, ctx);
+        ctx.depth++;
+      }
+      emit('Grid() {', ctx);
+      ctx.depth++;
+      for (const kid of kids) {
+        emit('GridItem() {', ctx);
+        ctx.depth++;
+        emitNode(kid, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+      }
+      ctx.depth--;
+      const widthDefault = model.width ? '' : ".width('100%')";
+      emit(box(`}${scrolls ? '' : widthDefault}${arkGridMods(grid)}${arkBoxMods(model).join('')}`), ctx);
+      if (scrolls) {
+        ctx.depth--;
+        emit(`}${widthDefault}${model.height || model.maxHeight ? '' : ".constraintSize({ maxHeight: '100%' })"}`, ctx);
+      }
+      return;
+    }
+    ctx.warnings.push('arkts: display:grid fell back to a flex wrap - the tracks or the children are not a plain element list');
+  }
   const container = arkContainer(model, tag);
   // R227: an overflow:auto/scroll box is its own scroll container. ArkUI's Scroll
   // takes exactly one child, so the Column goes inside it and the height that
@@ -2610,7 +3147,9 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   }
   emit(`${container.open} {`, ctx);
   ctx.depth++;
+  arkPseudoText(pseudo?.before, ctx);
   emitNodes(node.children, ctx);
+  arkPseudoText(pseudo?.after, ctx);
   ctx.depth--;
   const widthDefault = model.width ? '' : ".width('100%')";
   emit(box(`}${scrolls ? '' : widthDefault}${container.layout.join('')}${arkBoxMods(model).join('')}`), ctx);

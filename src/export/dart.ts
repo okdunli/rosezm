@@ -165,6 +165,16 @@ async function copyDartAssets(root: string, dest: string, warnings: string[]): P
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
 
+/**
+ * What the shared engine folds away but Flutter can still honour: the column
+ * count of `grid-template-columns` (the engine keeps `display:grid` only as a
+ * wrapping flex row) and whether the background gradient is radial (it keeps
+ * the stops, not the shape). Keyed exactly like the compiled class rows.
+ */
+interface StyleHint { gridColumns?: number; radial?: boolean }
+
+let styleHints = new Map<string, StyleHint>();
+
 export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
   const root = opts.projectRoot;
@@ -222,6 +232,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
     }
   }
   tagStyles = new Map<string, StyleModel>();
+  styleHints = new Map<string, StyleHint>();
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
   // An <a href="https://..."> needs the url_launcher plugin and the kit's
@@ -412,6 +423,71 @@ function substituteSlot(nodes: IrNode[], content: IrNode[]): IrNode[] {
 }
 
 /**
+ * How many tracks a `grid-template-columns` value lays out, clamped to the
+ * twelve a phone-width row can carry. `repeat(N, ...)` states it; an
+ * auto-fit/auto-fill track is estimated from its minmax floor at the reference
+ * width - the same width media queries resolve against.
+ */
+function trackCount(raw: string): number | undefined {
+  const v = raw.replace(/!important/gi, '').trim();
+  const repeat = /^repeat\(\s*(\d+|auto-fit|auto-fill)\s*,([\s\S]*)\)$/i.exec(v);
+  if (repeat) {
+    if (/^\d+$/.test(repeat[1])) {
+      const k = Number(repeat[1]);
+      return k >= 1 ? Math.min(12, k) : undefined;
+    }
+    const minmax = /minmax\(\s*([\d.]+)px/i.exec(repeat[2]);
+    const floor = minmax ? Number(minmax[1]) : 120;
+    return Math.max(1, Math.min(12, Math.floor((REFERENCE_WIDTH + 12) / (floor + 12))));
+  }
+  // Tracks sit at the top level; a minmax()/calc() carries its own spaces.
+  const parts = v.split(/\s+(?![^(]*\))/).filter((p) => p && !p.startsWith('['));
+  return parts.length ? Math.min(12, parts.length) : undefined;
+}
+
+/**
+ * The declarations the shared engine folds away: `grid-template-columns` (a
+ * grid becomes a wrapping flex row there, the column count is dropped) and a
+ * radial background. Scanned off the raw sheet once per stylesheet, keyed the
+ * way compileStyles keys its rows, so the hint lands on the row the element
+ * resolves. Rules inside `@media` are read too: the engine already resolves the
+ * same width guard against REFERENCE_WIDTH.
+ */
+function collectStyleHints(css: string, scope?: string): void {
+  const rule = /([^{}]+)\{([^{}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = rule.exec(css))) {
+    const selector = m[1].trim();
+    // A nested at-rule head (`@media ... {`) is not a selector; the rules
+    // inside it match on their own in the following iterations.
+    if (!selector || selector.startsWith('@')) continue;
+    const compound = selector.split(/[\s>+~]+/).pop() ?? '';
+    const [head, ...pseudos] = compound.split(':');
+    const classes: string[] = [];
+    const cls = /\.([A-Za-z_][-\w]*)/g;
+    let c: RegExpExecArray | null;
+    while ((c = cls.exec(head))) classes.push(c[1]);
+    if (!classes.length) continue;
+    const cols = /grid-template-columns\s*:\s*([^;]+)/i.exec(m[2]);
+    const gridColumns = cols ? trackCount(cols[1]) : undefined;
+    const radial = /background(?:-image)?\s*:\s*[^;]*radial-gradient\(/i.test(m[2]);
+    if (gridColumns === undefined && !radial) continue;
+    let prefix = '';
+    for (const pseudo of pseudos) {
+      const name = pseudo.trim().toLowerCase();
+      if (name === 'hover' || name === 'focus' || name === 'active') prefix = `__${name}_`;
+    }
+    for (const name of classes) {
+      const key = prefix + (scope ? `${name}__${scope}` : name);
+      const hint: StyleHint = { ...(styleHints.get(key) ?? {}) };
+      if (gridColumns !== undefined) hint.gridColumns = gridColumns;
+      if (radial) hint.radial = true;
+      styleHints.set(key, hint);
+    }
+  }
+}
+
+/**
  * Compile a stylesheet through the shared engine - one entry per CLASS, keyed
  * `class__scope` so two pages may both define `.rcard` (the demo's home card
  * is pink, its about card green) without leaking one page's border into the
@@ -424,6 +500,7 @@ function substituteSlot(nodes: IrNode[], content: IrNode[]): IrNode[] {
  */
 function compileStyles(css: string, warnings: string[], scope?: string): { rules: StyleRule[]; hoverKeys: Set<string>; focusKeys: Set<string>; activeKeys: Set<string>; darkRules: StyleRule[]; darkTags: Map<string, StyleModel> } {
   if (!css.trim()) return { rules: [], hoverKeys: new Set<string>(), focusKeys: new Set<string>(), activeKeys: new Set<string>(), darkRules: [], darkTags: new Map<string, StyleModel>() };
+  collectStyleHints(css, scope);
   const sheet = parseStylesheet(css);
   for (const w of sheet.warnings) warnings.push(`flutter: ${w}`);
   const merged = new Map<string, StyleModel>();
@@ -613,6 +690,12 @@ function styleArgsOf(model: StyleModel): string[] {
   if (model.gradient && model.gradient.stops.length >= 2) {
     args.push(`gradient: <Color>[${model.gradient.stops.map((s) => dartColor(s.color)).join(', ')}]`);
     args.push(`gradientAngle: ${n(model.gradient.angle)}`);
+    // The engine keeps each stop's offset (0-100). Two colours that stated no
+    // position come back as 0 and 50, but CSS pins the last one at 100%, so a
+    // browser paints that pair across the whole box - match it.
+    const offsets = model.gradient.stops.map((s) => Math.min(1, Math.max(0, s.at / 100)));
+    if (offsets.length === 2 && offsets[1] === 0.5) offsets[1] = 1;
+    args.push(`gradientStops: <double>[${offsets.map((v) => n(v)).join(', ')}]`);
   }
   // R488: the CSS transform, decomposed.
   if (model.translateX !== undefined) args.push(`translateX: ${n(model.translateX)}`);
@@ -659,16 +742,26 @@ function styleArgsOf(model: StyleModel): string[] {
 }
 
 /**
+ * One class's row: its style, plus the hints the shared engine folds away.
+ * The hints stay out of styleArgsOf so a class without a grid or a radial
+ * background keeps exactly the arguments it had before.
+ */
+function roseStyleRow(className: string, model: StyleModel): string {
+  const args = styleArgsOf(model);
+  const hint = styleHints.get(className);
+  if (hint?.gridColumns !== undefined) args.push(`gridColumns: ${hint.gridColumns}`);
+  if (hint?.radial) args.push(`gradientKind: 'radial'`);
+  return `  '${className}': RoseStyle(${args.join(', ')}),`;
+}
+
+/**
  * `lib/styles.dart`: the compiled classes AND the runtime the dynamic half
  * needs. A `class={expr}` binding cannot be resolved at export time, so the
  * exported app carries the same merge the browser would do - look up every
  * class, merge in order, let an inline style and a `style:prop={expr}` win.
  */
 function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>, darkRules: StyleRule[] = [], darkTags: Map<string, StyleModel> = new Map()): string {
-  const rows = rules.map((r) => {
-    const args = styleArgsOf(r.model);
-    return `  '${r.className}': RoseStyle(${args.join(', ')}),`;
-  });
+  const rows = rules.map((r) => roseStyleRow(r.className, r.model));
   // The browser's own tag defaults sit under the sheet's tag rules on the
   // device too: roseResolve merges these before any class, exactly like the
   // web cascade. Without them a <strong> and a <th> lost their bold on Flutter.
@@ -681,10 +774,7 @@ function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>, darkRul
   // R467: the dark half of every sheet, one table each. The page sets roseDark
   // from the platform brightness before building, and roseResolve merges these
   // on top of the light rows only then.
-  const darkRows = darkRules.map((r) => {
-    const args = styleArgsOf(r.model);
-    return `  '${r.className}': RoseStyle(${args.join(', ')}),`;
-  });
+  const darkRows = darkRules.map((r) => roseStyleRow(r.className, r.model));
   const darkTagRows = [...darkTags.entries()].map(([tag, model]) => {
     const args = styleArgsOf(model);
     return `  '${tag}': RoseStyle(${args.join(', ')}),`;
@@ -702,8 +792,8 @@ class RoseStyle {
     this.color, this.fontSize, this.weight, this.fontFamily, this.italic,
     this.letterSpacing, this.lineHeight, this.align, this.transform,
     this.underline, this.strike,
-    this.background, this.gradient, this.gradientAngle, this.image, this.imageFit, this.imageRepeat,
-    this.padding, this.margin, this.gap,
+    this.background, this.gradient, this.gradientAngle, this.gradientStops, this.gradientKind, this.image, this.imageFit, this.imageRepeat,
+    this.padding, this.margin, this.gap, this.gridColumns,
     this.border,
     this.radius, this.shadow, this.opacity,
     this.translateX, this.translateY, this.rotate, this.scale,
@@ -729,12 +819,18 @@ class RoseStyle {
   final Color? background;
   final List<Color>? gradient;
   final double? gradientAngle;
+  /// The stop offsets (0-1), aligned with [gradient].
+  final List<double>? gradientStops;
+  /// 'radial' for a radial background; null means a linear one.
+  final String? gradientKind;
   final String? image;
   final BoxFit? imageFit;
   final ImageRepeat? imageRepeat;
   final EdgeInsets? padding;
   final EdgeInsets? margin;
   final double? gap;
+  /// The grid columns the class asked for (CSS grid-template-columns).
+  final int? gridColumns;
   final Border? border;
   final BorderRadius? radius;
   final BoxShadow? shadow;
@@ -780,8 +876,10 @@ class RoseStyle {
       transform: other.transform ?? transform, underline: other.underline ?? underline,
       strike: other.strike ?? strike, background: other.background ?? background,
       gradient: other.gradient ?? gradient, gradientAngle: other.gradientAngle ?? gradientAngle,
+      gradientStops: other.gradientStops ?? gradientStops, gradientKind: other.gradientKind ?? gradientKind,
       padding: other.padding ?? padding, margin: other.margin ?? margin,
-      gap: other.gap ?? gap, border: other.border ?? border,
+      gap: other.gap ?? gap, gridColumns: other.gridColumns ?? gridColumns,
+      border: other.border ?? border,
       radius: other.radius ?? radius, shadow: other.shadow ?? shadow,
       opacity: other.opacity ?? opacity, direction: other.direction ?? direction,
       wrap: other.wrap ?? wrap, justify: other.justify ?? justify,
@@ -824,17 +922,34 @@ class RoseStyle {
     return BoxDecoration(
       color: background,
       image: image == null ? null : DecorationImage(image: image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!), fit: imageFit ?? BoxFit.cover, repeat: imageRepeat ?? ImageRepeat.repeat),
-      gradient: gradient == null || gradient!.length < 2
-          ? null
-          : LinearGradient(
-              colors: gradient!,
-              begin: Alignment.topCenter,
-              end: gradientAngle != null && gradientAngle! < 90 ? Alignment.topLeft : Alignment.bottomCenter,
-            ),
+      gradient: _roseGradient(),
       border: border,
       borderRadius: radius,
       boxShadow: shadow == null ? null : [shadow!],
     );
+  }
+
+  /// CSS gradient -> Flutter: a radial background is a RadialGradient, a linear
+  /// one keeps its angle (0 = to top, clockwise, the CSS convention) as an
+  /// eight-way direction between two Alignment corners.
+  Gradient? _roseGradient() {
+    final colors = gradient;
+    if (colors == null || colors.length < 2) return null;
+    final stops = gradientStops != null && gradientStops!.length == colors.length ? gradientStops : null;
+    if (gradientKind == 'radial') return RadialGradient(colors: colors, stops: stops);
+    const corners = <List<Alignment>>[
+      [Alignment.bottomCenter, Alignment.topCenter],   // 0deg: to top
+      [Alignment.bottomLeft, Alignment.topRight],      // 45deg: to top right
+      [Alignment.centerLeft, Alignment.centerRight],   // 90deg: to right
+      [Alignment.topLeft, Alignment.bottomRight],      // 135deg: to bottom right
+      [Alignment.topCenter, Alignment.bottomCenter],   // 180deg: to bottom
+      [Alignment.topRight, Alignment.bottomLeft],      // 225deg: to bottom left
+      [Alignment.centerRight, Alignment.centerLeft],   // 270deg: to left
+      [Alignment.bottomRight, Alignment.topLeft],      // 315deg: to top left
+    ];
+    final a = (((gradientAngle ?? 180) % 360) + 360) % 360;
+    final d = corners[((a + 22.5) ~/ 45) % 8];
+    return LinearGradient(colors: colors, stops: stops, begin: d[0], end: d[1]);
   }
 
   BoxConstraints? get constraints {
@@ -1148,9 +1263,32 @@ Widget roseDateField(RoseStyle? s, String value, void Function(String)? onChange
 String roseIsoDay(DateTime d) =>
     '\${d.year.toString().padLeft(4, '0')}-\${d.month.toString().padLeft(2, '0')}-\${d.day.toString().padLeft(2, '0')}';
 
+/// A CSS grid: a wrapping row of equal-width cells, the column count taken from
+/// grid-template-columns at export time. GridView.count is not used - it gives
+/// every cell a 1:1 aspect ratio, which squashes a card that stated its height.
+Widget roseGrid(RoseStyle? s, List<Widget> children) {
+  final cols = (s?.gridColumns ?? 1).clamp(1, 12).toInt();
+  if (cols < 2) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
+  final spacing = s?.gap ?? 0.0;
+  return LayoutBuilder(builder: (context, box) {
+    if (!box.maxWidth.isFinite) return Column(crossAxisAlignment: CrossAxisAlignment.start, children: children);
+    final cell = (box.maxWidth - spacing * (cols - 1)) / cols;
+    return Wrap(
+      spacing: spacing,
+      runSpacing: spacing,
+      children: [
+        for (final child in children)
+          SizedBox(width: cell <= 0 ? box.maxWidth : cell, child: child),
+      ],
+    );
+  });
+}
+
 /// A flex container driven by the style: direction, main/cross alignment, gap
 /// and wrap. Used only when the element actually asked for a layout.
 Widget roseFlex(RoseStyle? s, List<Widget> children) {
+  // A CSS grid resolves to a wrapping row of fixed-width cells.
+  if (s?.gridColumns != null) return roseGrid(s, children);
   // A flex box with no stated direction is a ROW (the CSS default), and the
   // compiled table says so: a display:flex class carries direction row.
   // A plain block that only set gap has no direction and stays a column -
