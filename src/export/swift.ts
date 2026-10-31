@@ -167,7 +167,6 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   await fs.promises.mkdir(path.join(appDir, 'Resources'), { recursive: true });
   await fs.promises.mkdir(path.join(out, `${APP}.xcodeproj`), { recursive: true });
 
-  const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings);
   // CF: the site's own theme sheet compiles UNSCOPED, the way SHELL_STYLES does
   // - a theme targets global class names and bare elements, so a page scope
   // would make every one of its rules miss - and first in the map, so a later
@@ -177,6 +176,27 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // come from the site's stylesheet, and a family with no bundled file is a
   // silent fall back to the system default.
   const allCss = [globalCss, ...pages.map((p) => p.style)].join('\n') + '\n' + SHELL_STYLES;
+  // R465: the launch frame draws before SwiftUI does. Its colour asset is the
+  // app's own body colour, so a dark app no longer opens on a white sheet.
+  const bodyBg = (() => {
+    const raw = (cascadeFor(parseStylesheet(allCss), { tag: 'body', classes: [] }, [], { viewport: 390 }).model.background ?? '').trim();
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw);
+    if (!hex) return '#ffffff';
+    return hex[1].length === 3 ? '#' + hex[1].split('').map((c) => c + c).join('') : hex[0];
+  })();
+  const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings);
+  // R465: the named colour UILaunchScreen points at - one color set, the body
+  // background, so the launch frame matches the first painted frame.
+  const launchSet = path.join(appDir, 'Resources', 'Assets.xcassets', 'RoseLaunchBackground.colorset');
+  await fs.promises.mkdir(launchSet, { recursive: true });
+  const chan = (i: number): string => (parseInt(bodyBg.slice(i, i + 2), 16) / 255).toFixed(6);
+  await fs.promises.writeFile(path.join(launchSet, 'Contents.json'), JSON.stringify({
+    colors: [{
+      color: { 'color-space': 'srgb', components: { alpha: '1.000000', blue: chan(5), green: chan(3), red: chan(1) } },
+      idiom: 'universal',
+    }],
+    info: { author: 'xcode', version: 1 },
+  }, null, 2) + '\n', 'utf8');
   const fontMap = await copyFonts(root, path.join(appDir, 'Resources'), allCss, warnings);
   // Styles: each page compiles its own <style> under its own scope - two
   // pages may both define .rcard (the demo does), and a merged table would
@@ -201,7 +221,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   }
   await fs.promises.writeFile(path.join(appDir, 'RoseRootView.swift'), renderRoot(pages), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'rosezmApp.swift'), renderApp(appSwift, native.includes('scan-code') || native.includes('modal')), 'utf8');
-  await fs.promises.writeFile(path.join(appDir, 'Info.plist'), renderInfoPlist(app, native, [...fontMap].map(([family, file]) => ({ family, file }))), 'utf8');
+  await fs.promises.writeFile(path.join(appDir, 'Info.plist'), renderInfoPlist(app, native, [...fontMap].map(([family, file]) => ({ family, file })), bodyBg), 'utf8');
 
   const swiftFiles = walk(appDir).filter((f) => f.endsWith('.swift'));
   await fs.promises.writeFile(path.join(out, `${APP}.xcodeproj`, 'project.pbxproj'), renderProject(app, swiftFiles, appDir, opts.apiBase ?? ''), 'utf8');
@@ -1794,7 +1814,7 @@ struct RoseRootView: View {
 `;
 }
 
-function renderInfoPlist(app: AppIdentity, native: NativeCapability[], fonts: Array<{ family: string; file: string }> = []): string {
+function renderInfoPlist(app: AppIdentity, native: NativeCapability[], fonts: Array<{ family: string; file: string }> = [], launchColor = ''): string {
   // App Store Connect refuses a second upload of one version with the same
   // build number, and a literal "1" never moves. Derive it from the version the
   // way Android's versionCode and HarmonyOS's versionCode already are, so one
@@ -1853,7 +1873,10 @@ ${app.scheme ? `    <key>CFBundleURLTypes</key>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UILaunchScreen</key>
-    <dict/>
+    <dict>${launchColor ? `
+        <key>UIColorName</key>
+        <string>RoseLaunchBackground</string>` : ''}
+    </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -1946,6 +1969,9 @@ function renderPage(
   globalCss: string = '',
 ): string {
   const facts = scanState(page.script);
+  // R461: onPullDownRefresh is already a server action method; the pull gesture
+  // is the missing half - .refreshable drives it.
+  const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');
   // `__rosezmContent` is a server-side bridge over the markdown collections.
   // When the project has a content directory the export bakes it into the kit,
   // so the reads resolve to real data; otherwise they resolve empty.
@@ -2157,7 +2183,7 @@ ${layout}
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
-        }
+        }${pull ? '\n        .refreshable { await onPullDownRefresh() }' : ''}
         .task { await loadData()${ctx.awaits.map((a, i) => `; await __runAwait${i}()`).join('')}${ctx.deferred.map((d, i) => `; await __runDefer${i}()`).join('')}${kvSeedLines ? `; __seedKv()` : ''} }
 ${persistMirrors}
     }

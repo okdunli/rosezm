@@ -32,7 +32,7 @@ import * as fs from 'node:fs';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
-import { appIcon, icoFromPng } from './app-icon.js';
+import { appIcon, icoFromPng, icnsFromPng } from './app-icon.js';
 import { nativeUsage, type NativeCapability } from './native-api.js';
 import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 
@@ -94,6 +94,16 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(out, 'build', 'appicon.png'), icon);
   await fs.promises.mkdir(path.join(out, 'build', 'windows'), { recursive: true });
   await fs.promises.writeFile(path.join(out, 'build', 'windows', 'icon.ico'), icoFromPng(icon));
+  // R460: `wails build` on macOS reads build/darwin/icon.icns. A square
+  // 32..1024 picture is wrapped as one entry; anything else keeps the default
+  // and the warning says why (a wrong .icns is worse than none).
+  const icns = icnsFromPng(icon);
+  if (icns) {
+    await fs.promises.mkdir(path.join(out, 'build', 'darwin'), { recursive: true });
+    await fs.promises.writeFile(path.join(out, 'build', 'darwin', 'icon.icns'), icns);
+  } else {
+    opts.warnings.push('wails: no build/darwin/icon.icns (the picture is not a square 32..1024 side) - a macOS build keeps the default icon');
+  }
   await fs.promises.writeFile(path.join(out, 'README.md'), readme(opts.apiBase ?? '', docs), 'utf8');
   await writeDeployScaffold('wails', out, opts.warnings);
 
@@ -267,6 +277,13 @@ ${FENCE}
 ${FENCE}bash
 go install github.com/wailsapp/wails/v2/cmd/wails@latest
 ${FENCE}
+
+## Icons
+
+\`build/appicon.png\` ships, and \`build/windows/icon.ico\` is generated from it.
+macOS reads \`build/darwin/icon.icns\`: a square 32/64/128/256/512/1024 picture is
+wrapped automatically; any other size gets none (the export warns) - redraw
+\`public/icon.png\` square before a macOS build.
 
 (put \`$(go env GOPATH)/bin\` on your PATH). Its platform prerequisites - a C
 compiler everywhere, GTK3 + WebKit2 on Linux, the WebView2 runtime on Windows -

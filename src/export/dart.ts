@@ -2072,6 +2072,9 @@ function renderPage(
   // load, so the field is seeded here from its own compute expression.
   const kvDecls = kvDeclarations(page.script ?? '').filter((k) => new Set([...facts.state.map((s) => s.name), ...facts.data]).has(k.name));
   const kvSeedLines = kvDecls.map((k) => `    setState(() { ${k.name} = rosezmKv(${JSON.stringify(k.name)}, () => (${kvCallable(k.fn)}), ${k.ttl}); });`).join('\n');
+  // R461: onPullDownRefresh is already a server action method; the pull gesture
+  // is the missing half - RefreshIndicator drives it.
+  const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');
   const styleClasses = new Set<string>();
   const binds = [...scanModuleBinds(pageScript), ...(content && serverGlobals.length ? contentBindNames(page.script ?? '').map((name) => {
     const decl = new RegExp(`(?:const|let|var)\\s+${name}\\s*(?::[^=;\\n]*)?=`).exec(page.script ?? '');
@@ -2282,10 +2285,10 @@ ${methods}
       // out of the bottom gesture bar and a landscape notch on the sides.
       body: SafeArea(
         top: false,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
+        child: ${pull ? 'RefreshIndicator(onRefresh: () async { await onPullDownRefresh(); }, child: ' : ''}SingleChildScrollView(
+          ${pull ? 'physics: const AlwaysScrollableScrollPhysics(),\n          ' : ''}padding: const EdgeInsets.all(16),
           child: ${body},
-        ),
+        )${pull ? ')' : ''},
       ),
     );
   }

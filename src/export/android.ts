@@ -285,7 +285,7 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.1")
-    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -337,9 +337,22 @@ ${app.scheme ? `            <!-- Deep links: ${app.scheme}://blog/7 opens the ap
     <string name="app_name">${xmlEscape(app.name)}</string>
 </resources>
 `, 'utf8');
+  // R464: the launch frame draws before Compose does. Painting the window the
+  // app's own body colour (and picking the light/dark parent to match) removes
+  // the white flash a dark app showed on every cold start.
+  const bodyModel = cascadeFor(parseStylesheet(allCss), { tag: 'body', classes: [] }, [], { viewport: 390 }).model;
+  const rawBg = (bodyModel.background ?? '').trim();
+  const shortHex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(rawBg);
+  const bgHex = shortHex
+    ? (shortHex[1].length === 3 ? '#' + shortHex[1].split('').map((c) => c + c).join('') : shortHex[0])
+    : '#ffffff';
+  const rgb = [1, 3, 5].map((i) => parseInt(bgHex.slice(i, i + 2), 16));
+  const dark = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255 < 0.5;
   await fs.promises.writeFile(path.join(out, 'app', 'src', 'main', 'res', 'values', 'themes.xml'), `<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.rosezm" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.rosezm" parent="${dark ? 'android:Theme.Material.NoActionBar' : 'android:Theme.Material.Light.NoActionBar'}">
+        <item name="android:windowBackground">${bgHex}</item>
+    </style>
 </resources>
 `, 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme), 'utf8');
@@ -1976,6 +1989,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -1984,6 +1998,10 @@ import androidx.compose.ui.Modifier
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // R464: targetSdk 35 draws edge-to-edge whether the app asks or not;
+        // this is the supported opt-in and it keeps the system bar icons
+        // readable on light and dark themes.
+        enableEdgeToEdge()
 ${needsContext ? `        ${PKG}.kit.ROSE_NATIVE_CONTEXT = this` : ''}
 ${appKotlin.global ? `        // App-level globalData (src/app.rose): one map, every page's kit reads it.
         RoseKit.roseAppGlobal.putAll(
@@ -2301,6 +2319,10 @@ function renderPage(
     ...facts.state.map((s) => `        ${applyLine(s.name, kotlinType(initOf(s.name)))}`),
     ...facts.data.map((d) => `        patch["${d}"]?.let { ${d} = it }`),
   ].join('\n');
+  // R463: onPullDownRefresh is already a lambda that launches its own coroutine;
+  // a pull gesture has to await it, so a suspend twin posts the same action and
+  // applies the same patch, and the spinner stops when that twin returns.
+  const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(pageScript ?? '');
   // R246: one interaction source + collected hover state per synthetic class.
   // Compose's hoverable() drives it from the pointer, exactly like the web's
   // :hover - and on a phone (no pointer) the flag simply never flips.
@@ -2326,7 +2348,7 @@ function renderPage(
   const compImports = [...new Set(components.map((c) => `import ${PKG}.components.${c.cls}`))].join('\n');
   return `// R223: FlowRow (a wrapping flex row) is still experimental in the pinned
 // Compose BOM; opting the file in is the documented way to use it.
-@file:OptIn(ExperimentalLayoutApi::class)
+${pull ? '@file:OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)' : '@file:OptIn(ExperimentalLayoutApi::class)'}
 
 package ${PKG}.pages
 
@@ -2374,6 +2396,7 @@ ${activeDecls}
 ${bindFields}
 ${prefsAccessor}
 ${stateFields}
+${pull ? '    var __refreshing by remember { mutableStateOf(false) }' : ''}
 
     LaunchedEffect(Unit) {
         if (__loaded) return@LaunchedEffect
@@ -2398,7 +2421,26 @@ ${ctx.awaits.map((a, i) => `
     }`).join('')}
 ${handlers}
 ${formFieldsHelper}
-
+${pull ? `
+    val __pullRefresh: suspend () -> Unit = {
+        val patch = roseAction(if (route.isEmpty()) ${JSON.stringify(page.route)} else route, "onPullDownRefresh")
+        if (patch.isNotEmpty()) {
+${patchApply}
+        }
+    }` : ''}
+${pull ? `    PullToRefreshBox(
+        isRefreshing = __refreshing,
+        onRefresh = {
+            __refreshing = true
+            scope.launch {
+                try {
+                    __pullRefresh()
+                } finally {
+                    __refreshing = false
+                }
+            }
+        },
+    ) {` : ''}
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2407,6 +2449,7 @@ ${formFieldsHelper}
     ) {
 ${layout}
     }
+${pull ? '    }' : ''}
 }
 `;
 }

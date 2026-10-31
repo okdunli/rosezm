@@ -354,9 +354,12 @@ try {
     writeFileSync(join(bigProj, 'public/icon.png'), fake1024);
     const bt = await exportProject('tauri', bigProj, { apiBase: 'x', outRoot: join(scratch, 'icon-big-tauri') });
     assert(existsSync(join(bt.outDir, 'src-tauri/icons/icon.icns')) && readFileSync(join(bt.outDir, 'src-tauri/tauri.conf.json'), 'utf8').includes('icons/icon.icns'), 'tauri: a 1024 square ships the .icns and lists it');
+    const bw = await exportProject('wails', bigProj, { apiBase: 'x', outRoot: join(scratch, 'icon-big-wails') });
+    assert(existsSync(join(bw.outDir, 'build/darwin/icon.icns')), 'wails: a 1024 square ships the macOS icon');
     const w = await exportProject('wails', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-wails') });
     assert(existsSync(join(w.outDir, 'build/appicon.png')), 'wails: build/appicon.png is where the CLI looks for it');
     assert(existsSync(join(w.outDir, 'build/windows/icon.ico')), 'wails: the Windows exe icon ships too');
+    assert(!existsSync(join(w.outDir, 'build/darwin/icon.icns')), 'wails: a 48px picture gets no .icns');
     const el = await exportProject('electron', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-electron') });
     const elPkg = JSON.parse(readFileSync(join(el.outDir, 'package.json'), 'utf8'));
     assert(elPkg.build?.appId && elPkg.build?.files?.includes('main.cjs') && elPkg.build?.linux?.target?.[0] === 'AppImage', 'electron: the package carries an electron-builder config');
@@ -1229,6 +1232,9 @@ try {
   assert(kread('app/build.gradle.kts').includes('buildConfigField("String", "ROSEZM_API"') && kread('app/build.gradle.kts').includes('System.getenv("ROSEZM_API")') && kread('app/build.gradle.kts').includes('buildConfig = true'), 'the gradle fills ROSEZM_API from the environment with the baked base as fallback');
   assert(kread('app/src/main/java/dev/rosezm/app/kit/RoseKit.kt').includes('val ROSE_API_BASE: String = BuildConfig.ROSEZM_API'), 'the kit reads the base through BuildConfig');
   assert(kread('README.md').includes('ROSEZM_API=https://staging.example.com'), 'the Android README names the per-build override');
+  assert(kread('app/src/main/res/values/themes.xml').includes('android:windowBackground') && !kread('app/src/main/res/values/themes.xml').includes('<style name="Theme.rosezm" parent="android:Theme.Material.Light.NoActionBar" />'), 'android: the launch window is painted the app colour, not a bare default');
+  assert(kread('app/src/main/java/dev/rosezm/app/MainActivity.kt').includes('enableEdgeToEdge()'), 'android: the activity opts into edge-to-edge');
+  assert(kread('app/build.gradle.kts').includes('compose-bom:2024.09.00'), 'android: the Compose BOM carries Material3 1.3');
   const manifest = kread('app/src/main/AndroidManifest.xml');
   assert(manifest.includes('<manifest') && manifest.includes('android:name=".MainActivity"') && manifest.includes('android.permission.INTERNET'), 'the manifest launches MainActivity and allows the data channel');
   const kpages = walk(join(kdir, 'app/src/main/java/dev/rosezm/app/pages')).filter((f) => f.endsWith('.kt'));
@@ -1906,6 +1912,45 @@ try {
     const cw = await exportProject('weapp', cproj, { apiBase: 'x', outRoot: join(scratch, 'comp-details-weapp') });
     const cwJs = readFileSync(join(cw.outDir, 'components', 'Fold', 'Fold.js'), 'utf8');
     assert(cwJs.includes('__open0: false,') && cwJs.includes('__op0: function (e) { this.setData({ __open0: !this.data.__open0 }); }'), 'weapp: a fold inside a component keeps its state in component data');
+  }
+
+  // R461: a page that exports onPullDownRefresh is already wired to a server
+  // action; the pull gesture itself was missing on phone targets.
+  {
+    const pproj = join(scratch, 'pull-proj');
+    mkdirSync(join(pproj, 'src/pages'), { recursive: true });
+    writeFileSync(join(pproj, 'src/pages/index.rose'), '<script>\n  let n = $state(0);\n  export async function onPullDownRefresh() { n = n + 1; }\n</script>\n<div>{n}</div>\n');
+    const pf = await exportProject('flutter', pproj, { apiBase: 'x', outRoot: join(scratch, 'pull-flutter') });
+    const pfSrc = readFileSync(join(pf.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(pfSrc.includes('RefreshIndicator(onRefresh: () async { await onPullDownRefresh(); }, child: SingleChildScrollView('), 'flutter: onPullDownRefresh gets a pull gesture');
+    assert(pfSrc.includes('physics: const AlwaysScrollableScrollPhysics(),'), 'flutter: a short page can still be pulled');
+    const px = await exportProject('xcode', pproj, { apiBase: 'x', outRoot: join(scratch, 'pull-xcode') });
+    const pxSrc = readFileSync(join(px.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(pxSrc.includes('.refreshable { await onPullDownRefresh() }'), 'xcode: onPullDownRefresh gets a pull gesture');
+    const pa = await exportProject('arkts', pproj, { apiBase: 'x', outRoot: join(scratch, 'pull-arkts') });
+    const paSrc = readFileSync(join(pa.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(paSrc.includes('@State __refreshing: boolean = false;') && paSrc.includes('Refresh({ refreshing: $$this.__refreshing })'), 'arkts: onPullDownRefresh gets the native Refresh container');
+    assert(paSrc.includes('this.onPullDownRefresh().finally(() => { this.__refreshing = false; })'), 'arkts: the spinner stops when the action settles');
+    const pd = await exportProject('android', pproj, { apiBase: 'x', outRoot: join(scratch, 'pull-android') });
+    const pdSrc = readFileSync(join(pd.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(pdSrc.includes('PullToRefreshBox(') && pdSrc.includes('var __refreshing by remember { mutableStateOf(false) }'), 'android: onPullDownRefresh gets a pull gesture');
+    assert(pdSrc.includes('val __pullRefresh: suspend () -> Unit = {') && pdSrc.includes('ExperimentalMaterial3Api::class'), 'android: the suspend twin awaits the action and the file opts in');
+  }
+
+  // R464: a dark app used to flash white on every cold start - the window
+  // background follows the body colour and the theme parent follows its tone.
+  {
+    const dark = join(scratch, 'dark-proj');
+    mkdirSync(join(dark, 'src/pages'), { recursive: true });
+    writeFileSync(join(dark, 'src/pages/index.rose'), '<style>body { background: #10131a; }</style>\n<div>dark app</div>\n');
+    const da = await exportProject('android', dark, { apiBase: 'x', outRoot: join(scratch, 'dark-android') });
+    const theme = readFileSync(join(da.outDir, 'app', 'src', 'main', 'res', 'values', 'themes.xml'), 'utf8');
+    assert(theme.includes('parent="android:Theme.Material.NoActionBar"') && theme.includes('<item name="android:windowBackground">#10131a</item>'), 'android: a dark body paints the launch window dark');
+    const dx = await exportProject('xcode', dark, { apiBase: 'x', outRoot: join(scratch, 'dark-xcode') });
+    const dxPlist = readFileSync(join(dx.outDir, 'rosezmApp', 'Info.plist'), 'utf8');
+    assert(dxPlist.includes('<key>UIColorName</key>') && dxPlist.includes('RoseLaunchBackground'), 'xcode: the launch screen names the body colour');
+    const dxColor = JSON.parse(readFileSync(join(dx.outDir, 'rosezmApp', 'Resources', 'Assets.xcassets', 'RoseLaunchBackground.colorset', 'Contents.json'), 'utf8'));
+    assert(dxColor.colors?.[0]?.color?.components?.red === '0.062745' && dxColor.colors[0].color.components.blue === '0.101961', 'xcode: the colour asset carries the body colour');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.

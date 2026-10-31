@@ -1614,6 +1614,9 @@ function renderPage(
   const persist = persistKeys(page.script ?? '');
   // A declared face is registered once, before the first build, so the
   // `.fontFamily(name)` modifiers this page emits resolve to it.
+  // R462: onPullDownRefresh is already a server action method; HarmonyOS's own
+  // Refresh container is the gesture, `$$` two-way binding drives its spinner.
+  const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');
   const fontRegisters = fontMap.size
     ? [...fontMap].map(([family, file]) => `    font.registerFont({ familyName: ${JSON.stringify(family)}, familySrc: $rawfile(${JSON.stringify(file)}) });`).join('\n') + '\n'
     : '';
@@ -1632,6 +1635,7 @@ function renderPage(
     // R243: a `:hover` rule becomes a flag + the hover model's own modifiers.
     ...ctx.hoverStates.map((h) => `  @State ${h.name}: boolean = false;`),
     ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
+    ...(pull ? ['  @State __refreshing: boolean = false;'] : []),
   ].join('\n');
   const persistSeeds = persist.map((k) => `    if (__rosezmP.hasSync(${JSON.stringify('rosezm:' + k)})) this.${k} = String(__rosezmP.getSync(${JSON.stringify('rosezm:' + k)}, this.${k}));`).join('\n');
   const persistWatchers = persist.map((k) => `
@@ -1743,7 +1747,13 @@ ${ctx.awaits.map((a, i) => `
 ${handlers}
 
   build() {
-    ${wrapPage(body, ctx)}
+    ${pull ? `Refresh({ refreshing: $$this.__refreshing }) {
+      ${wrapPage(body, ctx)}
+    }
+    .onRefreshing(() => {
+      this.__refreshing = true;
+      this.onPullDownRefresh().finally(() => { this.__refreshing = false; });
+    })` : wrapPage(body, ctx)}
   }
 ${ctx.slotBuilders.map((b) => `\n  @Builder\n  ${b.name}(props: Record<string, Object>) {\n${b.lines.map((l) => '  ' + l).join('\n')}\n  }`).join('\n')}
 }
