@@ -1339,6 +1339,21 @@ try {
   writeFileSync(join(example, 'dist', 'index.html'), realIndex);
   void electronDir;
 
+  // 10b. the mobile CI scaffolds: every export ships the workflow and the
+  // DEPLOY.md that names its one manual signing step. A template missing from
+  // deploy/native/ used to leave the export with a warning and no manual.
+  {
+    const scaffolds: Array<[string, string]> = [['android', 'android.yml'], ['flutter', 'flutter.yml'], ['xcode', 'ios.yml']];
+    for (const [target, workflow] of scaffolds) {
+      const m = await exportProject(target as never, example, { apiBase: 'https://api.example.com', outRoot: join(scratch, `scaffold-${target}`) });
+      assert(existsSync(join(m.outDir, '.github', 'workflows', workflow)), `${target}: the export ships its CI workflow`);
+      assert(existsSync(join(m.outDir, 'DEPLOY.md')), `${target}: the export ships the DEPLOY.md that names its manual step`);
+      assert(!(m.warnings ?? []).some((w: string) => /deploy template .* is missing/.test(w)), `${target}: no deploy template is reported missing`);
+    }
+    const fDeploy = readFileSync(join(scratch, 'scaffold-flutter', 'flutter', 'DEPLOY.md'), 'utf8');
+    assert(fDeploy.includes('flutter create --platforms=android,ios --org dev.rosezm') && fDeploy.includes('flutter build appbundle'), 'flutter: DEPLOY.md carries the runner scaffold and the release commands');
+  }
+
   // 11. the desktop JVM family: Java Swing, stdlib only.
   const java = await exportProject('java', example, { apiBase: 'https://api.example.com', outRoot: scratch });
   const jdir = java.outDir;

@@ -68,7 +68,7 @@ jobs:
       - run: flutter pub get
 
       - name: Scaffold the platform folders
-        run: flutter create --platforms=android,ios --project-name rosezm_app .
+        run: flutter create --platforms=android,ios --org dev.rosezm --project-name rosezm_app .
 
       # `flutter build ipa` needs a signed Xcode project, and the export ships
       # no signing setup. Until a certificate exists, build the device app

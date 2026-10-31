@@ -1017,6 +1017,9 @@ export function parseStylesheet(css: string): StyleSheet {
       if (!trimmed) continue;
       const parsedSel = parseSelector(trimmed);
       if (!parsedSel) {
+        // The shell's own View Transitions rule is browser-only by definition;
+        // warning about it on every native export trains people to ignore warnings.
+        if (/::view-transition/.test(trimmed)) continue;
         warnings.push(`selector "${trimmed}" is outside the engine's subset - the rule is skipped`);
         continue;
       }
