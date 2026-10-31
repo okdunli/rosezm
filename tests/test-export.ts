@@ -172,6 +172,8 @@ try {
     assert(mainDart.includes("roseAppGlobal['visits'] = 1"), 'flutter: a globalData write is a Dart map subscript');
     assert(!mainDart.includes('not translated'), 'flutter: no lifecycle body degrades to a stub');
     assert(!mainDart.includes('AppLifecycleStateHide'), 'flutter: the observer uses the real callback name');
+    const fPageDart = readFileSync(join(fExp.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(fPageDart.includes('SafeArea(') && fPageDart.includes('top: false'), 'flutter: the page body keeps out of the bottom gesture bar');
     // ArkTS: onCreate seeds AppStorage + runs the launch body, onForeground/
     // onBackground carry onShow/onHide, console lines become hilog.info.
     const kExp = await exportProject('arkts', aProj, { apiBase: 'x', outRoot: join(scratch, 'app-arkts-out') });
@@ -931,7 +933,7 @@ try {
   assert(/rosezmAction\('\/', 'like', __formFields\(\)\)/.test(indexDart), 'the Flutter action call passes the form fields');
   // R216: progress/video/audio used to collapse to SizedBox.shrink() on Flutter - now real widgets.
   assert(fread('lib/pages/mediaprobe.dart').includes('LinearProgressIndicator('), 'progress becomes a Flutter LinearProgressIndicator');
-  assert(fread('lib/pages/mediaprobe.dart').includes("'🎬 /media/demo.mp4'") && fread('lib/pages/mediaprobe.dart').includes("'🔊 /media/demo.mp3'"), 'video/audio carry their source URL as a placeholder');
+  assert(fread('lib/pages/mediaprobe.dart').includes('RoseVideo("/media/demo.mp4"') && fread('lib/pages/mediaprobe.dart').includes('RoseAudio("/media/demo.mp3"'), 'Flutter plays the video and the audio');
   // R218: the stylesheet reaches the media widgets - .bar's box, not a bare control.
   assert(fread('lib/pages/mediaprobe.dart').includes("roseResolve(const <String>['bar'], 'mediaprobe', 'progress')"), 'the .bar class styles the Flutter progress bar');
   // R159: a $kv field is seeded at load from its own compute expression, so the
@@ -1617,7 +1619,7 @@ try {
   {
     const elp = join(scratch, 'elements-proj');
     mkdirSync(join(elp, 'src/pages'), { recursive: true });
-    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><input readonly value="fixed"><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
+    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><video src="https://example.com/clip.mp4" autoplay muted loop controls></video><audio src="https://example.com/beat.mp3" autoplay loop muted></audio><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><input readonly value="fixed"><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
     const elf = await exportProject('flutter', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-flutter') });
     assert((elf.warnings ?? []).some((w: string) => /<canvas> \(dropped\)/.test(w) && /<iframe> \(dropped\)/.test(w)), 'flutter: canvas and iframe gaps are named');
     assert(!(elf.warnings ?? []).some((w: string) => /<table>/.test(w)), 'flutter: a table is not a gap - it renders as rows');
@@ -1631,6 +1633,11 @@ try {
     assert(elfStyles.includes("'em': RoseStyle(italic: true") && elfStyles.includes("'s': RoseStyle(strike: true") && elfStyles.includes("'ins': RoseStyle(underline: true"), 'flutter: em/s/ins carry their browser decoration too');
     assert(elfStyles.includes("'code': RoseStyle(fontFamily: \"monospace\")"), 'flutter: a code tag resolves to the monospace generic');
     assert(elfStyles.includes("'mark': RoseStyle(background: Color(0xFFFFFF00))"), 'flutter: a mark tag keeps the browser yellow');
+    const elfKit = readFileSync(join(elf.outDir, 'lib', 'rosezm.dart'), 'utf8');
+    const elfPub = readFileSync(join(elf.outDir, 'pubspec.yaml'), 'utf8');
+    assert(elfKit.includes('class RoseVideo extends StatefulWidget') && elfPub.includes('video_player:'), 'flutter: a video tag ships the player and its plugin');
+    assert(elfSrc.includes('RoseVideo("https://example.com/clip.mp4", autoplay: true, muted: true, loop: true)'), 'flutter: video attributes reach the player');
+    assert(elfKit.includes('class RoseAudio extends StatefulWidget') && elfSrc.includes('RoseAudio("https://example.com/beat.mp3", autoplay: true, loop: true, muted: true)'), 'flutter: audio attributes reach the player');
     const elx = await exportProject('xcode', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-xcode') });
     const elxSrc = readFileSync(join(elx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
     assert(elxSrc.includes('.font(.system(size: 16, design: .monospaced))'), 'xcode: a generic monospace becomes a design, not a missing face name');
@@ -1690,6 +1697,8 @@ try {
     assert(elcSrc.includes('rose_rich_label(') && elcSrc.includes('RoseRun{'), 'cpp: a paragraph with inline tags is one rich label');
     const elcKit = readFileSync(join(elc.outDir, 'src', 'rose.cpp'), 'utf8');
     assert(elcKit.includes('static std::string rose_css_color(') && elcKit.includes('"color: " + rose_css_color('), 'cpp: the QSS colour carries exactly one hash');
+    assert(elcSrc.includes('rose_video(') && elcSrc.includes('"https://example.com/clip.mp4", true, true, true'), 'cpp: video attributes reach the Qt player');
+    assert(elcSrc.includes('rose_audio(') && elcSrc.includes('"https://example.com/beat.mp3", true, true, true'), 'cpp: audio attributes reach the Qt player');
     const elpPy = await exportProject('python', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-python') });
     const elpSrc = readFileSync(join(elpPy.outDir, 'pages', 'index.py'), 'utf8');
     const elpKit = readFileSync(join(elpPy.outDir, 'rosezm.py'), 'utf8');
@@ -1699,9 +1708,15 @@ try {
     assert(elcSrc.includes('rose_remote_image(') && readFileSync(join(elc.outDir, 'src', 'rose.cpp'), 'utf8').includes('QLabel* rose_remote_image('), 'cpp: a remote image loads through QNetworkAccessManager');
     assert(elpSrc.includes('rose_remote_image(') && elpKit.includes('def rose_remote_image(') && elpSrc.includes(', rose_remote_image'), 'python: a remote image downloads on a worker thread');
     assert(elnSrc.includes('readOnly: true'), 'dotnet: a readonly input keeps its value uneditable');
+    assert(elnSrc.includes('RoseTheme.Video(') && elnSrc.includes(', autoplay: true, loop: true, muted: true'), 'dotnet: video attributes reach the MediaElement');
+    assert(elnSrc.includes('RoseTheme.Audio('), 'dotnet: an audio tag becomes a player row');
     assert(eljSrc.includes('.setEditable(false)'), 'java: a readonly input keeps its value uneditable');
     assert(elcSrc.includes(', true, 0, false, true)'), 'cpp: a readonly input keeps its value uneditable');
     assert(elpSrc.includes(', readonly=True'), 'python: a readonly input keeps its value uneditable');
+    assert(elaSrc.includes('setVideoPath("https://example.com/clip.mp4"); start(); setOnCompletionListener { start() }'), 'android: video autoplay and loop reach the player');
+    assert(elaSrc.includes('setDataSource(roseAssetUrl("https://example.com/beat.mp3"))') && elaSrc.includes('Icons.Filled.Pause') && elaSrc.includes('import androidx.compose.material.icons.filled.Pause'), 'android: audio autoplay, loop and mute reach the player');
+    assert(elaSrc.includes('setMediaController(android.widget.MediaController('), 'android: video controls get a MediaController');
+    assert(elhSrc.includes('.autoPlay(true).loop(true).muted(true).controls(true)'), 'arkts: video attributes reach the Video component');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.
@@ -1823,7 +1838,7 @@ try {
   assert(nread('Pages/MediaprobePage.cs').includes('new ProgressBar'), 'progress becomes a WPF ProgressBar');
   // R218: the .bar class reaches the bar - width, height and colour all travel.
   assert(nread('Pages/MediaprobePage.cs').includes('RoseTheme.Apply(pb2, new RoseStyle { Color = "#e91e63", Background = "#eeeeee", Width = new RoseLen(200, "px"), Height = new RoseLen(8, "px") })'), 'the .bar class styles the WPF progress bar');
-  assert(nread('Pages/MediaprobePage.cs').includes('[video: /media/demo.mp4]') && nread('Pages/MediaprobePage.cs').includes('[audio: /media/demo.mp3]'), 'video/audio carry their source URL as a placeholder');
+  assert(nread('Pages/MediaprobePage.cs').includes('RoseTheme.Video(') && nread('Pages/MediaprobePage.cs').includes('RoseTheme.Audio('), 'WPF plays the video and the audio');
   const nFiles = walk(join(ndir)).filter((f) => f.endsWith('.cs'));
   const nBad = nFiles.filter((f) => !balancedJava(readFileSync(f, 'utf8')));
   assert(nFiles.length >= 30 && nBad.length === 0, `every emitted .cs file is brace-balanced (${nFiles.length} files)`);
@@ -1833,7 +1848,7 @@ try {
   const cpp = await exportProject('cpp', example, { apiBase: 'https://api.example.com', outRoot: scratch });
   const cdir = cpp.outDir;
   const cread = (rel: string) => readFileSync(join(cdir, rel), 'utf8');
-  assert(cread('CMakeLists.txt').includes('find_package(Qt6 COMPONENTS Widgets Network REQUIRED)') && cread('CMakeLists.txt').includes('target_link_libraries(rosezm-app PRIVATE Qt6::Widgets Qt6::Network)'), 'a CMake project linking Qt6 Widgets and Network');
+  assert(cread('CMakeLists.txt').includes('find_package(Qt6 COMPONENTS Widgets Network Multimedia MultimediaWidgets REQUIRED)') && cread('CMakeLists.txt').includes('target_link_libraries(rosezm-app PRIVATE Qt6::Widgets Qt6::Network Qt6::Multimedia Qt6::MultimediaWidgets)'), 'a CMake project linking Qt6 Widgets, Network and the video modules');
   const cppFiles = walk(join(cdir, 'src', 'pages')).filter((f) => f.endsWith('.cpp'));
   assert(cppFiles.length === result.pages.length && cppFiles.length >= 30, `one Qt page per route (${cppFiles.length})`);
   assert(cread('CMakeLists.txt').includes('src/pages/IndexPage.cpp') && walk(join(cdir, 'src')).filter((f) => f.endsWith('.cpp')).length >= 30, 'every page source is listed in the build');
@@ -1860,7 +1875,7 @@ try {
   assert(existsSync(join(cdir, 'assets', 'rose.png')) && cread('src/pages/IndexPage.cpp').includes('rose_image(panel5, "assets/rose.png")'), 'C++ copies the image and renders it with QPixmap');
   // R216: media elements used to collapse to empty widgets - now real widgets.
   assert(cread('src/pages/MediaprobePage.cpp').includes('QProgressBar'), 'progress becomes a Qt QProgressBar');
-  assert(cread('src/pages/MediaprobePage.cpp').includes('[video: /media/demo.mp4]') && cread('src/pages/MediaprobePage.cpp').includes('[audio: /media/demo.mp3]'), 'video/audio carry their source URL as a placeholder');
+  assert(cread('src/pages/MediaprobePage.cpp').includes('rose_video(') && cread('src/pages/MediaprobePage.cpp').includes('rose_audio('), 'Qt plays the video and the audio');
   assert(cApp.includes('void RoseApp::callAction(') && cApp.includes('rose_keys('), 'the kit carries the data channel, the action protocol and the JSON text helpers');
   const cppAll = walk(join(cdir, 'src')).filter((f) => /\.(cpp|h)$/.test(f));
   const cppBad = cppAll.filter((f) => !balancedJava(readFileSync(f, 'utf8')));

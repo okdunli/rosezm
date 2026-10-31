@@ -22,7 +22,7 @@ import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type SlotUsage } from './ir.js';
 import { elementStyleBinding, warnDynamicUnsupported, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type Color, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, qtFill, type SvgOp, type SvgShape } from './svg-path.js';
@@ -159,11 +159,16 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   // when no page asks for a device capability, so a plain app keeps rose.h and
   // rose.cpp exactly as they were.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
-  await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app, hasExternalLinks), 'utf8');
+  // R434/R437: a <video> or <audio> needs Qt Multimedia; the module and the
+  // widgets appear only in a project that carries one.
+  const hasVideo = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'video'));
+  const hasAudio = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'audio'));
+  const hasMedia = hasVideo || hasAudio;
+  await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native, hasVideo, hasAudio), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app, hasExternalLinks, hasVideo, hasAudio), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'pages.h'), renderPagesHeader(pages, components), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'main.cpp'), renderMain([...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'CMakeLists.txt'), renderCMake(pages, components), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'CMakeLists.txt'), renderCMake(pages, components, hasMedia), 'utf8');
   for (const comp of components) {
     await fs.promises.writeFile(path.join(out, 'src', 'components', comp.cls + 'View.cpp'), renderComponent(comp, styles, warnings, sheetFor(comp.style ?? '', globalCss)), 'utf8');
   }
@@ -482,7 +487,7 @@ function textCarry(m: StyleModel): StyleModel | null {
   return isEmptyModel(out) ? null : out;
 }
 
-function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false): string {
   const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}}},`).join('\n');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
@@ -554,7 +559,10 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #include <QGraphicsOpacityEffect>
 #include <QGraphicsDropShadowEffect>
 #include <QLabel>
-#include <QPaintEvent>
+${video || audio ? `#include <QMediaPlayer>
+#include <QAudioOutput>
+#include <QVideoWidget>
+` : ''}#include <QPaintEvent>
 #include <QPixmap>
 #include <QPainter>
 #include <QPainterPath>
@@ -895,6 +903,9 @@ QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int 
 QWidget* rose_spacer(QWidget* parent, int height);
 QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& style = RoseStyle{});
 QLabel* rose_remote_image(QWidget* parent, const std::string& url, const RoseStyle& style = RoseStyle{});
+${video ? `QWidget* rose_video(QWidget* parent, const std::string& url, bool autoplay, bool loop, bool muted, const RoseStyle& style = RoseStyle{});
+` : ''}${audio ? `QWidget* rose_audio(QWidget* parent, const std::string& url, bool autoplay, bool loop, bool muted, const RoseStyle& style = RoseStyle{});
+` : ''}
 RoseVector* rose_vector(QWidget* parent, const std::vector<std::string>& fills, const std::vector<std::string>& data);
 QCheckBox* rose_checkbox(QWidget* parent, const std::string& text, bool checked, std::function<void(bool)> onChange);
 QRadioButton* rose_radio(QWidget* parent, const std::string& text, const std::string& value, const std::string& current, std::function<void(std::string)> onSelect);
@@ -957,7 +968,7 @@ inline std::string rose_route_path(std::string target) {
 `;
 }
 
-function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = [], app: AppIdentity, externalLinks = false): string {
+function renderRoseCpp(pages: Array<{ route: string; cls: string; params: string[] }>, native: NativeCapability[] = [], app: AppIdentity, externalLinks = false, video = false, audio = false): string {
   const appName = app.name;
   const branches: string[] = [];
   for (const page of pages) {
@@ -2424,7 +2435,72 @@ QLabel* rose_remote_image(QWidget* parent, const std::string& url, const RoseSty
     return label;
 }
 
-QWidget* rose_spacer(QWidget* parent, int height) {
+${video ? `/// R434: a real video. QMediaPlayer owns decoding; QVideoWidget paints it.
+/// autoplay waits for LoadedMedia, loop replays at EndOfMedia, muted rides the
+/// audio output. A site-relative URL resolves against the deployed server.
+QWidget* rose_video(QWidget* parent, const std::string& url, bool autoplay, bool loop, bool muted, const RoseStyle& style) {
+    auto* player = new QMediaPlayer(parent);
+    auto* audio = new QAudioOutput(player);
+    auto* view = new QVideoWidget;
+    player->setAudioOutput(audio);
+    player->setVideoOutput(view);
+    audio->setMuted(muted);
+    const std::string full = url.rfind("http", 0) == 0 ? url : rose_api_base() + url;
+    player->setSource(QUrl(QString::fromStdString(full)));
+    if (autoplay) {
+        QObject::connect(player, &QMediaPlayer::mediaStatusChanged, player, [player](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::LoadedMedia) player->play();
+        });
+    }
+    if (loop) {
+        QObject::connect(player, &QMediaPlayer::mediaStatusChanged, player, [player](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::EndOfMedia) { player->setPosition(0); player->play(); }
+        });
+    }
+    view->setMinimumHeight(220);
+    rose_apply_box(view, style);
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(view);
+    return view;
+}
+` : ''}${audio ? `/// R437: an audio file with a play/pause row. QMediaPlayer owns playback; no
+/// video sink, so nothing is painted for it.
+QWidget* rose_audio(QWidget* parent, const std::string& url, bool autoplay, bool loop, bool muted, const RoseStyle& style) {
+    auto* row = new QWidget;
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* button = new QPushButton("Play");
+    auto* player = new QMediaPlayer(row);
+    auto* audio = new QAudioOutput(player);
+    player->setAudioOutput(audio);
+    audio->setMuted(muted);
+    const std::string full = url.rfind("http", 0) == 0 ? url : rose_api_base() + url;
+    player->setSource(QUrl(QString::fromStdString(full)));
+    QObject::connect(button, &QPushButton::clicked, player, [player, button]() {
+        if (player->playbackState() == QMediaPlayer::PlayingState) {
+            player->pause();
+            button->setText("Play");
+        } else {
+            player->play();
+            button->setText("Pause");
+        }
+    });
+    if (autoplay) {
+        QObject::connect(player, &QMediaPlayer::mediaStatusChanged, player, [player, button](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::LoadedMedia) { player->play(); button->setText("Pause"); }
+        });
+    }
+    if (loop) {
+        QObject::connect(player, &QMediaPlayer::mediaStatusChanged, player, [player](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::EndOfMedia) { player->setPosition(0); player->play(); }
+        });
+    }
+    layout->addWidget(button);
+    layout->addWidget(new QLabel(QString::fromStdString(url.substr(url.find_last_of('/') + 1))));
+    rose_apply_box(row, style);
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(row);
+    return row;
+}
+` : ''}QWidget* rose_spacer(QWidget* parent, int height) {
     auto* spacer = new QWidget;
     spacer->setFixedHeight(height);
     if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(spacer);
@@ -2473,7 +2549,7 @@ int main(int argc, char* argv[]) {
 `;
 }
 
-function renderCMake(pages: Array<{ cls: string }>, components: Array<{ cls: string; script: string | null }>): string {
+function renderCMake(pages: Array<{ cls: string }>, components: Array<{ cls: string; script: string | null }>, media = false): string {
   const sources = [
     '    src/main.cpp',
     '    src/rose.cpp',
@@ -2486,13 +2562,13 @@ project(rosezmApp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 COMPONENTS Widgets Network REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Network${media ? ' Multimedia MultimediaWidgets' : ''} REQUIRED)
 
 add_executable(rosezm-app
 ${sources}
 )
 
-target_link_libraries(rosezm-app PRIVATE Qt6::Widgets Qt6::Network)
+target_link_libraries(rosezm-app PRIVATE Qt6::Widgets Qt6::Network${media ? ' Qt6::Multimedia Qt6::MultimediaWidgets' : ''})
 `;
 }
 
@@ -3087,13 +3163,18 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    emit(`rose_label(${ctx.parent}, "[video: ${url.replace(/"/g, '\\"')}]"${hasStyle ? `, ${styleExpr}` : ', std::string()'});`, ctx);
+    const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
+    // R434: the element's own attributes ride into the player; the box half is
+    // the stylesheet's.
+    emit(`rose_video(${ctx.parent}, ${JSON.stringify(url)}, ${has('autoplay') ? 'true' : 'false'}, ${has('loop') ? 'true' : 'false'}, ${has('muted') ? 'true' : 'false'}${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
     return;
   }
   if (tag === 'audio') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    emit(`rose_label(${ctx.parent}, "[audio: ${url.replace(/"/g, '\\"')}]"${hasStyle ? `, ${styleExpr}` : ', std::string()'});`, ctx);
+    const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
+    // R437: the element's own attributes ride into the audio row.
+    emit(`rose_audio(${ctx.parent}, ${JSON.stringify(url)}, ${has('autoplay') ? 'true' : 'false'}, ${has('loop') ? 'true' : 'false'}, ${has('muted') ? 'true' : 'false'}${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
     return;
   }
   if (tag === 'img') {

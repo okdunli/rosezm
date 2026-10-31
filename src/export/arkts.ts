@@ -2139,7 +2139,10 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    emit(box(`Video({ src: ${JSON.stringify(url)} })${arkBoxMods(model).join('')}`), ctx);
+    // R438: the element's own attributes ride into the ArkUI Video.
+    const flag = (name: string): boolean => node.attrs.some((a) => a.name === name);
+    const flags = `${flag('autoplay') ? '.autoPlay(true)' : ''}${flag('loop') ? '.loop(true)' : ''}${flag('muted') ? '.muted(true)' : ''}${flag('controls') ? '.controls(true)' : ''}`;
+    emit(box(`Video({ src: ${JSON.stringify(url)} })${flags}${arkBoxMods(model).join('')}`), ctx);
     return;
   }
   if (tag === 'audio') {

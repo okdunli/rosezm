@@ -30,7 +30,7 @@ import { transformSync } from 'esbuild';
 import { extractAppLifecycle } from './miniprogram.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, deferBlocks, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
@@ -280,7 +280,12 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   await fs.promises.writeFile(path.join(out, 'lib', 'styles.dart'), renderStyles(styles, tagStyles), 'utf8');
   const nativeDeps = nativeDependencies('flutter', native);
   if (hasExternalLinks && !nativeDeps.includes('url_launcher')) nativeDeps.push('url_launcher');
-  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route), hasExternalLinks), 'utf8');
+  // R435: a <video>/<audio> needs the video_player plugin; the widgets land in
+  // the kit only for the tags the project actually uses.
+  const hasVideo = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'video'));
+  const hasAudio = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'audio'));
+  if ((hasVideo || hasAudio) && !nativeDeps.includes('video_player')) nativeDeps.push('video_player');
+  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route), hasExternalLinks, hasVideo, hasAudio), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDeps, app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme, app), 'utf8');
@@ -1016,7 +1021,7 @@ CrossAxisAlignment? _roseCross(String? a) {
 `;
 }
 
-function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = [], externalLinks = false): string {
+function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = [], externalLinks = false, video = false, audio = false): string {
   const q = JSON.stringify(apiBase);
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
@@ -1039,6 +1044,135 @@ dynamic roseContentGet(String coll, String slug) {
     if (entry is Map && entry['slug'] == slug) return entry;
   }
   return null;
+}
+` : '';
+
+  // R432: a <video> a Flutter build plays, instead of a placeholder line. The
+  // widget only lands in the kit when a page carries one, so a project with no
+  // video keeps the SDK-only pubspec.
+  const videoBlock = video ? `
+/// R432: a <video> the platform actually plays. autoplay/muted/loop are the
+/// element's attributes; a tap toggles play and pause.
+class RoseVideo extends StatefulWidget {
+  const RoseVideo(this.url, {super.key, this.autoplay = false, this.muted = false, this.loop = false});
+  final String url;
+  final bool autoplay;
+  final bool muted;
+  final bool loop;
+  @override
+  State<RoseVideo> createState() => _RoseVideoState();
+}
+
+class _RoseVideoState extends State<RoseVideo> {
+  VideoPlayerController? _controller;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final controller = VideoPlayerController.networkUrl(Uri.parse(
+      widget.url.startsWith('http') ? widget.url : (rosezmApiBase.isEmpty ? widget.url : rosezmApiBase + widget.url),
+    ));
+    _controller = controller;
+    controller.setLooping(widget.loop);
+    controller.setVolume(widget.muted ? 0 : 1);
+    controller.initialize().then((_) {
+      if (!mounted) return;
+      setState(() => _ready = true);
+      if (widget.autoplay) controller.play();
+    }).catchError((Object _) {});
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    if (controller == null || !_ready) {
+      return const AspectRatio(
+        aspectRatio: 16 / 9,
+        child: ColoredBox(color: Color(0x11000000), child: Center(child: CircularProgressIndicator())),
+      );
+    }
+    final ratio = controller.value.aspectRatio > 0 ? controller.value.aspectRatio : 16 / 9;
+    return GestureDetector(
+      onTap: () => setState(() {
+        if (controller.value.isPlaying) {
+          controller.pause();
+        } else {
+          controller.play();
+        }
+      }),
+      child: AspectRatio(aspectRatio: ratio, child: VideoPlayer(controller)),
+    );
+  }
+}
+` : '';
+
+  // R435: an <audio> plays through the same controller, with a play/pause row
+  // instead of a video surface. Emitted only when a page carries the tag.
+  const audioBlock = audio ? `
+/// R435: an <audio> a Flutter build plays. autoplay/loop/muted are the
+/// element's attributes; the button toggles play and pause.
+class RoseAudio extends StatefulWidget {
+  const RoseAudio(this.url, {super.key, this.autoplay = false, this.loop = false, this.muted = false});
+  final String url;
+  final bool autoplay;
+  final bool loop;
+  final bool muted;
+  @override
+  State<RoseAudio> createState() => _RoseAudioState();
+}
+
+class _RoseAudioState extends State<RoseAudio> {
+  VideoPlayerController? _controller;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final url = widget.url.startsWith('http') ? widget.url : (rosezmApiBase.isEmpty ? widget.url : rosezmApiBase + widget.url);
+    final controller = VideoPlayerController.networkUrl(Uri.parse(url));
+    _controller = controller;
+    controller.setLooping(widget.loop);
+    controller.setVolume(widget.muted ? 0 : 1);
+    controller.initialize().then((_) {
+      if (!mounted) return;
+      setState(() => _ready = true);
+      if (widget.autoplay) controller.play();
+    }).catchError((Object _) {});
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = _controller;
+    final playing = controller != null && _ready && controller.value.isPlaying;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      IconButton(
+        icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+        onPressed: controller == null || !_ready
+            ? null
+            : () => setState(() {
+                  if (controller.value.isPlaying) {
+                    controller.pause();
+                  } else {
+                    controller.play();
+                  }
+                }),
+      ),
+      Flexible(child: Text(widget.url.split('/').last, overflow: TextOverflow.ellipsis)),
+    ]);
+  }
 }
 ` : '';
 
@@ -1198,14 +1332,14 @@ ${native.includes('camera') ? `      case 'camera':
 
   return `import 'dart:convert';
 import 'dart:io';
-${native.length ? "import 'package:flutter/material.dart';\n" : ''}${externalLinks ? "import 'package:url_launcher/url_launcher.dart';\n" : ''}${nativeImports}
+${native.length || video || audio ? "import 'package:flutter/material.dart';\n" : ''}${externalLinks ? "import 'package:url_launcher/url_launcher.dart';\n" : ''}${video || audio ? "import 'package:video_player/video_player.dart';\n" : ''}${nativeImports}
 ${externalLinks ? `/// An <a href="https://..."> in a page: the system browser (or mail app),
 /// never a push of a route this app does not carry.
 Future<void> roseOpenUrl(String url) async {
   final uri = Uri.tryParse(url);
   if (uri != null) await launchUrl(uri, mode: LaunchMode.externalApplication);
 }
-` : ''}${contentBlock}
+` : ''}${contentBlock}${videoBlock}${audioBlock}
 
 /// Trusted markup renders as markup: the inline HTML subset a content page
 /// uses becomes a Text.rich span tree, never escaped text.
@@ -1702,6 +1836,7 @@ const NATIVE_PLUGIN_FLOORS: Record<string, string> = {
   geolocator: '>=11.0.0 <14.0.0',
   share_plus: '>=10.0.0 <12.0.0',
   url_launcher: '>=6.0.0 <7.0.0',
+  video_player: '>=2.9.0 <3.0.0',
   battery_plus: '>=2.0.0 <4.0.0',
   connectivity_plus: '>=4.0.0 <7.0.0',
   device_info_plus: '>=9.0.0 <12.0.0',
@@ -2112,9 +2247,14 @@ ${methods}
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text(${JSON.stringify(page.title || appName)})),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: ${body},
+      // R431: the AppBar owns the top inset; SafeArea keeps the scrolling body
+      // out of the bottom gesture bar and a landscape notch on the sides.
+      body: SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: ${body},
+        ),
       ),
     );
   }
@@ -2550,16 +2690,20 @@ function emitElementStyled(
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    const box = styleExpr ? `roseBox(${styleExpr}, ` : '';
-    const close = styleExpr ? ')' : '';
-    return `${box}Container(padding: const EdgeInsets.all(8), child: Text('🎬 ${url.replace(/'/g, "\\'")}', style: const TextStyle(fontSize: 12, color: Colors.grey)))${close}`;
+    const has = (name: string): boolean => node.attrs.some((a) => a.name === name);
+    // R432: the element's own attributes ride into the player widget.
+    const flags = `${has('autoplay') ? ', autoplay: true' : ''}${has('muted') ? ', muted: true' : ''}${has('loop') ? ', loop: true' : ''}`;
+    const video = `RoseVideo(${JSON.stringify(url)}${flags})`;
+    return styleExpr ? `roseBox(${styleExpr}, ${video})` : video;
   }
   if (tag === 'audio') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    const box = styleExpr ? `roseBox(${styleExpr}, ` : '';
-    const close = styleExpr ? ')' : '';
-    return `${box}Container(padding: const EdgeInsets.all(8), child: Text('🔊 ${url.replace(/'/g, "\\'")}', style: const TextStyle(fontSize: 12, color: Colors.grey)))${close}`;
+    const has = (name: string): boolean => node.attrs.some((a) => a.name === name);
+    // R435: the element's own attributes ride into the audio player.
+    const flags = `${has('autoplay') ? ', autoplay: true' : ''}${has('loop') ? ', loop: true' : ''}${has('muted') ? ', muted: true' : ''}`;
+    const audio = `RoseAudio(${JSON.stringify(url)}${flags})`;
+    return styleExpr ? `roseBox(${styleExpr}, ${audio})` : audio;
   }
   if (tag === 'img') {
     const src = node.attrs.find((a) => a.name === 'src');

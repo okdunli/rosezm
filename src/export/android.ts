@@ -2244,6 +2244,7 @@ function renderPage(
   // R416: Coil is imported only by a page that actually renders a remote image.
   const remoteImg = /\bAsyncImage\(/.test(layout);
   const useScale = /\bContentScale\./.test(layout);
+  const useAudio = /Icons\.Filled\.Pause/.test(layout);
   const handlers = [translateHandlers(pageScript, facts, page, knownBinds, warnings, formFields), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
   // The kit's useNative dispatch: imported only when a handler on this page
   // actually calls it, so a page with no device capability imports nothing.
@@ -2350,7 +2351,7 @@ import androidx.compose.ui.res.painterResource
 ${remoteImg ? 'import coil.compose.AsyncImage\n' : ''}${remoteImg || useScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ${PKG}.kit.roseData
 import ${PKG}.kit.roseAction
@@ -2883,7 +2884,10 @@ function emitElementStyled(
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const boxParts = resolved.expr ? [`.roseBox(${resolved.expr})`] : (resolved.model ? composeModifiersOf(resolved.model) : []);
     const box = boxParts.length ? `, modifier = Modifier${boxParts.join('')}` : '';
-    emit(`AndroidView(factory = { ctx -> android.widget.VideoView(ctx).apply { setVideoPath("${url.replace(/"/g, '\\"')}") } }${box})`, ctx);
+    // R432: autoplay/loop are the element's own attributes, not guesses.
+    const flag = (name: string): boolean => node.attrs.some((a) => a.name === name);
+    const play = `${flag('autoplay') ? '; start()' : ''}${flag('loop') ? '; setOnCompletionListener { start() }' : ''}${flag('controls') ? '; setMediaController(android.widget.MediaController(ctx).also { it.setAnchorView(this) })' : ''}`;
+    emit(`AndroidView(factory = { ctx -> android.widget.VideoView(ctx).apply { setVideoPath("${url.replace(/"/g, '\\"')}")${play} } }${box})`, ctx);
     return;
   }
   if (tag === 'audio') {
@@ -2891,7 +2895,37 @@ function emitElementStyled(
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const boxParts = resolved.model ? composeModifiersOf(resolved.model) : [];
     const box = boxParts.length ? `, modifier = Modifier${boxParts.join('')}` : '';
-    emit(`Text("[audio: ${(url || '').replace(/"/g, '\\"')}]"${box})`, ctx);
+    const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
+    const av = `audio${ctx.lines.length}`;
+    const name = url.split('/').pop() || 'audio';
+    // R436: a real audio player - MediaPlayer behind a play/pause row, the
+    // Compose shape of the Flutter RoseAudio.
+    emit(`val ${av} = remember { android.media.MediaPlayer() }`, ctx);
+    emit(`var ${av}Playing by remember { mutableStateOf(false) }`, ctx);
+    emit('DisposableEffect(Unit) {', ctx);
+    ctx.depth++;
+    emit('try {', ctx);
+    ctx.depth++;
+    emit(`${av}.setDataSource(roseAssetUrl(${JSON.stringify(url)}))`, ctx);
+    emit(`${av}.isLooping = ${has('loop') ? 'true' : 'false'}`, ctx);
+    emit(`${av}.setVolume(${has('muted') ? '0f' : '1f'}, ${has('muted') ? '0f' : '1f'})`, ctx);
+    if (has('autoplay')) emit(`${av}.setOnPreparedListener { mp -> mp.start(); ${av}Playing = true }`, ctx);
+    emit(`${av}.prepareAsync()`, ctx);
+    ctx.depth--;
+    emit('} catch (_: Exception) {}', ctx);
+    emit(`onDispose { try { ${av}.release() } catch (_: Exception) {} }`, ctx);
+    ctx.depth--;
+    emit('}', ctx);
+    emit(`Row(verticalAlignment = Alignment.CenterVertically${box}) {`, ctx);
+    ctx.depth++;
+    emit(`IconButton(onClick = { try { if (${av}.isPlaying) { ${av}.pause(); ${av}Playing = false } else { ${av}.start(); ${av}Playing = true } } catch (_: Exception) {} }) {`, ctx);
+    ctx.depth++;
+    emit(`Icon(if (${av}Playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = ${JSON.stringify(name)})`, ctx);
+    ctx.depth--;
+    emit('}', ctx);
+    emit(`Text(${JSON.stringify(name)})`, ctx);
+    ctx.depth--;
+    emit('}', ctx);
     return;
   }
   if (tag === 'img') {
@@ -3878,6 +3912,7 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   // R416: a component that renders a remote image imports Coil itself.
   const compRemoteImg = /\bAsyncImage\(/.test(compBody);
   const compUseScale = /\bContentScale\./.test(compBody);
+  const compUseAudio = /Icons\.Filled\.Pause/.test(compBody);
   // R246: the component's own hover halves, declared like the page's.
   const compHoverDecls = [...(ctx.hoverKeys ?? [])].map((key) => {
     const v = hoverVarName(key);
@@ -3910,7 +3945,7 @@ import androidx.compose.ui.graphics.Color
 ${compRemoteImg ? 'import coil.compose.AsyncImage\n' : ''}${compRemoteImg || compUseScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
+${compUseAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 ${compKitImports ? compKitImports + '\n' : ''}
 @Composable

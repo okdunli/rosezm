@@ -1487,6 +1487,64 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return image;
     }
 
+    /// <summary>R433: a real video element. MediaElement plays remote URLs and
+    /// site-relative paths through the deployed server; autoplay/loop/muted are
+    /// the element's own attributes.</summary>
+    public static System.Windows.Controls.MediaElement Video(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
+    {
+        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+        var element = new System.Windows.Controls.MediaElement
+        {
+            Source = new Uri(full, UriKind.RelativeOrAbsolute),
+            LoadedBehavior = System.Windows.Controls.MediaState.Manual,
+            UnloadedBehavior = System.Windows.Controls.MediaState.Manual,
+            ScrubbingEnabled = true,
+            Height = 220,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        if (muted) element.IsMuted = true;
+        if (loop) element.MediaEnded += (_, _) => { element.Position = TimeSpan.Zero; element.Play(); };
+        if (autoplay) element.MediaOpened += (_, _) => element.Play();
+        parent.Children.Add(element);
+        return element;
+    }
+
+    /// <summary>R437: an audio element with a play/pause row. The MediaElement
+    /// stays hidden; the button and the file name are the whole UI.</summary>
+    public static System.Windows.Controls.MediaElement Audio(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
+    {
+        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+        var row = new System.Windows.Controls.StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var element = new System.Windows.Controls.MediaElement
+        {
+            Source = new Uri(full, UriKind.RelativeOrAbsolute),
+            LoadedBehavior = System.Windows.Controls.MediaState.Manual,
+            UnloadedBehavior = System.Windows.Controls.MediaState.Manual,
+            Visibility = Visibility.Collapsed,
+        };
+        var button = new System.Windows.Controls.Button { Content = "Play", Padding = new Thickness(8, 2, 8, 2) };
+        var label = new System.Windows.Controls.TextBlock
+        {
+            Text = url.Contains('/') ? url.Substring(url.LastIndexOf('/') + 1) : url,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0),
+        };
+        var playing = false;
+        button.Click += (_, _) =>
+        {
+            if (playing) { element.Pause(); playing = false; button.Content = "Play"; }
+            else { element.Play(); playing = true; button.Content = "Pause"; }
+        };
+        if (muted) element.IsMuted = true;
+        if (loop) element.MediaEnded += (_, _) => { element.Position = TimeSpan.Zero; element.Play(); };
+        if (autoplay) element.MediaOpened += (_, _) => { element.Play(); playing = true; button.Content = "Pause"; };
+        row.Children.Add(button);
+        row.Children.Add(label);
+        row.Children.Add(element);
+        parent.Children.Add(row);
+        return element;
+    }
+
     // A vector image: WPF's Geometry.Parse reads SVG path syntax, so each
     // subpath keeps its own fill and every subpath overlays the same box.
     public static Grid Vector(Panel parent, string[] fills, string[] pathData)
@@ -3271,13 +3329,24 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    emit(`RoseTheme.Label(${ctx.parent}, "[video: ${url.replace(/"/g, '\\"')}]"${withStyle(model)});`, ctx);
+    const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
+    // R433: the element's own attributes ride into the player; the box half stays
+    // the stylesheet's.
+    const opts = `${has('autoplay') ? ', autoplay: true' : ''}${has('loop') ? ', loop: true' : ''}${has('muted') ? ', muted: true' : ''}`;
+    const target = `vid${++ctx.counter.c}`;
+    emit(`var ${target} = RoseTheme.Video(${ctx.parent}, ${JSON.stringify(url)}${opts});`, ctx);
+    const style = withStyle(own);
+    if (style) emit(`RoseTheme.Apply(${target}, ${style.slice(2)});`, ctx);
+    attach(target);
     return;
   }
   if (tag === 'audio') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    emit(`RoseTheme.Label(${ctx.parent}, "[audio: ${url.replace(/"/g, '\\"')}]"${withStyle(model)});`, ctx);
+    const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
+    // R437: the element's own attributes ride into the audio row.
+    const opts = `${has('autoplay') ? ', autoplay: true' : ''}${has('loop') ? ', loop: true' : ''}${has('muted') ? ', muted: true' : ''}`;
+    emit(`RoseTheme.Audio(${ctx.parent}, ${JSON.stringify(url)}${opts});`, ctx);
     return;
   }
   if (tag === 'img') {

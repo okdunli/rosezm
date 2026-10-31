@@ -1222,3 +1222,23 @@ export function inputBoundProps(nodes: Node[], propNames: string[]): string[] {
   walk(nodes);
   return found;
 }
+
+/** Whether a tag appears anywhere in a page/component tree, nested blocks included. */
+export function hasTagDeep(nodes: Node[], tag: string): boolean {
+  for (const n of nodes) {
+    if (n.kind === 'element') {
+      if (n.tag.toLowerCase() === tag || hasTagDeep(n.children, tag)) return true;
+    } else if (n.kind === 'if') {
+      if (n.branches.some((b) => hasTagDeep(b.children, tag))) return true;
+    } else if (n.kind === 'each') {
+      if (hasTagDeep(n.children, tag) || (n.fallback ? hasTagDeep(n.fallback, tag) : false)) return true;
+    } else if (n.kind === 'await') {
+      if (hasTagDeep(n.pending, tag) || hasTagDeep(n.then, tag) || hasTagDeep(n.catch, tag)) return true;
+    } else if (n.kind === 'block') {
+      if (hasTagDeep(n.children, tag) || (n.fallback ? hasTagDeep(n.fallback, tag) : false)) return true;
+    } else if (n.kind === 'snippet') {
+      if (hasTagDeep(n.children, tag)) return true;
+    }
+  }
+  return false;
+}
