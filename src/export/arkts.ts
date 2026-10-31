@@ -1379,6 +1379,13 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     fields += '\n  @Prop __roseScope: Record<string, Object> = {};';
   }
   const body = ctx.lines.join('\n');
+  // R457: a component's own flags (hover halves, <details> folds) need @State
+  // declarations here too - the page template declares them, the component
+  // template did not, so those reads were undeclared names at compile time.
+  const componentStates = [
+    ...ctx.hoverStates.map((h) => `  @State ${h.name}: boolean = false;`),
+    ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
+  ].join('\n');
   // Inline handlers register into ctx.inlineBodies (see registerInlineHandler);
   // the page path splices them into its struct, and the component path must do
   // the same; dropping them leaves the template calling a method that does not
@@ -1392,7 +1399,7 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
 
 @Component
 export struct ${comp.struct} {
-${fields}
+${fields}${componentStates ? '\n' + componentStates : ''}
 
   build() {
     ${wrapPage(body, ctx)}

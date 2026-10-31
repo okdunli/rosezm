@@ -32,7 +32,7 @@ import * as fs from 'node:fs';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
-import { appIcon } from './app-icon.js';
+import { appIcon, icoFromPng } from './app-icon.js';
 import { nativeUsage, type NativeCapability } from './native-api.js';
 import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 
@@ -88,7 +88,12 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(out, 'main.go'), mainGo(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'app.go'), appGo(), 'utf8');
   await fs.promises.mkdir(path.join(out, 'build'), { recursive: true });
-  await fs.promises.writeFile(path.join(out, 'build', 'appicon.png'), appIcon(opts.projectRoot, LABEL, opts.warnings));
+  // R456: `wails build` wants a Windows exe icon at build/windows/icon.ico; the
+  // PNG alone left the binary with the default one.
+  const icon = appIcon(opts.projectRoot, LABEL, opts.warnings);
+  await fs.promises.writeFile(path.join(out, 'build', 'appicon.png'), icon);
+  await fs.promises.mkdir(path.join(out, 'build', 'windows'), { recursive: true });
+  await fs.promises.writeFile(path.join(out, 'build', 'windows', 'icon.ico'), icoFromPng(icon));
   await fs.promises.writeFile(path.join(out, 'README.md'), readme(opts.apiBase ?? '', docs), 'utf8');
   await writeDeployScaffold('wails', out, opts.warnings);
 

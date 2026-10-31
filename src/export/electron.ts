@@ -24,6 +24,7 @@ import * as path from 'node:path';
 import { buildProject, scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { nativeUsage, NATIVE_TARGETS, type NativeCapability } from './native-api.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
+import { appIcon, iconSize } from './app-icon.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { DOM_BRIDGE_BRANCHES } from './desktop-shell.js';
 
@@ -76,6 +77,16 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
     }
   }
 
+  // R458: a desktop export that cannot be packaged is half a shell. The icon is
+  // written for every project; electron-builder only gets it when it is big
+  // enough (it rejects a small one), and the warning says how to fix that.
+  const icon = appIcon(opts.projectRoot, 'electron', opts.warnings);
+  const iconPx = iconSize(icon);
+  const bigIcon = !!iconPx && Math.min(iconPx.w, iconPx.h) >= 512;
+  if (!bigIcon) opts.warnings.push('electron: packaging needs a 512x512+ icon - build/icon.png is smaller, so electron-builder uses its default until you redraw it');
+  await fs.promises.mkdir(path.join(out, 'build'), { recursive: true });
+  await fs.promises.writeFile(path.join(out, 'build', 'icon.png'), icon);
+  const iconCfg = bigIcon ? { icon: 'build/icon.png' } : {};
   await fs.promises.writeFile(path.join(out, 'package.json'), JSON.stringify({
     name: app.slug,
     version: app.version,
@@ -84,12 +95,23 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
     productName: app.name,
     author: app.id,
     main: 'main.cjs',
-    scripts: { start: 'electron .', dev: 'electron .' },
+    scripts: { start: 'electron .', dev: 'electron .', package: 'npx --yes electron-builder' },
     // Electron ships Chromium; an old major means an unpatched browser inside
     // a shipped desktop app. ^45 is the current line (checked against the npm
     // registry), and every main/preload API this export uses is stable across
     // majors - bump this when the line goes EOL.
     devDependencies: { electron: '^45.0.0' },
+    // R458: the installer for the three desktops. `files` names exactly what the
+    // shell serves; node_modules is all devDependencies, so the app stays small.
+    build: {
+      appId: app.id,
+      productName: app.name,
+      directories: { output: 'release' },
+      files: ['main.cjs', 'preload.cjs', 'dist/**/*', 'package.json'],
+      win: iconCfg,
+      mac: iconCfg,
+      linux: { ...iconCfg, target: ['AppImage'] },
+    },
   }, null, 2) + '\n', 'utf8');
   const pageFiles = await scanRoseFiles(opts.projectRoot);
   const compFiles = await scanComponentFiles(opts.projectRoot);
@@ -268,6 +290,10 @@ ${scheme ? '- Deep links: the shell registers the scheme (from rosezm.app.json "
 - To point the same export at another backend (dev/staging/prod), set
   \`ROSEZM_API\` in the environment before launching: it overrides the baked
   base above; unset, the baked value applies.
+- \`npm run package\` builds the installer for the current OS (electron-builder,
+  fetched on first run). Output lands in \`release/\`. The icon is
+  \`build/icon.png\` - redraw it at 512x512 or larger before packaging, or
+  electron-builder falls back to its own icon.
 
 Re-run rosezm export electron after every rosezm build to refresh dist/.
 

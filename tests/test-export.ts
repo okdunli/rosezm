@@ -30,6 +30,7 @@ import { NATIVE_TARGETS, NATIVE_CAPABILITIES } from '../src/export/native-api.js
 import { buildProject } from '../src/compiler/index.js';
 import { parseStylesheet, sanitizeFor } from '../src/export/style-engine.js';
 import { forgetAppIdentity } from '../src/export/app-identity.js';
+import { icnsFromPng } from '../src/export/app-icon.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -330,9 +331,39 @@ try {
     assert(/android:icon="@drawable\/ic_launcher"/.test(readFileSync(join(a.outDir, 'app/src/main/AndroidManifest.xml'), 'utf8')), 'android: the manifest points at it');
     const t = await exportProject('tauri', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-tauri') });
     assert(existsSync(join(t.outDir, 'src-tauri/icons/icon.png')), 'tauri: the bundle icon file exists');
-    assert(/"icon": \[\s*"icons\/icon.png"/.test(readFileSync(join(t.outDir, 'src-tauri/tauri.conf.json'), 'utf8')), 'tauri: the config lists a file that is really there');
+    const tauriConf = readFileSync(join(t.outDir, 'src-tauri/tauri.conf.json'), 'utf8');
+    assert(/"icon": \[\s*"icons\/icon.png"/.test(tauriConf) && tauriConf.includes('icons/icon.ico'), 'tauri: the config lists a file that is really there, .ico included');
+    const tIco = readFileSync(join(t.outDir, 'src-tauri/icons/icon.ico'));
+    assert(tIco.readUInt16LE(0) === 0 && tIco.readUInt16LE(2) === 1 && tIco.readUInt16LE(4) === 1, 'tauri: icon.ico is a one-image ICO container');
+    assert(tIco.subarray(22).equals(readFileSync(join(iconProj, 'public/icon.png'))), 'tauri: the .ico wraps the same PNG bytes');
+    assert(!existsSync(join(t.outDir, 'src-tauri/icons/icon.icns')), 'tauri: a 48px picture gets no .icns (a wrong one would be worse)');
+    assert((t.warnings ?? []).some((wt: string) => /tauri-apps\/cli icon/.test(wt)), 'tauri: the missing-.icns warning names the fix');
+    // A header-only PNG is enough to exercise the container: the wrapper reads
+    // the size from IHDR, it never decodes pixels.
+    const fake1024 = Buffer.alloc(24);
+    fake1024[0] = 0x89;
+    fake1024.write('PNG', 1, 'ascii');
+    fake1024.writeUInt32BE(1024, 16);
+    fake1024.writeUInt32BE(1024, 20);
+    const icns = icnsFromPng(fake1024);
+    assert(!!icns && icns.toString('ascii', 0, 4) === 'icns' && icns.toString('ascii', 8, 12) === 'ic10', 'icns: a 1024 square becomes an ic10 entry');
+    const bigProj = join(scratch, 'icon-big');
+    mkdirSync(join(bigProj, 'src/pages'), { recursive: true });
+    mkdirSync(join(bigProj, 'public'), { recursive: true });
+    writeFileSync(join(bigProj, 'src/pages/index.rose'), '<div>hi</div>\n');
+    writeFileSync(join(bigProj, 'public/icon.png'), fake1024);
+    const bt = await exportProject('tauri', bigProj, { apiBase: 'x', outRoot: join(scratch, 'icon-big-tauri') });
+    assert(existsSync(join(bt.outDir, 'src-tauri/icons/icon.icns')) && readFileSync(join(bt.outDir, 'src-tauri/tauri.conf.json'), 'utf8').includes('icons/icon.icns'), 'tauri: a 1024 square ships the .icns and lists it');
     const w = await exportProject('wails', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-wails') });
     assert(existsSync(join(w.outDir, 'build/appicon.png')), 'wails: build/appicon.png is where the CLI looks for it');
+    assert(existsSync(join(w.outDir, 'build/windows/icon.ico')), 'wails: the Windows exe icon ships too');
+    const el = await exportProject('electron', iconProj, { apiBase: 'x', outRoot: join(scratch, 'icon-electron') });
+    const elPkg = JSON.parse(readFileSync(join(el.outDir, 'package.json'), 'utf8'));
+    assert(elPkg.build?.appId && elPkg.build?.files?.includes('main.cjs') && elPkg.build?.linux?.target?.[0] === 'AppImage', 'electron: the package carries an electron-builder config');
+    assert(elPkg.scripts?.package === 'npx --yes electron-builder', 'electron: npm run package builds the installer');
+    assert(existsSync(join(el.outDir, 'build/icon.png')), 'electron: the icon file ships');
+    assert(elPkg.build?.win && !elPkg.build.win.icon, 'electron: a small icon is not handed to the packager');
+    assert((el.warnings ?? []).some((wy: string) => /512x512/.test(wy)), 'electron: the small-icon warning names the fix');
     // No icon in the project: the placeholder keeps the build green, and the
     // warning says which file to draw.
     const bare = join(scratch, 'icon-bare');
@@ -1289,6 +1320,7 @@ try {
   assert(existsSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png')), 'xcode: the app iconset exists (Xcode fails without it)');
   const xIcon = JSON.parse(readFileSync(join(xdir, 'rosezmApp/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json'), 'utf8'));
   assert(xIcon.images?.[0]?.size === '1024x1024' && xIcon.images[0].platform === 'ios' && xIcon.images[0].idiom === 'universal', 'xcode: the iconset declares the universal 1024 icon');
+  assert((xcode.warnings ?? []).some((w: string) => /icon\.png is 48x48/.test(w)), 'xcode: a small icon is named, not silently shipped');
   const bindSwift = xread('rosezmApp/Pages/BindDemoView.swift');
   assert(bindSwift.includes('Toggle(isOn: Binding(get: { subscribed }, set: { subscribed = $0 }))') && bindSwift.includes('Picker("select", selection: Binding(get: { plan }') && bindSwift.includes('largecircle.fill.circle'), 'SwiftUI wires checkbox, radio group and select two-way');
   assert(!/\{#|\{\/|\{@|\$state\(|on:click/.test(walk(join(xdir, 'rosezmApp')).filter((f) => f.endsWith('.swift')).map((f) => readFileSync(f, 'utf8')).join('\n')), 'no Rose syntax survives into Swift');
@@ -1858,6 +1890,22 @@ try {
     const kb = await exportProject('baidu', kproj, { apiBase: 'x', outRoot: join(scratch, 'key-baidu') });
     const kbTpl = readFileSync(join(kb.outDir, 'pages', 'index', 'index.swan'), 'utf8');
     assert(/bindconfirm="__k0"/.test(kbTpl) && kbTpl.includes('confirm-type="send"'), 'baidu: the same Enter mapping holds for its dialect');
+  }
+
+  // R457: a component's own template declares its flags too - a fold inside a
+  // component used to read an @State that only the page template declared.
+  {
+    const cproj = join(scratch, 'comp-details');
+    mkdirSync(join(cproj, 'src/pages'), { recursive: true });
+    mkdirSync(join(cproj, 'src/components'), { recursive: true });
+    writeFileSync(join(cproj, 'src/components/Fold.rose'), '<div><details><summary>More</summary><p>Inside</p></details></div>\n');
+    writeFileSync(join(cproj, 'src/pages/index.rose'), '<div><Fold /></div>\n');
+    const ca = await exportProject('arkts', cproj, { apiBase: 'x', outRoot: join(scratch, 'comp-details-arkts') });
+    const caSrc = readFileSync(join(ca.outDir, 'entry', 'src', 'main', 'ets', 'components', 'FoldPage.ets'), 'utf8');
+    assert(caSrc.includes('@State __open0: boolean = false;') && caSrc.includes('if (this.__open0) {'), 'arkts: a fold inside a component declares its own state');
+    const cw = await exportProject('weapp', cproj, { apiBase: 'x', outRoot: join(scratch, 'comp-details-weapp') });
+    const cwJs = readFileSync(join(cw.outDir, 'components', 'Fold', 'Fold.js'), 'utf8');
+    assert(cwJs.includes('__open0: false,') && cwJs.includes('__op0: function (e) { this.setData({ __open0: !this.data.__open0 }); }'), 'weapp: a fold inside a component keeps its state in component data');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.

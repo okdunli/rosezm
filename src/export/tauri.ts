@@ -32,7 +32,7 @@ import * as path from 'node:path';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
-import { appIcon } from './app-icon.js';
+import { appIcon, icoFromPng, icnsFromPng } from './app-icon.js';
 import { nativeUsage } from './native-api.js';
 import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
 
@@ -75,12 +75,22 @@ export async function emitTauri(opts: EmitTauriOptions): Promise<{ pages: string
 
   const tauriDir = path.join(out, 'src-tauri');
   await fs.promises.mkdir(path.join(tauriDir, 'icons'), { recursive: true });
-  await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.png'), appIcon(opts.projectRoot, 'tauri', opts.warnings));
+  // R456: the Windows bundler asks for an .ico, and a config that lists only a
+  // PNG fails at `tauri build` - both ride from the same source image.
+  const icon = appIcon(opts.projectRoot, 'tauri', opts.warnings);
+  await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.png'), icon);
+  await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.ico'), icoFromPng(icon));
+  // R459: macOS packages want an .icns. A square power-of-two picture can be
+  // wrapped as one entry; any other size needs downsampling, which the README
+  // hands to `tauri icon` instead of shipping a wrong picture.
+  const icns = icnsFromPng(icon);
+  if (icns) await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.icns'), icns);
+  else opts.warnings.push('tauri: no icons/icon.icns (the picture is not a square 32..1024 side) - run `npx @tauri-apps/cli icon src-tauri/icons/icon.png` once before a macOS build');
   await fs.promises.mkdir(path.join(tauriDir, 'src'), { recursive: true });
   await fs.promises.mkdir(path.join(tauriDir, 'capabilities'), { recursive: true });
   await fs.promises.writeFile(path.join(tauriDir, 'Cargo.toml'), renderCargo(app), 'utf8');
   await fs.promises.writeFile(path.join(tauriDir, 'build.rs'), renderBuild(), 'utf8');
-  await fs.promises.writeFile(path.join(tauriDir, 'tauri.conf.json'), renderConfig(app), 'utf8');
+  await fs.promises.writeFile(path.join(tauriDir, 'tauri.conf.json'), renderConfig(app, icns !== null), 'utf8');
   await fs.promises.writeFile(path.join(tauriDir, 'src', 'main.rs'), renderMain(), 'utf8');
   await fs.promises.writeFile(path.join(tauriDir, 'src', 'lib.rs'), renderLib(), 'utf8');
   await fs.promises.writeFile(path.join(tauriDir, 'capabilities', 'default.json'), renderCapability(), 'utf8');
@@ -139,7 +149,7 @@ function renderBuild(): string {
  *     and nothing to run before a build. `cargo tauri dev` serves the same
  *     embedded assets.
  */
-function renderConfig(app: AppIdentity): string {
+function renderConfig(app: AppIdentity, withIcns: boolean): string {
   return JSON.stringify({
     $schema: 'https://schema.tauri.app/config/2',
     productName: app.name,
@@ -170,7 +180,7 @@ function renderConfig(app: AppIdentity): string {
     bundle: {
       active: true,
       targets: 'all',
-      icon: ['icons/icon.png'],
+      icon: ['icons/icon.png', 'icons/icon.ico', ...(withIcns ? ['icons/icon.icns'] : [])],
     },
   }, null, 2) + '\n';
 }
@@ -231,6 +241,15 @@ webkit2gtk on Linux).
 
 \`cargo tauri dev\` runs the same shell against the same embedded assets - there
 is no dev server, because the frontend ships already built.
+
+## Icons
+
+\`src-tauri/icons/icon.png\` and \`icon.ico\` ship with the export. macOS wants an
+\`.icns\`: a square 32/64/128/256/512/1024 picture is wrapped automatically at
+export time. Any other size gets no \`.icns\` (the export warns) - downsample it
+once with the CLI, which writes the whole set properly:
+
+    npx @tauri-apps/cli icon src-tauri/icons/icon.png
 
 ## What the window shows
 
