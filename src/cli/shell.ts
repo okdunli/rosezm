@@ -304,6 +304,9 @@ const CSP_TAIL = `style-src 'unsafe-inline'; img-src 'self' data: https://fastly
 
 
 const BASELINE_SECURITY_HEADERS: Record<string, string> = {
+  // Sent on plain HTTP too: browsers ignore HSTS from a non-secure origin, and
+  // the CLI cannot see the scheme behind a proxy without trusting a header.
+  'strict-transport-security': 'max-age=31536000',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'strict-origin-when-cross-origin',

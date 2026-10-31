@@ -922,7 +922,9 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   const blocks = [...homeDoc.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
   const moduleScript = blocks[blocks.length - 1];
   const hash = createHash('sha256').update(moduleScript, 'utf-8').digest('base64');
-  const csp = securityHeaders(readFileSync('dist/client.js', 'utf-8'))['Content-Security-Policy'];
+  const baseline = securityHeaders(readFileSync('dist/client.js', 'utf-8'));
+  const csp = baseline['Content-Security-Policy'];
+  assert(baseline['strict-transport-security'] === 'max-age=31536000', 'the baseline headers force HTTPS for a year');
   if (false) assert(csp.includes(`'sha256-${hash}'`), 'the strict CSP hashes the exact inlined script bytes (the page runs, nothing else does)');
   if (false) assert(csp.includes("style-src 'unsafe-inline'") && csp.includes("object-src 'none'"), 'the policy still allows the inline styles and locks the rest down');
   if (false) assert(!/x-robots-tag/.test(clientSrc), 'per-route headers never reach the client bundle');
