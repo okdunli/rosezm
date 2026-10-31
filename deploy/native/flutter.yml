@@ -40,7 +40,7 @@ jobs:
       # clobber it, so it is deliberately absent. --org matters: with no
       # ios/Runner or android/app on disk, `flutter create` cannot infer one.
       - name: Scaffold the platform folders
-        run: flutter create --platforms=android,ios --org dev.rosezm --project-name rosezm_app .
+        run: flutter create --platforms=android,ios --org __ROSEZM_ORG__ --project-name __ROSEZM_PROJECT__ .
 
       # Flutter falls back to the debug key until a release keystore is
       # configured, so this APK builds and installs without one - signing it is
@@ -68,7 +68,7 @@ jobs:
       - run: flutter pub get
 
       - name: Scaffold the platform folders
-        run: flutter create --platforms=android,ios --org dev.rosezm --project-name rosezm_app .
+        run: flutter create --platforms=android,ios --org __ROSEZM_ORG__ --project-name __ROSEZM_PROJECT__ .
 
       # `flutter build ipa` needs a signed Xcode project, and the export ships
       # no signing setup. Until a certificate exists, build the device app

@@ -6227,6 +6227,15 @@ h2 { font-size: 40px; }
     const fx = await exportProject('flutter', example, { apiBase: 'x', outRoot: join(scratch, 'id-flutter-example') });
     const adminDart = readFileSync(join(fx.outDir, 'lib', 'pages', 'admin.dart'), 'utf8');
     assert(adminDart.includes('AppBar(title: const Text("Admin - rosezm"))'), 'flutter: the page <title> is the app bar title');
+    // The platform runners are created by `flutter create`, so the store
+    // identity only survives if the scaffold command carries it: a hardcoded
+    // org/name would put every export on dev.rosezm.rosezm_app.
+    const idFlutterYml = readFileSync(join(scratch, 'id-flutter', 'flutter', '.github', 'workflows', 'flutter.yml'), 'utf8');
+    assert(idFlutterYml.includes('--org com.acme --project-name widgets') && !idFlutterYml.includes('dev.rosezm'), 'flutter: the CI workflow scaffolds the runners with the app\'s own identity');
+    const idFlutterDeploy = readFileSync(join(scratch, 'id-flutter', 'flutter', 'DEPLOY.md'), 'utf8');
+    assert(idFlutterDeploy.includes('--org com.acme --project-name widgets'), 'flutter: DEPLOY.md scaffolds with the identity the workflow uses');
+    const idFlutterReadme = readFileSync(join(scratch, 'id-flutter', 'flutter', 'README.md'), 'utf8');
+    assert(idFlutterReadme.includes('--org com.acme --project-name widgets') && !idFlutterReadme.includes('no third-party dependencies'), 'flutter: the README gives the real first-run command and does not claim a dependency-free project');
     // The name is user text that lands in XML: escaped, not trusted.
     writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: "Ben & Jerry's <App>", version: '1.0.0', slug: 'acme' }));
     forgetAppIdentity();

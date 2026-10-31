@@ -61,6 +61,7 @@ export async function writeDeployScaffold(
   target: NativeScaffoldTarget,
   exportRoot: string,
   warnings: string[],
+  vars: { org?: string; project?: string } = {},
 ): Promise<string[]> {
   const spec = TEMPLATES[target];
   const dir = templateDir();
@@ -82,8 +83,15 @@ export async function writeDeployScaffold(
     written.push(path.relative(exportRoot, dest).replace(/\\/g, '/'));
   };
 
-  await emit(spec.workflow, path.join(exportRoot, '.github', 'workflows', spec.workflow));
-  await emit(spec.deployMd, path.join(exportRoot, 'DEPLOY.md'));
+  // The Flutter workflow and manual create the platform runners with the
+  // project's own store identity (org + package name); a hardcoded pair would
+  // make every export collide on `dev.rosezm.rosezm_app`.
+  const fill = (text: string): string => text
+    .replaceAll('__ROSEZM_ORG__', vars.org ?? 'dev.rosezm')
+    .replaceAll('__ROSEZM_PROJECT__', vars.project ?? 'rosezm_app');
+
+  await emit(spec.workflow, path.join(exportRoot, '.github', 'workflows', spec.workflow), fill);
+  await emit(spec.deployMd, path.join(exportRoot, 'DEPLOY.md'), fill);
 
   if (target === 'xcode') {
     // A shared scheme is what `xcodebuild archive -scheme rosezmApp` looks for.
