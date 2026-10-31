@@ -60,7 +60,7 @@ export interface EmitAndroidOptions {
 const PKG = 'dev.rosezm.app';
 const PKG_PATH = PKG.replace(/\./g, '/');
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
@@ -290,6 +290,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Remote <img> support: Coil is the standard Compose image loader.
+    implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 ${native.includes('scan-code') ? `    // The scan-code await bridge (AGENTS.md §312): CameraX for the viewfinder,
     // ML Kit for the decoding.
@@ -771,6 +773,7 @@ function renderRoseTheme(styles: Map<string, StyleModel>, fontMap: Map<string, s
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -793,6 +796,10 @@ import androidx.compose.ui.draw.clip as clipModifier
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.font.Font
@@ -800,10 +807,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.shape.RoundedCornerShape
 
@@ -846,6 +855,7 @@ data class RoseStyle(
     val minHeight: Float? = null,
     val maxHeight: Float? = null,
     val hidden: Boolean = false,
+    val aspectRatio: Float? = null,
 ) {
     /** Every property other actually sets wins - one field at a time. */
     fun merge(other: RoseStyle?): RoseStyle {
@@ -869,6 +879,7 @@ data class RoseStyle(
             minWidth = other.minWidth ?: minWidth, maxWidth = other.maxWidth ?: maxWidth,
             minHeight = other.minHeight ?: minHeight, maxHeight = other.maxHeight ?: maxHeight,
             hidden = other.hidden || hidden,
+            aspectRatio = other.aspectRatio ?: aspectRatio,
         )
     }
 
@@ -942,6 +953,8 @@ fun Modifier.roseBox(s: RoseStyle?): Modifier {
     if (s.minHeight != null || s.maxHeight != null) {
         m = m.heightIn(min = (s.minHeight ?: 0f).dp, max = (s.maxHeight ?: Float.MAX_VALUE).dp)
     }
+    // R420: the CSS aspect-ratio is Compose's own modifier.
+    s.aspectRatio?.let { m = m.aspectRatio(it) }
     return m
 }
 
@@ -1002,6 +1015,42 @@ fun roseInlineOf(decls: List<String>): RoseStyle {
         out = out.merge(rosePropsOf(mapOf(d.substring(0, i).trim() to d.substring(i + 1).trim())))
     }
     return out
+}
+
+/** One styled run of a flowing line: a paragraph's inline children travel to
+ *  the text engine instead of stacking as separate widgets. */
+class RoseRun(val style: RoseStyle?, val text: String)
+
+fun roseMerge(base: RoseStyle?, over: RoseStyle?): RoseStyle = (base ?: RoseStyle()).merge(over)
+
+private fun roseSpanOf(s: RoseStyle?): SpanStyle {
+    if (s == null) return SpanStyle()
+    val deco = when {
+        s.underline && s.strike -> TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough))
+        s.underline -> TextDecoration.Underline
+        s.strike -> TextDecoration.LineThrough
+        else -> null
+    }
+    val family = when (s.fontFamilyGeneric) {
+        "monospace" -> FontFamily.Monospace
+        "serif" -> FontFamily.Serif
+        "sans-serif" -> FontFamily.SansSerif
+        else -> null
+    }
+    return SpanStyle(
+        color = s.color ?: Color.Unspecified,
+        fontSize = s.fontSize?.sp ?: TextUnit.Unspecified,
+        fontWeight = s.weight,
+        fontStyle = if (s.italic) FontStyle.Italic else null,
+        fontFamily = family,
+        letterSpacing = s.letterSpacing?.sp ?: TextUnit.Unspecified,
+        textDecoration = deco,
+    )
+}
+
+/** A line of inline runs, laid out by the text engine like the web does. */
+fun roseRich(runs: List<RoseRun>): AnnotatedString = buildAnnotatedString {
+    for (r in runs) withStyle(roseSpanOf(r.style)) { append(r.text) }
 }
 
 /** Raw CSS property values from a style:prop={expr} binding. */
@@ -1104,6 +1153,7 @@ function roseThemeArgs(model: StyleModel, fontMap: Map<string, string>): string[
     }
   }
   if (model.radius) args.push(`radius = listOf(${model.radius.map(f).join(', ')})`);
+  if (model.aspectRatio !== undefined) args.push(`aspectRatio = ${f(model.aspectRatio)}`);
   if (model.opacity !== undefined) args.push(`opacity = ${f(model.opacity)}`);
   if (model.direction) args.push(`direction = "${model.direction}"`);
   if (model.wrap) args.push('wrap = true');
@@ -1132,7 +1182,7 @@ function px(l: { n: number; u: 'px' | '%' | 'auto' } | undefined): number | unde
  * its class or a style:prop to state - a runtime `roseResolve(...)` call so the
  * composable recomputes the style when the state changes.
  */
-function composeStyleOf(node: Extract<IrNode, { kind: 'element' }>, binding: ReturnType<typeof elementStyleBinding>, ctx: AndroidCtx): ComposeResolved {
+function composeStyleOf(node: Extract<IrNode, { kind: 'element' }>, binding: ReturnType<typeof elementStyleBinding>, ctx: AndroidCtx, forceExpr = false): ComposeResolved {
   const tag = node.tag.toLowerCase();
   // The cascade is asked even for a classless element: a stylesheet may style
   // the tag itself (`h2 { ... }`), and the browser's own type scale is part
@@ -1161,7 +1211,7 @@ function composeStyleOf(node: Extract<IrNode, { kind: 'element' }>, binding: Ret
     const key = `__active_${c}__${ctx.scope}`;
     if (ctx.activeKeys?.has(key)) { activeKey = key; break; }
   }
-  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey) return { model, expr: null };
+  if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey && !forceExpr) return { model, expr: null };
   const classParts = [
     ...binding.staticClasses.map((c) => `"${c}"`),
     ...binding.dynamicClassExprs.map((e) => ktExpr(e, ctx)),
@@ -1520,6 +1570,10 @@ fun RoseScannerRoute(onDone: (String?) -> Unit) {
 /// back to the value baked at export time:
 ///   ROSEZM_API=https://staging.example.com ./gradlew assembleRelease
 val ROSE_API_BASE: String = BuildConfig.ROSEZM_API
+
+/// A site-relative media path resolved against the deployed server; an
+/// absolute URL passes through, so <img src> works for both.
+fun roseAssetUrl(path: String): String = if (path.startsWith("http")) path else ROSE_API_BASE + path
 
 /// The routes this export carries - RoseApp's own table, as patterns. A wall's
 /// redirect is looked up here before anything tries to open it.
@@ -2185,8 +2239,11 @@ function renderPage(
   const layout = ctx.lines.join('\n');
   // A page that resolves a style at runtime (a class bound to state) imports
   // exactly the kit functions it calls - the static path needs none of them.
-  const styleImports = [...new Set([...layout.matchAll(/\b(roseBox|roseTextStyle|roseResolve|roseInlineOf)\b/g)].map((m) => m[1]))]
+  const styleImports = [...new Set([...layout.matchAll(/\b(roseBox|roseTextStyle|roseResolve|roseInlineOf|roseRich|RoseRun|roseMerge|roseAssetUrl)\b/g)].map((m) => m[1]))]
     .map((f) => `import ${PKG}.kit.${f}`).join('\n');
+  // R416: Coil is imported only by a page that actually renders a remote image.
+  const remoteImg = /\bAsyncImage\(/.test(layout);
+  const useScale = /\bContentScale\./.test(layout);
   const handlers = [translateHandlers(pageScript, facts, page, knownBinds, warnings, formFields), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
   // The kit's useNative dispatch: imported only when a handler on this page
   // actually calls it, so a page with no device capability imports nothing.
@@ -2290,8 +2347,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
+${remoteImg ? 'import coil.compose.AsyncImage\n' : ''}${remoteImg || useScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ${PKG}.kit.roseData
@@ -2521,13 +2579,48 @@ function emitNodes(nodes: IrNode[], ctx: AndroidCtx): void {
   flush();
 }
 
-function textOf(nodes: IrNode[], ctx: AndroidCtx): string {
+/** Inline formatting tags that may flow inside a text tag. */
+const ANDROID_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into RoseRun calls, or null when they
+ *  are not all text. A nested tag merges over its parent at runtime. */
+function androidInlineRuns(children: IrNode[], ctx: AndroidCtx, base: string): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`RoseRun(${base}, ${textOf([c], ctx, false) || '""'})`);
+      continue;
+    }
+    if (c.kind !== 'element' || !ANDROID_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    const child = composeStyleOf(c, binding, ctx, true);
+    if (!child.expr) return null;
+    ctx.ancestors.push({ tag: c.tag.toLowerCase(), classes: binding.staticClasses });
+    let inner: string[] | null;
+    try {
+      inner = androidInlineRuns(c.children, ctx, `roseMerge(${base}, ${child.expr})`);
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
+function textOf(nodes: IrNode[], ctx: AndroidCtx, trim = true): string {
   let out = '';
   for (const n of nodes) {
-    if (n.kind === 'text') out += kotlinStringEscape(n.value.replace(/\s+/g, ' '));
+    if (n.kind === 'text') {
+      const raw = n.preserve ? n.value : n.value.replace(/\s+/g, ' ');
+      // Kotlin: a raw newline never belongs in a "..." literal, so <pre> turns
+      // each one into the two-character escape. A folded run has none.
+      const esc = kotlinStringEscape(raw);
+      out += n.preserve ? esc.replace(/\r?\n|\r/g, '\\n').replace(/\t/g, '\\t') : esc;
+    }
     else if (n.kind === 'expr') out += '${' + ktExpr(n.code, ctx) + '}';
   }
-  out = out.trim();
+  if (trim && !nodes.some((n) => n.kind === 'text' && n.preserve)) out = out.trim();
   if (!out) return '';
   return '"' + out + '"';
 }
@@ -2749,6 +2842,17 @@ function emitElementStyled(
     emit(`${comp.cls}(\n${all}\n${'    '.repeat(ctx.depth)})`, ctx);
     return;
   }
+  if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && ANDROID_INLINE.has(c.tag.toLowerCase()))) {
+    // A text tag with inline formatting is ONE flowing line on the web; the
+    // stacking path below turned "a <strong>b</strong> c" into four rows.
+    const root = composeStyleOf(node, elementStyleBinding(node), ctx, true);
+    const runs = root.expr ? androidInlineRuns(node.children, ctx, root.expr) : null;
+    if (runs && runs.length && root.expr) {
+      const trunc = `${root.model?.ellipsis ? ', maxLines = 1, overflow = TextOverflow.Ellipsis' : ''}${root.model?.nowrap ? ', softWrap = false' : ''}`;
+      emit(`Text(roseRich(listOf(${runs.join(', ')})), style = roseTextStyle(${root.expr}), modifier = Modifier.roseBox(${root.expr})${trunc})`, ctx);
+      return;
+    }
+  }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = textOf(node.children, ctx);
     // The box half travels with the text half: padding/background/opacity on a
@@ -2759,7 +2863,9 @@ function emitElementStyled(
       ? [`.roseBox(${resolved.expr})`]
       : (resolved.model ? composeModifiersOf(resolved.model) : []);
     const box = boxParts.length ? `, modifier = Modifier${boxParts.join('')}` : '';
-    emit(`Text(${text || '""'}${textParams}${box})`, ctx);
+    // R415: one line + ellipsis is Compose's own Text parameter.
+    const trunc = `${resolved.model?.ellipsis ? ', maxLines = 1, overflow = TextOverflow.Ellipsis' : ''}${resolved.model?.nowrap ? ', softWrap = false' : ''}`;
+    emit(`Text(${text || '""'}${textParams}${trunc}${box})`, ctx);
     return;
   }
   if (tag === 'progress') {
@@ -2798,12 +2904,20 @@ function emitElementStyled(
     const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
     const desc = alt ? `contentDescription = "${alt.replace(/"/g, '\\"')}"` : 'contentDescription = null';
     const drawableName = ctx.media.get(url);
+    // R418: object-fit maps to Compose's ContentScale; absent keeps the
+    // contain default the exporters have always used.
+    const scale = ({ cover: 'ContentScale.Crop', contain: 'ContentScale.Fit', fill: 'ContentScale.FillBounds', none: 'ContentScale.None', 'scale-down': 'ContentScale.Inside' } as Record<string, string>)[resolved.model?.objectFit ?? 'contain'] ?? 'ContentScale.Fit';
     // border-radius / border / shadow / padding from the stylesheet now frame
     // the image the same way they do on the web - no longer a bare asset.
     const boxParts = resolved.expr ? [`.roseBox(${resolved.expr})`] : (resolved.model ? composeModifiersOf(resolved.model) : []);
     const box = boxParts.length ? `, modifier = Modifier${boxParts.join('')}` : '';
-    if (drawableName) emit(`Image(painter = painterResource(id = R.drawable.${drawableName}), ${desc}${box})`, ctx);
-    else emit(`Text("[image: ${(url || '').replace(/"/g, '\\"')}]"${box})`, ctx);
+    if (drawableName) emit(`Image(painter = painterResource(id = R.drawable.${drawableName}), ${desc}, contentScale = ${scale}${box})`, ctx);
+    else if (url) {
+      // A remote or site-relative image: Coil loads it at runtime.
+      const model = /^https?:\/\//i.test(url) ? JSON.stringify(url) : `roseAssetUrl(${JSON.stringify(url)})`;
+      emit(`AsyncImage(model = ${model}, ${desc}, contentScale = ${scale}${box})`, ctx);
+    }
+    else emit(`Text("[image: no source]"${box})`, ctx);
     return;
   }
   if (tag === 'a') {
@@ -3759,12 +3873,15 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   const params = paramList.join(', ');
   const inlineDefs = ctx.inlineBodies.length ? '\n\n' + ctx.inlineBodies.join('\n\n') : '';
   const compBody = ctx.lines.join('\n');
+  // R416: a component that renders a remote image imports Coil itself.
+  const compRemoteImg = /\bAsyncImage\(/.test(compBody);
+  const compUseScale = /\bContentScale\./.test(compBody);
   // R246: the component's own hover halves, declared like the page's.
   const compHoverDecls = [...(ctx.hoverKeys ?? [])].map((key) => {
     const v = hoverVarName(key);
     return `    val ${v}Source = remember { MutableInteractionSource() }\n    val ${v} by ${v}Source.collectIsHoveredAsState()`;
   }).join('\n');
-  const compStyleImports = [...new Set([...compBody.matchAll(/\b(roseBox|roseTextStyle|roseResolve|roseInlineOf)\b/g)].map((m) => m[1]))]
+  const compStyleImports = [...new Set([...compBody.matchAll(/\b(roseBox|roseTextStyle|roseResolve|roseInlineOf|roseRich|RoseRun|roseMerge)\b/g)].map((m) => m[1]))]
     .map((f) => `import ${PKG}.kit.${f}`).join('\n');
   // The kit's useNative dispatch: imported only when a handler in this
   // component actually calls it.
@@ -3788,8 +3905,9 @@ import androidx.compose.foundation.hoverable
 ` : ''}import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+${compRemoteImg ? 'import coil.compose.AsyncImage\n' : ''}${compRemoteImg || compUseScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 ${compKitImports ? compKitImports + '\n' : ''}

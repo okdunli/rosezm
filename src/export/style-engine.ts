@@ -87,6 +87,14 @@ export interface StyleModel {
   textTransform?: 'uppercase' | 'lowercase' | 'capitalize';
   underline?: boolean;
   strike?: boolean;
+  /** R415: white-space: nowrap keeps one line; text-overflow: ellipsis ends it
+   *  with an ellipsis. A target that can truncate maps both to its own API. */
+  nowrap?: boolean;
+  ellipsis?: boolean;
+  /** R418: object-fit for a replaced element (an image). */
+  objectFit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+  /** R420: the width/height ratio a box keeps as it sizes. */
+  aspectRatio?: number;
   /* colour and box */
   background?: Color;
   gradient?: Gradient;
@@ -586,6 +594,31 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       else if (/^center$/i.test(v)) model.textAlign = 'center';
       else if (/^right$|^end$/i.test(v)) model.textAlign = 'right';
       else if (/^justify$/i.test(v)) model.textAlign = 'justify';
+      return true;
+    }
+    case 'white-space': {
+      // The native text widgets wrap by default; nowrap is the one value that
+      // changes their layout (pre already keeps its whitespace in the IR).
+      model.nowrap = /nowrap|pre/i.test(v);
+      return true;
+    }
+    case 'text-overflow': {
+      model.ellipsis = /ellipsis/i.test(v);
+      return true;
+    }
+    case 'object-fit': {
+      const fit = v.trim().toLowerCase();
+      if (/^(cover|contain|fill|none|scale-down)$/.test(fit)) model.objectFit = fit as 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+      return true;
+    }
+    case 'aspect-ratio': {
+      // `16 / 9` and `1.5` are both CSS; `auto` keeps the intrinsic ratio.
+      const m = /^\s*(\d+(?:\.\d+)?)\s*(?:\/\s*(\d+(?:\.\d+)?)\s*)?$/.exec(v);
+      if (m) {
+        const w = Number(m[1]);
+        const h = m[2] ? Number(m[2]) : 1;
+        if (w > 0 && h > 0) model.aspectRatio = Math.round((w / h) * 10000) / 10000;
+      }
       return true;
     }
     case 'text-transform': {
@@ -1209,12 +1242,41 @@ const UA_BASELINE: Record<string, StyleModel> = {
   h4: { fontSize: 16, fontWeight: 700 },
   h5: { fontSize: 13, fontWeight: 700 },
   h6: { fontSize: 11, fontWeight: 700 },
+  // The browser bolds these with no stylesheet at all; a native target that
+  // skipped the baseline rendered a <strong> and a <th> exactly like a <p>.
+  b: { fontWeight: 700 },
+  strong: { fontWeight: 700 },
+  th: { fontWeight: 700, textAlign: 'center' },
+  // The same story for the other inline tags the browser dresses by itself:
+  // emphasis and citations lean, a struck tag is crossed, an underlined one is
+  // underlined. A target that cannot draw the decoration keeps dropping it.
+  em: { italic: true },
+  i: { italic: true },
+  cite: { italic: true },
+  s: { strike: true },
+  del: { strike: true },
+  u: { underline: true },
+  ins: { underline: true },
+  // Code is monospaced on the web; a docs page exported to a phone kept it in
+  // the body font. `monospace` is the generic the emitters map to a real face.
+  code: { fontFamily: 'monospace' },
+  kbd: { fontFamily: 'monospace' },
+  samp: { fontFamily: 'monospace' },
+  tt: { fontFamily: 'monospace' },
+  pre: { fontFamily: 'monospace' },
+  // A browser paints <mark> yellow; the export kept it as plain text.
+  mark: { background: '#ffff00' },
 };
 
 /** The baseline model for one tag, or null when the browser styles it plainly. */
 function uaBaselineOf(tag: string): StyleModel | null {
   const m = UA_BASELINE[tag];
   return m ? { ...m } : null;
+}
+
+/** The baseline as tag rows, for a runtime that resolves tag rules itself. */
+export function uaBaselineRows(): Array<[string, StyleModel]> {
+  return Object.entries(UA_BASELINE).map(([tag, model]) => [tag, { ...model }]);
 }
 
 /** Merge `b` over `a`: every property `b` sets wins. */

@@ -43,7 +43,7 @@ export interface EmitArkTsOptions {
 }
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 const BOX_TAGS = new Set(['div', 'section', 'main', 'article', 'header', 'footer', 'nav', 'aside', 'ul', 'ol', 'li', 'form', 'fieldset', 'details', 'summary', 'figure', 'figcaption', 'dl', 'dt', 'dd', 'table', 'thead', 'tbody', 'tr', 'block', 'slot', 'web-view']);
 
 export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string[]; components: string[] }> {
@@ -435,6 +435,8 @@ function arkBoxMods(m: StyleModel): string[] {
   if (m.shadow) mods.push(`.shadow({ radius: ${m.shadow.blur}, color: '${arkColor(m.shadow.color)}', offsetX: ${m.shadow.x}, offsetY: ${m.shadow.y} })`);
   if (m.width) mods.push(`.width(${arkLen(m.width)})`);
   if (m.height) mods.push(`.height(${arkLen(m.height)})`);
+  // R420: ArkUI has a native aspectRatio on every component.
+  if (m.aspectRatio !== undefined) mods.push(`.aspectRatio(${m.aspectRatio})`);
   if (m.minWidth || m.maxWidth || m.minHeight || m.maxHeight) {
     const entries = [
       m.minWidth ? `minWidth: ${arkLen(m.minWidth)}` : '',
@@ -476,6 +478,9 @@ function arkTextMods(m: StyleModel, fonts: Set<string>): string[] {
   if (m.textTransform) mods.push(`.textCase(TextCase.${m.textTransform === 'uppercase' ? 'UpperCase' : m.textTransform === 'lowercase' ? 'LowerCase' : 'Normal'})`);
   if (m.underline) mods.push('.decoration({ type: TextDecorationType.Underline })');
   if (m.strike) mods.push('.decoration({ type: TextDecorationType.LineThrough })');
+  // R415: one line + ellipsis - ArkUI's textOverflow needs maxLines set.
+  if (m.ellipsis) mods.push('.maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })');
+  else if (m.nowrap) mods.push('.maxLines(1)');
   return mods;
 }
 
@@ -554,7 +559,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
 /** The text properties a container passes down - CSS inheritance, made explicit. */
 function textCarry(m: StyleModel): StyleModel {
   const out: StyleModel = {};
-  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'textAlign', 'textTransform', 'underline', 'strike'] as Array<keyof StyleModel>) {
+  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'textAlign', 'textTransform', 'underline', 'strike', 'nowrap', 'ellipsis'] as Array<keyof StyleModel>) {
     const v = m[k];
     if (v !== undefined) (out as Record<string, unknown>)[k] = v;
   }
@@ -733,7 +738,13 @@ import router from '@ohos.router';
 import hilog from '@ohos.hilog';
 
 /// Base URL of the deployed rosezm server (rosezm export --api).
-export const ROSE_API_BASE: string = ${JSON.stringify(apiBase)};
+export const ROSE_API_BASE: string = ${JSON.stringify(apiBase)}
+
+/** A site-relative media path resolved against the deployed server; an
+ *  absolute URL passes through, so Image(src) works for both. */
+export function roseAssetUrl(path: string): string {
+  return path.startsWith('http') ? path : ROSE_API_BASE + path;
+};
 
 /// The pages this export carries: web route -> the registered page the router
 /// opens, the same table main_pages.json declares. A wall's redirect is looked
@@ -1732,11 +1743,15 @@ function emitNodes(nodes: IrNode[], ctx: ArkCtx): void {
 }
 
 /** One TS template literal for a text run: `${this.x}` for expressions. */
-function templateOf(nodes: IrNode[], ctx: ArkCtx): string {
+function templateOf(nodes: IrNode[], ctx: ArkCtx, trim = true): string {
   let raw = '';
+  let preserved = false;
   for (const node of nodes) {
-    if (node.kind === 'text') raw += node.value.replace(/\s+/g, ' ');
-    else if (node.kind === 'expr') {
+    if (node.kind === 'text') {
+      // A <pre> keeps its spaces and newlines; a template literal holds both.
+      if (node.preserve) { preserved = true; raw += node.value; }
+      else raw += node.value.replace(/\s+/g, ' ');
+    } else if (node.kind === 'expr') {
       const piece = etsExpr(node.code, ctx);
       // R284: the expression may ITSELF be a template literal (the dialect
       // spells templates natively). Splicing its CONTENT into the surrounding
@@ -1749,7 +1764,7 @@ function templateOf(nodes: IrNode[], ctx: ArkCtx): string {
       }
     }
   }
-  raw = raw.trim();
+  if (trim && !preserved) raw = raw.trim();
   if (!raw) return '';
   if (!raw.includes('${')) return JSON.stringify(raw);
   return '`' + raw.replace(/`/g, '\\`') + '`';
@@ -1986,6 +2001,41 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
   }
 }
 
+/** Inline formatting tags that may flow inside a text tag. */
+const ARK_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Span attributes only: alignment and line height belong to the whole Text. */
+function arkSpanMods(model: StyleModel, fonts: Set<string>): string[] {
+  return arkTextMods(model, fonts).filter((m) => !/^\.(textAlign|lineHeight|textCase|maxLines)\(/.test(m));
+}
+
+/** Flatten a text tag's inline children into Span children, or null when a
+ *  child is not inline text or carries a runtime-bound style. */
+function arkInlineRuns(children: IrNode[], ctx: ArkCtx, mods: string[]): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`Span(${templateOf([c], ctx, false)})${mods.join('')}`);
+      continue;
+    }
+    if (c.kind !== 'element' || !ARK_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    if (binding.hasDynamic) return null;
+    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const model = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    ctx.ancestors.push(subject);
+    let inner: string[] | null;
+    try {
+      inner = arkInlineRuns(c.children, ctx, [...mods, ...arkSpanMods(model, ctx.fonts)]);
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
 function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx, model: StyleModel, dynamicMods: string, hoverTail: string): void {
   const tag = node.tag.toLowerCase();
   // A box modifier chain with the runtime `roseModifier` tail appended. The tail
@@ -2043,6 +2093,15 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     emit(`${comp.struct}({ ${all}${scopeArg} })`, ctx);
     return;
   }
+  if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && ARK_INLINE.has(c.tag.toLowerCase()))) {
+    // A paragraph with inline tags is ONE Text with Span children on ArkUI,
+    // not a Column of separate Text widgets.
+    const runs = arkInlineRuns(node.children, ctx, []);
+    if (runs && runs.length) {
+      emit(box(`Text() {\n${runs.map((r) => '  ' + r).join('\n')}\n}${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
+      return;
+    }
+  }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = templateOf(node.children, ctx);
     emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${arkTextMods(ctx.inherited, ctx.fonts).join('')}`), ctx);
@@ -2077,8 +2136,15 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
     const label = alt ? `.accessibilityText(${JSON.stringify(alt)})` : '';
     const media = ctx.media.get(url);
-    if (media) emit(box(`Image($r('app.media.${media}')).objectFit(ImageFit.Contain)${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
+    // R418: object-fit maps onto ArkUI's ImageFit; absent keeps contain.
+    const fit = ({ cover: 'ImageFit.Cover', contain: 'ImageFit.Contain', fill: 'ImageFit.Fill', none: 'ImageFit.None', 'scale-down': 'ImageFit.ScaleDown' } as Record<string, string>)[model.objectFit ?? 'contain'] ?? 'ImageFit.Contain';
+    if (media) emit(box(`Image($r('app.media.${media}')).objectFit(${fit})${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
     else if (ctx.vectors.has(url)) { emit(arktsVectorExpr(url, ctx), ctx); }
+    else if (url) {
+      // R416: a remote (or site-relative) image loads at runtime.
+      const source = /^https?:\/\//i.test(url) ? JSON.stringify(url) : `roseAssetUrl(${JSON.stringify(url)})`;
+      emit(box(`Image(${source}).objectFit(${fit})${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
+    }
     else {
       ctx.warnings.push(`arkts: ${url || '<img>'} has no media resource - rendered as a placeholder`);
       emit(`Text('[image: ${url.replace(/'/g, "\\'")}]')${label}`, ctx);

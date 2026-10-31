@@ -60,7 +60,7 @@ interface PyStyle {
 }
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 /** The viewport an @media-guarded rule is decided at - the phone width the web
  *  build's base theme targets, and the same reference every sibling emitter uses. */
 const REFERENCE_WIDTH = 390;
@@ -752,6 +752,77 @@ def rose_html_label(parent, html, **pack):
     return box
 
 
+def rose_rich_label(parent, runs, **pack):
+    """A line of inline runs: Tk has no rich Label, so this is ONE Text widget
+    with a tag per run - a bold word stays inside its paragraph."""
+    box = tk.Text(parent, wrap='word', borderwidth=0, highlightthickness=0, padx=0, pady=0, height=1)
+    try:
+        box.configure(bg=parent.cget('bg'))
+    except Exception:
+        pass
+    for i, (font, color, text) in enumerate(runs):
+        tag = 'r_run%d' % i
+        opts = {}
+        if font is not None:
+            opts['font'] = font
+        if color is not None:
+            opts['foreground'] = color
+        if opts:
+            box.tag_config(tag, **opts)
+        box.insert('end', text, (tag,) if opts else ())
+    box.config(state='disabled')
+
+    def __rose_fit():
+        try:
+            box.update_idletasks()
+            lines = box.count('1.0', 'end', 'displaylines')
+            if lines:
+                box.config(height=max(1, lines[0]))
+        except Exception:
+            pass
+
+    box.bind('<Configure>', lambda _e: __rose_fit())
+    box.pack(fill='x', anchor='w', **pack)
+    return box
+
+
+def rose_remote_image(parent, url, **pack):
+    """R417: a remote image. A daemon thread downloads it and the label swaps
+    the pixmap in when it arrives; the page build never blocks on the host."""
+    import threading
+    import urllib.request
+    label = tk.Label(parent, text='[image]')
+    holder = {}
+
+    def __load():
+        try:
+            full = url if url.startswith('http') else API_BASE + url
+            request = urllib.request.Request(full, headers={'User-Agent': 'rosezm'})
+            holder['data'] = urllib.request.urlopen(request, timeout=15).read()
+        except Exception:
+            holder['error'] = True
+
+    threading.Thread(target=__load, daemon=True).start()
+
+    def __poll():
+        if 'data' in holder:
+            try:
+                image = tk.PhotoImage(data=holder['data'])
+                holder['image'] = image
+                label.configure(image=image, text='')
+            except Exception:
+                label.configure(text='[image: unsupported]')
+        elif holder.get('error'):
+            label.configure(text='[image: offline]')
+        else:
+            label.after(200, __poll)
+
+    label.after(200, __poll)
+    label._rose_remote = holder
+    label.pack(anchor='w', **pack)
+    return label
+
+
 def rose_text(fn):
     """A template expression that may throw renders the boundary fallback,
     the same text the web build shows for a contained failure."""
@@ -1303,7 +1374,7 @@ from tkinter import ttk
 
 from styles import STYLES
 import rosezm
-from rosezm import roseThrow, rose_text, rose_button, rose_entry, rose_html_label${ctx.dyn.used ? ', rose_resolve, rose_apply, rose_join, rose_tokens' : ''}${ctx.links.used ? ', rose_link' : ''}${content && contentGlobals.length ? ', rose_content_list, rose_content_get' : ''}${usesNative ? ', rose_native' : ''}
+from rosezm import roseThrow, rose_text, rose_button, rose_entry, rose_html_label${/\brose_rich_label\s*\(/.test(lines) ? ', rose_rich_label' : ''}${/\brose_remote_image\s*\(/.test(lines) ? ', rose_remote_image' : ''}${ctx.dyn.used ? ', rose_resolve, rose_apply, rose_join, rose_tokens' : ''}${ctx.links.used ? ', rose_link' : ''}${content && contentGlobals.length ? ', rose_content_list, rose_content_get' : ''}${usesNative ? ', rose_native' : ''}
 
 ${bindLines}
 ${appSeedsLine}
@@ -1646,7 +1717,7 @@ function textOf(nodes: IrNode[], ctx: PyCtx): string {
   const parts: string[] = [];
   for (const node of nodes) {
     if (node.kind === 'text') {
-      parts.push(node.value.replace(/\s+/g, ' '));
+      parts.push(node.preserve ? node.value : node.value.replace(/\s+/g, ' '));
     } else if (node.kind === 'expr') {
       parts.push(`{rose_text(lambda: ${pyExpr(node.code, ctx)})}`);
     }
@@ -1659,6 +1730,38 @@ function textOf(nodes: IrNode[], ctx: PyCtx): string {
   // so the inner one is quoted with single quotes and the outer run's escapes
   // do not collide - the lambda body's f-string keeps its own quoting.
   return 'f' + JSON.stringify(joined).replace(/f\\"/g, "f'").replace(/\\"/g, "'");
+}
+
+/** Inline formatting tags that may flow inside a text tag. */
+const PY_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into (font, colour, text) runs, or null
+ *  when a child is not inline text or carries a runtime-bound style. */
+function pyInlineRuns(children: IrNode[], ctx: PyCtx, base: StyleModel): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      const font = tkFont(base) ?? 'None';
+      const color = base.color ? `'${base.color}'` : 'None';
+      runs.push(`(${font}, ${color}, ${textOf([c], ctx)})`);
+      continue;
+    }
+    if (c.kind !== 'element' || !PY_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    if (binding.dynamicClassExprs.length || binding.dynamicStyle.length) return null;
+    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const own = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    ctx.ancestors.push(subject);
+    let inner: string[] | null;
+    try {
+      inner = pyInlineRuns(c.children, ctx, mergeModels(base, own));
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
 }
 
 function emitNode(node: IrNode, ctx: PyCtx): void {
@@ -2112,8 +2215,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       }
       return;
     }
-    ctx.warnings.push('python: <img ' + url + '> has no bundled raster asset - shown as a placeholder label');
-    place(`tk.Label(${ctx.parent}, text='[image: ${url.replace(/'/g, "\\\\'")}]')`);
+    if (url) {
+      // R417: a remote (or site-relative) image downloads on a daemon thread.
+      emit(`rose_remote_image(${ctx.parent}, ${JSON.stringify(url)})`, ctx);
+      return;
+    }
+    ctx.warnings.push('python: <img> has no src - shown as a placeholder label');
+    place(`tk.Label(${ctx.parent}, text='[image]')`);
     return;
   }
   if (tag === 'a') {
@@ -2355,6 +2463,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     emit(`tk.Frame(${ctx.parent}, width=1, height=8).pack(${packArgs(ctx, { model, last })})`, ctx);
     return;
   }
+  if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && PY_INLINE.has(c.tag.toLowerCase()))) {
+    // A paragraph with inline tags is ONE flowing line: one Text widget with a
+    // tag per run, not a stack of labels.
+    const runs = pyInlineRuns(node.children, ctx, model);
+    if (runs && runs.length) {
+      emit(`rose_rich_label(${ctx.parent}, [${runs.join(', ')}])`, ctx);
+      return;
+    }
+  }
   // A text element becomes one Label (a row of labels would be a layout guess);
   // its resolved model applies to the label, exactly like the cascade did.
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
@@ -2373,7 +2490,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     // have opaque browser chrome, and CSS does not inherit background into
     // them either - so the two paths agree with the browser on purpose.
     const inheritedBg = !decls.some((d) => d.key === 'bg') && model.background === undefined && ctx.surface ? `, bg=${ctx.surface}` : '';
-    const call = `tk.Label(${ctx.parent}, text=${text}, wraplength=${wrap}${decls.length ? ', ' + declsKw(decls) : ''}${inheritedBg})`;
+    const call = `tk.Label(${ctx.parent}, text=${text}, wraplength=${model.nowrap || model.ellipsis ? 0 : wrap}${decls.length ? ', ' + declsKw(decls) : ''}${inheritedBg})`;
     if (binding.hasDynamic) {
       const name = `__w${ctx.lines.length}`;
       emit(`${name} = ${call}`, ctx);

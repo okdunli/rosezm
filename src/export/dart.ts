@@ -44,6 +44,7 @@ import {
   cascadeFor,
   mergeModels,
   elementStyleBinding,
+  uaBaselineRows,
   flexDirectionOf,
   isFlexModel,
   sanitizeFor,
@@ -74,13 +75,14 @@ const TAG_WIDGET: Record<string, string> = {
   small: 'Text', code: 'Text', pre: 'Text', label: 'Text', legend: 'Text',
   blockquote: 'Text', time: 'Text', mark: 'Text', q: 'Text', s: 'Text', u: 'Text',
   sub: 'Text', sup: 'Text', abbr: 'Text', cite: 'Text', caption: 'Text',
+  th: 'Text', del: 'Text', ins: 'Text',
   img: 'Image.network', a: 'navigator', input: 'TextField', textarea: 'TextField',
   button: 'ElevatedButton', form: 'form', hr: 'Divider', br: 'SizedBox',
   select: 'DropdownButton',
 };
 
 /** Row-shaped containers; everything else becomes a Column. */
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Public raster images copied for this export: /rose.png -> assets/images/rose.png. */
 let assetMap = new Map<string, string>();
@@ -530,6 +532,7 @@ function styleArgsOf(model: StyleModel): string[] {
   if (model.align) args.push(`items: '${model.align}'`);
   if (model.alignSelf) args.push(`selfAlign: '${model.alignSelf}'`);
   if (model.grow !== undefined) args.push(`grow: ${n(model.grow)}`);
+  if (model.aspectRatio !== undefined) args.push(`aspectRatio: ${n(model.aspectRatio)}`);
   if (model.shrink !== undefined) args.push(`shrink: ${n(model.shrink)}`);
   const sizes: Array<[string, number | undefined]> = [
     ['width', pxOf(model.width)], ['height', pxOf(model.height)],
@@ -561,7 +564,12 @@ function renderStyles(rules: StyleRule[], tags: Map<string, StyleModel>): string
     const args = styleArgsOf(r.model);
     return `  '${r.className}': RoseStyle(${args.join(', ')}),`;
   });
-  const tagRows = [...tags.entries()].map(([tag, model]) => {
+  // The browser's own tag defaults sit under the sheet's tag rules on the
+  // device too: roseResolve merges these before any class, exactly like the
+  // web cascade. Without them a <strong> and a <th> lost their bold on Flutter.
+  const mergedTags = new Map(uaBaselineRows());
+  for (const [tag, model] of tags) mergedTags.set(tag, mergeModels(mergedTags.get(tag) ?? null, model));
+  const tagRows = [...mergedTags.entries()].map(([tag, model]) => {
     const args = styleArgsOf(model);
     return `  '${tag}': RoseStyle(${args.join(', ')}),`;
   });
@@ -587,7 +595,7 @@ class RoseStyle {
     this.width, this.height, this.minWidth, this.maxWidth, this.minHeight, this.maxHeight,
     this.hidden,
     this.absolute, this.insetLeft, this.insetTop, this.insetRight, this.insetBottom,
-    this.scrolls,
+    this.scrolls, this.aspectRatio,
   });
 
   final Color? color;
@@ -633,6 +641,8 @@ class RoseStyle {
   final double? insetBottom;
   /// R228: the box scrolls its own content (CSS overflow: auto/scroll).
   final bool? scrolls;
+  /// R420: the width/height ratio the box keeps (CSS aspect-ratio).
+  final double? aspectRatio;
 
   /// Every property other actually sets wins - the cascade's "later rule
   /// overrides earlier rule", one field at a time.
@@ -660,7 +670,7 @@ class RoseStyle {
       absolute: other.absolute ?? absolute,
       insetLeft: other.insetLeft ?? insetLeft, insetTop: other.insetTop ?? insetTop,
       insetRight: other.insetRight ?? insetRight, insetBottom: other.insetBottom ?? insetBottom,
-      scrolls: other.scrolls ?? scrolls,
+      scrolls: other.scrolls ?? scrolls, aspectRatio: other.aspectRatio ?? aspectRatio,
     );
   }
 
@@ -678,6 +688,8 @@ class RoseStyle {
       color: color, fontSize: fontSize,
       fontWeight: weight == null ? null : FontWeight.values.firstWhere((w) => w.value == weight, orElse: () => FontWeight.normal),
       fontFamily: fontFamily,
+      // A generic monospace resolves on Android; iOS needs a face behind it.
+      fontFamilyFallback: fontFamily == 'monospace' ? const <String>['Courier New', 'Courier', 'Menlo'] : null,
       fontStyle: italic == true ? FontStyle.italic : null,
       letterSpacing: letterSpacing, height: lineHeight, decoration: decoration,
     );
@@ -704,6 +716,31 @@ class RoseStyle {
     if (width == null && height == null && minWidth == null && maxWidth == null && minHeight == null && maxHeight == null) return null;
     return BoxConstraints(minWidth: minWidth ?? 0, maxWidth: maxWidth ?? double.infinity, minHeight: minHeight ?? 0, maxHeight: maxHeight ?? double.infinity).tightFor(width: width, height: height);
   }
+}
+
+/// One styled run of a flowing line: a paragraph with <strong> and <code>
+/// children is three runs in ONE Text, not three stacked widgets.
+class RoseRun {
+  const RoseRun(this.style, this.text);
+  final RoseStyle? style;
+  final String text;
+}
+
+/// Merge two resolved styles: a child span over the line it sits in.
+RoseStyle roseMerge(RoseStyle? base, RoseStyle? over) => (base ?? const RoseStyle()).merge(over);
+
+/// A line of inline runs, laid out by the text engine like the web does.
+Text roseRich(RoseStyle? base, List<RoseRun> runs, {bool nowrap = false, bool ellipsis = false}) {
+  final spans = <TextSpan>[];
+  for (final r in runs) {
+    spans.add(TextSpan(text: r.text, style: r.style?.textStyle));
+  }
+  return Text.rich(
+    TextSpan(style: base?.textStyle, children: spans),
+    maxLines: ellipsis ? 1 : null,
+    overflow: ellipsis ? TextOverflow.ellipsis : null,
+    softWrap: nowrap ? false : null,
+  );
 }
 
 const Map<String, RoseStyle> roseStyles = {
@@ -839,14 +876,17 @@ Widget roseBox(RoseStyle? s, Widget child) {
   final cons = s.constraints;
   final pad = s.padding;
   final mar = s.margin;
-  if (deco == null && cons == null && pad == null && mar == null && s.opacity == null) return child;
+  final ratio = s.aspectRatio;
+  if (deco == null && cons == null && pad == null && mar == null && s.opacity == null && ratio == null) return child;
   Widget out = child;
   if (s.opacity != null) out = Opacity(opacity: (s.opacity ?? 1).clamp(0.0, 1.0), child: out);
-  return Container(padding: pad, margin: mar, constraints: cons, decoration: deco, child: out);
+  out = Container(padding: pad, margin: mar, constraints: cons, decoration: deco, child: out);
+  // R420: CSS aspect-ratio is Flutter's own AspectRatio around the box.
+  return ratio == null ? out : AspectRatio(aspectRatio: ratio, child: out);
 }
 
 /// A text run with the text half of a style applied.
-Text roseText(String text, RoseStyle? s, {TextStyle? base}) {
+Text roseText(String text, RoseStyle? s, {TextStyle? base, bool nowrap = false, bool ellipsis = false}) {
   final t = s?.textStyle;
   var style = t == null ? base : (base == null ? t : base.merge(t));
   var str = text;
@@ -860,6 +900,9 @@ Text roseText(String text, RoseStyle? s, {TextStyle? base}) {
   return Text(
     str,
     style: style,
+    maxLines: ellipsis ? 1 : null,
+    overflow: ellipsis ? TextOverflow.ellipsis : null,
+    softWrap: nowrap ? false : null,
     textAlign: a == 'center' ? TextAlign.center : a == 'right' ? TextAlign.right : a == 'justify' ? TextAlign.justify : null,
   );
 }
@@ -2395,6 +2438,37 @@ function styleExprOf(
   return { expr: `roseResolve(${args.join(', ')}, '${node.tag.toLowerCase()}')`, model, hoverKey, focusKey, activeKey };
 }
 
+/** Inline formatting tags that may flow inside a text tag. A link, an image
+ *  or a block element has its own widget and stays on the stacking path. */
+const DART_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into RoseRun expressions, or null when
+ *  they are not all text. A nested tag merges its style over its parent's at
+ *  runtime, so <strong><em>x</em></strong> keeps both. */
+function inlineRuns(children: IrNode[], ctx: EmitCtx, base: string | null): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`RoseRun(${base ?? 'null'}, ${dartTextOf([c], ctx)})`);
+      continue;
+    }
+    if (c.kind !== 'element' || !DART_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    const style = styleExprOf(c, binding, ctx);
+    if (!style.expr) return null;
+    ctx.ancestors.push({ tag: c.tag.toLowerCase(), classes: binding.staticClasses });
+    let inner: string[] | null;
+    try {
+      inner = inlineRuns(c.children, ctx, `roseMerge(${base ?? 'null'}, ${style.expr})`);
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
 function emitElementStyled(
   node: Extract<IrNode, { kind: 'element' }>,
   ctx: EmitCtx,
@@ -2406,6 +2480,19 @@ function emitElementStyled(
   // containers) may dress itself in the same resolved style.
   const styleExpr = style.expr;
   const model = style.model;
+
+  // R415: one line + ellipsis is a text-widget property on every target.
+  const trunc = `${model.nowrap ? ', softWrap: false' : ''}${model.ellipsis ? ', maxLines: 1, overflow: TextOverflow.ellipsis' : ''}`;
+  // A text tag with inline formatting is ONE flowing line on the web. The
+  // widget path below stacked "a <strong>b</strong> c" as three rows, which is
+  // not a paragraph. The runs travel to the kit, which lays them out as spans.
+  if (TAG_WIDGET[tag] === 'Text' && styleExpr && node.children.some((c) => c.kind === 'element' && DART_INLINE.has(c.tag.toLowerCase()))) {
+    const runs = inlineRuns(node.children, ctx, styleExpr);
+    if (runs && runs.length) {
+      const rich = `roseRich(${styleExpr}, [${runs.join(', ')}]${trunc})`;
+      return isFlexModel(model) ? `roseBox(${styleExpr}, roseFlex(${styleExpr}, [${rich}]))` : `roseBox(${styleExpr}, ${rich})`;
+    }
+  }
 
   // A component body's `<slot />` / `<slot name="x" prop={expr} />` renders the
   // content the caller passed: the default slot is the slotDefault widget; a
@@ -2485,12 +2572,16 @@ function emitElementStyled(
     const label = alt ? `, semanticLabel: '${esc(alt)}'` : '';
     const wrap = (w: string): string => (alt ? `Semantics(label: '${esc(alt)}', image: true, child: ${w})` : w);
     let base = '';
+    // R418: object-fit picks the BoxFit; the browser default for an <img> is
+    // fill, but the exporters have always contained assets - keep contain as
+    // the absent-value default so an unstyled image does not change.
+    const fit = ({ cover: 'BoxFit.cover', contain: 'BoxFit.contain', fill: 'BoxFit.fill', none: 'BoxFit.none', 'scale-down': 'BoxFit.scaleDown' } as Record<string, string>)[model.objectFit ?? 'contain'] ?? 'BoxFit.contain';
     const asset = assetMap.get(url);
     if (asset) {
       const width = node.attrs.find((a) => a.name === 'width');
       const height = node.attrs.find((a) => a.name === 'height');
       const size = [width ? `width: ${width.value.kind === 'text' ? width.value.text : 48}.0` : '', height ? `height: ${height.value.kind === 'text' ? height.value.text : 48}.0` : ''].filter(Boolean).join(', ');
-      base = `Image.asset('${asset}', fit: BoxFit.contain${size ? ', ' + size : ''}${label})`;
+      base = `Image.asset('${asset}', fit: ${fit}${size ? ', ' + size : ''}${label})`;
     } else {
       const vector = svgShapes.get(url);
       if (vector) {
@@ -2505,7 +2596,7 @@ function emitElementStyled(
         ctx.warnings.push(`flutter: an inlined data-URI image has no Bundle asset - add it to pubspec assets`);
         base = wrap('const Icon(Icons.image)');
       } else {
-        base = `Image.network('${url.replace(/'/g, "\\'")}', fit: BoxFit.contain${label})`;
+        base = `Image.network('${url.replace(/'/g, "\\'")}', fit: ${fit}${label})`;
       }
     }
     // border-radius / border / shadow / padding from the stylesheet now clip and
@@ -2695,7 +2786,7 @@ function emitElementStyled(
     const base = /^h[1-6]$/.test(tag)
       ? `, base: const TextStyle(fontSize: ${H1_SIZES[tag]}, fontWeight: FontWeight.bold)`
       : '';
-    const text = `roseText(${dartTextOf(node.children, ctx)}, ${styleExpr}${base})`;
+    const text = `roseText(${dartTextOf(node.children, ctx)}, ${styleExpr}${base}${trunc})`;
     return wantsFlex ? `roseBox(${styleExpr}, roseFlex(${styleExpr}, [${text}]))` : `roseBox(${styleExpr}, ${text})`;
   }
 
@@ -2754,7 +2845,12 @@ function dartTextOf(children: IrNode[], ctx: EmitCtx): string {
       // A single-quoted Dart string interpolates `${}` the same way; a TEXT
       // run is a literal, so every `$` in it must be escaped or Dart would
       // interpolate a word the author wrote as prose.
-      out += c.value.replace(/\s+/g, ' ').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\$/g, '\\$');
+      // R410: inside <pre> a newline is a line break, not a space; a Dart
+      // single-quoted string cannot hold a raw newline, so it becomes \n.
+      let raw = c.preserve ? c.value : c.value.replace(/\s+/g, ' ');
+      raw = raw.replace(/\\/g, '\\\\');
+      if (c.preserve) raw = raw.replace(/\r?\n|\r/g, '\\n').replace(/\t/g, '\\t');
+      out += raw.replace(/'/g, "\\'").replace(/\$/g, '\\$');
     } else if (c.kind === 'expr') {
       // R251: a `{@const}` read expands to its expression here too - this is the
       // text template path, and it was the one still emitting a bare name.

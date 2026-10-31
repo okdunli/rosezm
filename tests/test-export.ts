@@ -1612,6 +1612,92 @@ try {
     assert(!existsSync(join(result.outDir, 'pages', '_external', '_external.wxml')), 'weapp: a project without external links ships no web-view page');
   }
 
+  // Elements a target cannot draw are dropped (a canvas was an empty widget, an
+  // iframe nothing) - the export must name them instead of shipping nothing.
+  {
+    const elp = join(scratch, 'elements-proj');
+    mkdirSync(join(elp, 'src/pages'), { recursive: true });
+    writeFileSync(join(elp, 'src/pages/index.rose'), '<style>.trunc { white-space: nowrap; text-overflow: ellipsis; } .cover { width: 120px; height: 80px; object-fit: cover; } .tracked { letter-spacing: 2px; } .ratio { aspect-ratio: 16 / 9; }</style><div><canvas id="chart"></canvas><iframe src="https://example.com"></iframe><img class="cover" src="https://example.com/a.png" alt="pic"><div class="ratio">ratio</div><strong>bold</strong><em>soft</em><s>gone</s><code>npm</code><mark>hit</mark><pre>one\n  two</pre><p>run <strong>hot</strong> <code>now</code></p><p class="trunc">a very long title that truncates</p><p class="tracked">spaced</p><table><tr><th>Head</th><td>Name</td><td>Qty</td></tr></table></div>\n');
+    const elf = await exportProject('flutter', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-flutter') });
+    assert((elf.warnings ?? []).some((w: string) => /<canvas> \(dropped\)/.test(w) && /<iframe> \(dropped\)/.test(w)), 'flutter: canvas and iframe gaps are named');
+    assert(!(elf.warnings ?? []).some((w: string) => /<table>/.test(w)), 'flutter: a table is not a gap - it renders as rows');
+    const elfSrc = readFileSync(join(elf.outDir, 'lib', 'pages', 'index.dart'), 'utf8');
+    assert(/Row\(crossAxisAlignment: CrossAxisAlignment\.center.*Text\("Name"\)/.test(elfSrc), 'flutter: a table row is a Row, cells side by side');
+    // The browser bolds <b>/<strong>/<th> with no stylesheet. A Flutter build
+    // resolved tag styles at runtime, so the baseline has to ride in that table.
+    const elfStyles = readFileSync(join(elf.outDir, 'lib', 'styles.dart'), 'utf8');
+    assert(elfStyles.includes("'strong': RoseStyle(weight: 700") && elfStyles.includes("'th': RoseStyle(weight: 700, align: 'center')"), 'flutter: the browser bold tags carry their default weight');
+    assert(elfSrc.includes("roseText('bold'") && elfSrc.includes("roseText('Head'"), 'flutter: a strong and a th render as styled text runs');
+    assert(elfStyles.includes("'em': RoseStyle(italic: true") && elfStyles.includes("'s': RoseStyle(strike: true") && elfStyles.includes("'ins': RoseStyle(underline: true"), 'flutter: em/s/ins carry their browser decoration too');
+    assert(elfStyles.includes("'code': RoseStyle(fontFamily: \"monospace\")"), 'flutter: a code tag resolves to the monospace generic');
+    assert(elfStyles.includes("'mark': RoseStyle(background: Color(0xFFFFFF00))"), 'flutter: a mark tag keeps the browser yellow');
+    const elx = await exportProject('xcode', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-xcode') });
+    const elxSrc = readFileSync(join(elx.outDir, 'rosezmApp', 'Pages', 'IndexView.swift'), 'utf8');
+    assert(elxSrc.includes('.font(.system(size: 16, design: .monospaced))'), 'xcode: a generic monospace becomes a design, not a missing face name');
+    const elw = await exportProject('weapp', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-weapp') });
+    const elwTpl = readFileSync(join(elw.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    assert(elwTpl.includes('<view style="display:flex"><view>Head</view><view>Name</view><view>Qty</view>'), 'weapp: a table row is a flex strip');
+    assert(!(elw.warnings ?? []).some((w: string) => /<canvas>/.test(w)), 'weapp: canvas and iframe are supported');
+    // Swing had no italic or struck text at all: the Style carried a bold flag
+    // and nothing else, so em/s/u reached the desktop as plain text.
+    const elj = await exportProject('java', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-java') });
+    const eljSrc = readFileSync(join(elj.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
+    assert(eljSrc.includes('.italic()') && eljSrc.includes('.strike()'), 'java: em and s carry their browser lean and strike');
+    const eljTheme = readFileSync(join(elj.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
+    assert(eljTheme.includes('public Style italic()') && eljTheme.includes('new JLabel(style == null ? text : decorate(text, style))'), 'java: the theme draws italics with a font flag and decorations with the HTML view');
+    assert((eljTheme.match(/button\.setText\(decorate\(text, style\)\)/g) ?? []).length === 2, 'java: a decorated button and link keep their text decoration too');
+    assert(eljTheme.includes('prop.equals("font-style")') && eljTheme.includes('(style | Font.BOLD)'), 'java: a live font-style and font-weight keep each other');
+    assert(eljTheme.includes('.tracking(2)') && eljTheme.includes('java.awt.font.TextAttribute.TRACKING'), 'java: letter-spacing becomes glyph tracking');
+    assert(elfSrc.includes("roseText('one\\n  two'"), 'flutter: a pre keeps its line break and indentation');
+    assert(eljSrc.includes('RoseTheme.label("one\\n  two"'), 'java: a pre reaches the label with its newline intact');
+    assert(eljTheme.includes("text.indexOf('\\n')") && eljTheme.includes('replace("\\n", "<br>")'), 'java: the label view turns that newline into a break');
+    assert(elfSrc.includes('roseRich(') && elfSrc.includes("'run '"), 'flutter: a paragraph with inline tags is one flowing rich line');
+    const ela = await exportProject('android', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-android') });
+    const elaSrc = readFileSync(join(ela.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
+    assert(elaSrc.includes('roseRich(listOf(RoseRun(') && elaSrc.includes('roseMerge(roseResolve("p", listOf(), "Index"), roseResolve("strong"'), 'android: a paragraph with inline tags is one flowing rich line');
+    const elaTheme = readFileSync(join(ela.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'RoseTheme.kt'), 'utf8');
+    assert(elaTheme.includes('fun roseRich(runs: List<RoseRun>)') && elaTheme.includes('fun roseMerge('), 'android: the theme lays the runs out as spans');
+    assert(elxSrc.includes('Text("run ") + Text("hot").fontWeight(.bold)'), 'xcode: a paragraph with inline tags is one concatenated line');
+    const elh = await exportProject('arkts', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-arkts') });
+    const elhSrc = readFileSync(join(elh.outDir, 'entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), 'utf8');
+    assert(elhSrc.includes('Span("run ")') && elhSrc.includes('Span("hot").fontWeight(FontWeight.Bold)'), 'arkts: a paragraph with inline tags is one Text with Span children');
+    assert(elfSrc.includes('softWrap: false, maxLines: 1, overflow: TextOverflow.ellipsis'), 'flutter: nowrap + ellipsis reach the text widget');
+    assert(elaSrc.includes('maxLines = 1, overflow = TextOverflow.Ellipsis'), 'android: nowrap + ellipsis reach the text widget');
+    assert(elxSrc.includes('.lineLimit(1).truncationMode(.tail)'), 'xcode: nowrap + ellipsis reach the text widget');
+    assert(elhSrc.includes('.maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })'), 'arkts: nowrap + ellipsis reach the text widget');
+    assert(elfStyles.includes('aspectRatio: 1.78'), 'flutter: aspect-ratio reaches the class table');
+    assert(elaTheme.includes('aspectRatio = 1.8f'), 'android: aspect-ratio reaches the class table');
+    assert(elxSrc.includes('.aspectRatio(1.78, contentMode: .fit)'), 'xcode: aspect-ratio reaches the box modifiers');
+    assert(elhSrc.includes('.aspectRatio(1.7778)'), 'arkts: aspect-ratio reaches the box modifiers');
+    assert(elaSrc.includes('AsyncImage(model = "https://example.com/a.png"') && elaSrc.includes('import coil.compose.AsyncImage'), 'android: a remote image loads through Coil');
+    assert(readFileSync(join(ela.outDir, 'app', 'build.gradle.kts'), 'utf8').includes('io.coil-kt:coil-compose:2.7.0'), 'android: the Coil dependency ships with the project');
+    assert(elxSrc.includes('AsyncImage(url: URL(string: "https://example.com/a.png"))'), 'xcode: a remote image loads through AsyncImage');
+    assert(elhSrc.includes('Image("https://example.com/a.png")'), 'arkts: a remote image loads through Image');
+    assert(elfSrc.includes("Image.network('https://example.com/a.png', fit: BoxFit.cover"), 'flutter: object-fit cover reaches BoxFit');
+    assert(elaSrc.includes('contentScale = ContentScale.Crop'), 'android: object-fit cover reaches ContentScale');
+    assert(elxSrc.includes('.resizable().scaledToFill().clipped()'), 'xcode: object-fit cover reaches scaledToFill');
+    assert(elhSrc.includes('.objectFit(ImageFit.Cover)'), 'arkts: object-fit cover reaches ImageFit');
+    assert(eljSrc.includes('RoseTheme.richLabel(new RoseTheme.Run('), 'java: a paragraph with inline tags is one rich label');
+    const eln = await exportProject('dotnet', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-dotnet') });
+    const elnSrc = readFileSync(join(eln.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
+    assert(elnSrc.includes('RoseTheme.Rich(') && elnSrc.includes('new (string, RoseStyle?)[]'), 'dotnet: a paragraph with inline tags is one TextBlock of Runs');
+    const elnTheme = readFileSync(join(eln.outDir, 'RoseTheme.cs'), 'utf8');
+    assert(elnSrc.includes('Nowrap = true, Ellipsis = true') && elnTheme.includes('TextTrimming.CharacterEllipsis'), 'dotnet: nowrap + ellipsis reach the TextBlock');
+    const elc = await exportProject('cpp', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-cpp') });
+    const elcSrc = readFileSync(join(elc.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
+    assert(elcSrc.includes('rose_rich_label(') && elcSrc.includes('RoseRun{'), 'cpp: a paragraph with inline tags is one rich label');
+    const elcKit = readFileSync(join(elc.outDir, 'src', 'rose.cpp'), 'utf8');
+    assert(elcKit.includes('static std::string rose_css_color(') && elcKit.includes('"color: " + rose_css_color('), 'cpp: the QSS colour carries exactly one hash');
+    const elpPy = await exportProject('python', elp, { apiBase: 'x', outRoot: join(scratch, 'elements-python') });
+    const elpSrc = readFileSync(join(elpPy.outDir, 'pages', 'index.py'), 'utf8');
+    const elpKit = readFileSync(join(elpPy.outDir, 'rosezm.py'), 'utf8');
+    assert(elpSrc.includes('rose_rich_label(') && elpKit.includes('def rose_rich_label('), 'python: a paragraph with inline tags is one tagged Text widget');
+    assert(elnSrc.includes('RoseTheme.RemoteImage(') && readFileSync(join(eln.outDir, 'RoseTheme.cs'), 'utf8').includes('public static System.Windows.Controls.Image RemoteImage('), 'dotnet: a remote image downloads through BitmapImage');
+    assert(elnSrc.includes('Stretch.UniformToFill'), 'dotnet: object-fit cover reaches Stretch');
+    assert(elcSrc.includes('rose_remote_image(') && readFileSync(join(elc.outDir, 'src', 'rose.cpp'), 'utf8').includes('QLabel* rose_remote_image('), 'cpp: a remote image loads through QNetworkAccessManager');
+    assert(elpSrc.includes('rose_remote_image(') && elpKit.includes('def rose_remote_image(') && elpSrc.includes(', rose_remote_image'), 'python: a remote image downloads on a worker thread');
+  }
+
   // 11. the desktop JVM family: Java Swing, stdlib only.
   const java = await exportProject('java', example, { apiBase: 'https://api.example.com', outRoot: scratch });
   const jdir = java.outDir;
@@ -1827,8 +1913,8 @@ try {
   // 13b. R102: the desktop form channel - a submit handler reads its inputs
   // through the same state keys the widgets bind to, never through FormData,
   // and no JS-only construct (spread, String(), const, throw new) leaks.
-  assert(jIndex.includes('RoseTheme.textField(panel9, "Your name", app, "name")'), 'a named input binds to the state key its handler reads');
-  assert(jIndex.includes('RoseTheme.button(panel9, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { signGuestbook(app); app.render(); })'), 'a submit button rides the form handler on the desktop, with the user button style on it');
+  assert(jIndex.includes('RoseTheme.textField(panel8, "Your name", app, "name")'), 'a named input binds to the state key its handler reads');
+  assert(jIndex.includes('RoseTheme.button(panel8, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { signGuestbook(app); app.render(); })'), 'a submit button rides the form handler on the desktop, with the user button style on it');
   assert(jIndex.includes('var guest = RoseTheme.text(app.v("name")).trim();'), 'a FormData read becomes the state read, once');
   assert(jIndex.includes('if (!guest.isEmpty())'), 'a string local tests emptiness, not JS truthiness');
   assert(jIndex.includes('RoseTheme.prepend(RoseTheme.list(app.v("guests")), guest)'), 'a spread state write becomes the kit append/prepend');
@@ -1908,7 +1994,7 @@ try {
   // (no backend), reads its inputs through the state keys the widgets bind
   // to, and writes the keyed store through the mapper channel.
   const jSign = jread(`${japp}/pages/SignPage.java`);
-  assert(jSign.includes('RoseTheme.button(panel7, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { action(app); app.render(); })'), 'a submit button in an action form runs the action');
+  assert(jSign.includes('RoseTheme.button(panel6, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { action(app); app.render(); })'), 'a submit button in an action form runs the action');
   assert(jSign.includes('roseThrow("A signature needs a name.", 422, "name")'), 'throw new ActionError becomes the kit throw');
   assert(jSign.includes('var name = RoseTheme.text(app.v("name")).trim();'), 'an action reads its form field through the bound state key');
   assert(jSign.includes('app.set("guests", RoseTheme.concat(RoseTheme.list(name), RoseTheme.list(app.v("guests"))))'), 'store.update prepends through the mapper channel');
@@ -2013,7 +2099,7 @@ try {
   assert(jTheme.includes('"rcard__Index"') && jTheme.includes('"rcard__About"'), 'Swing scopes the style classes per page');
   assert(jTheme.includes('"#e91e63", 4') && jTheme.includes('new javax.swing.border.LineBorder'), 'Swing draws the border with its own colour and width');
   assert(nTheme.includes('"rcard__Index"') && nTheme.includes('public string? BorderColor;') && nTheme.includes('public double[]? BorderWidth;'), 'WPF scopes the style classes per page and carries the border');
-  assert(cTheme.includes('"rcard__Index"') && cKit.includes('"border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";"'), 'Qt draws the border through a style sheet built from the resolved model');
+  assert(cTheme.includes('"rcard__Index"') && cKit.includes('"border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";"'), 'Qt draws the border through a style sheet built from the resolved model');
   assert(!jTheme.includes('"rcard",') && !nTheme.includes('["rcard"],') && !cTheme.includes('{"rcard",'), 'no target keeps an unscoped style table entry');
   assert(pKit.includes('def rose_button(parent, text, command, cls=') && pKit.includes("'cursor': 'hand2'") && pKit.includes("'activebackground': '#e91e63'"), 'the Tk kit styles its buttons: padding, cursor, active colours');
   assert(pKit.includes('def rose_entry(parent, cls=') && pKit.includes("'relief': 'sunken'"), 'the Tk kit styles its text fields with the base font');
@@ -2946,7 +3032,7 @@ try {
     await exportProject('java', genProj, { apiBase: 'x', outRoot: join(scratch, 'genfontjava') });
     const javaFont = readFileSync(join(scratch, 'genfontjava', 'java/src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
     assert(javaFont.includes('STYLES.put("mono__Index", new Style(20, "#222222", null, 0, true, "left", "Monospaced", "", 0))'), 'Swing maps monospace onto the JDK Monospaced font');
-    assert(javaFont.includes('widget.setFont(new Font(style.fontName, style.bold ? Font.BOLD : Font.PLAIN, style.fontSize))'), 'Swing applies the logical font name');
+    assert(javaFont.includes('int fontStyle = (style.bold ? Font.BOLD : Font.PLAIN) | (style.italic ? Font.ITALIC : Font.PLAIN);') && javaFont.includes('widget.setFont(new Font(style.fontName, fontStyle, style.fontSize))'), 'Swing applies the logical font name');
     await exportProject('dotnet', genProj, { apiBase: 'x', outRoot: join(scratch, 'genfontnet') });
     const netFont = readFileSync(join(scratch, 'genfontnet', 'dotnet/RoseTheme.cs'), 'utf8');
     assert(netFont.includes('["mono__Index"] = new RoseStyle { FontSize = 20, FontWeight = 700, FontFamily = "Consolas" }'), 'WPF maps monospace onto Consolas');
@@ -3580,10 +3666,14 @@ try {
   assert(/rose_button\(panel\d+, rose_str\(app\.v\("count"\)\), \[&app = app\]\(\) \{ inc\(app\); \}, RoseStyle\{16, "#ffffff", "#e91e63", 16, false, "SansSerif", "#000000", 2, 8, 16, 8, 16/.test(scIndex), 'a styled button keeps its own fill and border rather than the platform default');
   assert(/rose_apply_text\(__l, RoseStyle\{14, "#222222", "", 6, false, "SansSerif", "", 0, 3, 4, 5, 6, "", 0, "", "", 0\.4/.test(scIndex), 'a literal style="" reaches the label as its padding axes and alpha');
   const scWarns = styleC.warnings ?? [];
-  assert(scWarns.some((w) => /cpp: border-radius on <div class="hero">/.test(w)), 'the radius Qt cannot draw is named with its element');
-  assert(scWarns.some((w) => /cpp: box-shadow on <button class="btn primary">/.test(w)), 'the shadow Qt cannot draw is named with its element');
+  const scHeader = readFileSync(join(styleC.outDir, 'src/rose.h'), 'utf8');
+  assert(scWarns.every((w) => !/border-radius on/.test(w)), 'Qt paints the radius now - no drop is named');
+  assert(scWarns.every((w) => !/box-shadow on|letter-spacing on/.test(w)), 'Qt paints the shadow and the tracking now - no drop is named');
+  assert(scHeader.includes(', 0, 2, 6, "#0000004d"'), 'the box-shadow reaches the Qt style table with its offset, blur and colour');
+  assert(readFileSync(join(styleC.outDir, 'src/rose.cpp'), 'utf8').includes('QGraphicsDropShadowEffect') && readFileSync(join(styleC.outDir, 'src/rose.cpp'), 'utf8').includes('setLetterSpacing(QFont::AbsoluteSpacing'), 'the Qt kit draws the shadow and the letter tracking');
   assert(!scWarns.some((w) => /is not a single class|is behind a @media guard|has no native translation/.test(w)), 'nothing the shared engine carries is reported as dropped on Qt');
-  assert(scWarns.filter((w) => /border-radius on/.test(w)).length === 1, 'each unsupported feature is named once per page, not once per element');
+  assert(/hero[^}]*8, 8, 8, 8,/.test(scHeader), 'the four corner radii reach the Qt style table');
+  assert(readFileSync(join(styleC.outDir, 'src/rose.cpp'), 'utf8').includes('rose_radius_qss'), 'the Qt kit paints the radius through its stylesheet');
 
   // The same fixture through WPF: the shared cascade arrives as a generated
   // flex panel (RosePanel) and a real RoseStyle object, so the desktop build is

@@ -41,6 +41,8 @@ export interface ElementNode {
 export interface TextNode {
   kind: 'text';
   value: string;
+  /** Inside a <pre>: the browser keeps every space and newline, so must we. */
+  preserve?: boolean;
 }
 
 export interface ExprNode {
@@ -284,6 +286,8 @@ const VOID_TAGS = new Set([
 class Parser {
   i = 0;
   term: Term = { type: 'eof' };
+  /** >0 while parsing the children of a <pre>; its text nodes keep whitespace. */
+  private preDepth = 0;
 
   constructor(private src: string, private file: string, private warnings: string[], private platform?: string) {}
 
@@ -368,7 +372,7 @@ class Parser {
         if (ch === '{') { next = k; break; }
       }
       const text = this.src.slice(at, next);
-      if (text) nodes.push({ kind: 'text', value: text });
+      if (text) nodes.push(this.preDepth > 0 ? { kind: 'text', value: text, preserve: true } : { kind: 'text', value: text });
       this.i = next;
     }
     this.term = { type: 'eof' };
@@ -432,7 +436,12 @@ class Parser {
     }
     this.i = cursor;
     if (selfClosing || VOID_TAGS.has(tag.toLowerCase())) return { kind: 'element', tag, attrs, children: [], selfClosing: true };
+    // A <pre> keeps its text verbatim; the depth rides so a nested tree and the
+    // emitters see the same flag without threading a context through every one.
+    const pre = tag.toLowerCase() === 'pre';
+    if (pre) this.preDepth++;
     const children = this.parseNodes({ type: 'elementClose', tag });
+    if (pre) this.preDepth--;
     if (this.term.type === 'elementClose') this.term = { type: 'eof' };
     return { kind: 'element', tag, attrs, children, selfClosing: false };
   }

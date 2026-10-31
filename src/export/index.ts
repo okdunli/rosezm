@@ -204,6 +204,37 @@ async function auditNumberSpellings(target: TargetName, projectRoot: string, war
   }
 }
 
+/** Elements a target cannot draw: dropped silently until now (a canvas was an
+ *  empty SizedBox, an iframe nothing at all) - the content disappeared with no
+ *  word. (A table renders as horizontal rows now, so it is not a gap.) */
+const DROPPED_ELEMENTS: Partial<Record<TargetName, Array<[RegExp, string]>>> = {
+  flutter: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  android: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  xcode: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  arkts: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  python: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  dotnet: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  java: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+  cpp: [[/<canvas[\s>]/i, '<canvas> (dropped)'], [/<iframe[\s>]/i, '<iframe> (dropped)']],
+};
+
+async function auditDroppedElements(target: TargetName, projectRoot: string, warnings: string[]): Promise<void> {
+  const patterns = DROPPED_ELEMENTS[target];
+  if (!patterns) return;
+  for (const file of [...(await scanRoseFiles(projectRoot)), ...(await scanComponentFiles(projectRoot))]) {
+    if (/[\\/]pages[\/]api[\/]/.test(file) || /[\\/]_middleware\.rose$/.test(file)) continue;
+    let src = '';
+    try {
+      src = await fs.promises.readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const hits = patterns.filter(([re]) => re.test(src)).map(([, name]) => name);
+    if (!hits.length) continue;
+    warnings.push(`${target}: ${path.relative(projectRoot, file).replace(/\\/g, '/')} uses ${hits.join(', ')} - this target cannot render it as the web does; draw it natively or keep that route on the web build`);
+  }
+}
+
 async function auditDroppedEffects(target: TargetName, projectRoot: string, warnings: string[]): Promise<void> {
   const label = EFFECTLESS[target];
   if (!label) return;
@@ -285,6 +316,7 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
   const globalCss = opts.globalCss ?? (await discoverGlobalCss(projectRoot));
   await auditDroppedEffects(target, projectRoot, warnings);
   await auditNumberSpellings(target, projectRoot, warnings);
+  await auditDroppedElements(target, projectRoot, warnings);
   await auditMissingApiBase(target, projectRoot, opts.apiBase, warnings);
   if (info.family === 'mini-program') {
 

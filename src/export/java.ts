@@ -46,7 +46,7 @@ export interface EmitJavaOptions {
 const PKG = 'dev.rosezm.app';
 const PKG_PATH = 'dev/rosezm/app';
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 /** R199: the width a `@media` rule is evaluated against. Every target that
  *  runs the shared cascade uses the same reference, so one `.rose` tree paints
  *  the same branch on a phone emulator and on a desktop window. */
@@ -222,6 +222,11 @@ interface JavaStyle {
   background: string;
   padding: number;
   bold: boolean;
+  /** R407: the font slant and the two text decorations, which Swing draws
+   *  through Font.ITALIC and the label's HTML view. */
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
   align: string;
   /** A CSS generic family that maps onto a JDK logical font name. */
   fontName: string;
@@ -235,6 +240,8 @@ interface JavaStyle {
   margin?: [number, number, number, number];
   /** R257: the unitless line-height multiplier a label applies to its font. */
   lineHeight?: number;
+  /** R419: CSS letter-spacing in px, applied as glyph tracking. */
+  letterSpacing?: number;
   /** R257: a linear gradient (angle in degrees, stops as `at:colour`) when the
    *  background asked for one - a GradientPaint paints it. */
   gradient?: { angle: number; stops: Array<{ at: number; color: string }> };
@@ -286,6 +293,9 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
     // per-edge call below, so `padding: 1rem 2rem` no longer paints 16 sides.
     padding: m.padding ? Math.round(m.padding[0]) : 0,
     bold: (m.fontWeight ?? 0) >= 700,
+    italic: m.italic === true,
+    underline: m.underline === true,
+    strike: m.strike === true,
     align: m.textAlign === 'center' ? 'center' : m.textAlign === 'right' || m.textAlign === 'justify' ? 'right' : 'left',
     // The JDK's five logical font names are always available; a custom family
     // would need the font installed on the host.
@@ -301,6 +311,7 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
   // keeps its 32-top/0-everywhere-else shape.
   if (m.margin) out.margin = m.margin.map((v) => Math.round(v)) as [number, number, number, number];
   if (m.lineHeight !== undefined && m.lineHeight !== 1) out.lineHeight = m.lineHeight;
+  if (m.letterSpacing !== undefined) out.letterSpacing = m.letterSpacing;
   if (m.gradient) {
     out.gradient = { angle: Math.round(m.gradient.angle), stops: m.gradient.stops.map((s) => ({ at: s.at, color: '#' + hexOf(s.color) })) };
   } else if (m.background && m.background.includes('gradient')) {
@@ -337,9 +348,9 @@ function javaStyleOf(m: StyleModel, tag?: string): JavaStyle {
 
 const sameJavaStyle = (a: JavaStyle, b: JavaStyle): boolean =>
   a.fontSize === b.fontSize && a.color === b.color && a.background === b.background && a.padding === b.padding
-  && a.bold === b.bold && a.align === b.align && a.fontName === b.fontName && a.borderColor === b.borderColor && a.borderWidth === b.borderWidth
+  && a.bold === b.bold && a.italic === b.italic && a.underline === b.underline && a.strike === b.strike && a.align === b.align && a.fontName === b.fontName && a.borderColor === b.borderColor && a.borderWidth === b.borderWidth
   && JSON.stringify(a.pad ?? '') === JSON.stringify(b.pad ?? '') && JSON.stringify(a.flex ?? '') === JSON.stringify(b.flex ?? '')
-  && a.fade === b.fade && a.lineHeight === b.lineHeight && a.grow === b.grow && a.shrink === b.shrink && a.basis === b.basis && a.zIndex === b.zIndex
+  && a.fade === b.fade && a.lineHeight === b.lineHeight && a.letterSpacing === b.letterSpacing && a.grow === b.grow && a.shrink === b.shrink && a.basis === b.basis && a.zIndex === b.zIndex
   && JSON.stringify(a.margin ?? '') === JSON.stringify(b.margin ?? '') && JSON.stringify(a.gradient ?? '') === JSON.stringify(b.gradient ?? '')
   && JSON.stringify(a.shadow ?? '') === JSON.stringify(b.shadow ?? '') && JSON.stringify(a.minSize ?? '') === JSON.stringify(b.minSize ?? '')
   && JSON.stringify(a.maxSize ?? '') === JSON.stringify(b.maxSize ?? '') && JSON.stringify(a.radius ?? '') === JSON.stringify(b.radius ?? '');
@@ -350,6 +361,11 @@ const sameJavaStyle = (a: JavaStyle, b: JavaStyle): boolean =>
 function styleTail(s: JavaStyle): string {
   let out = '';
   if (s.pad) out += `.pad(${s.pad.join(', ')})`;
+  // R407: the browser's inline-tag defaults (em/i lean, u underlines, s/del
+  // strike) reach Swing through three flags, not three constructor args.
+  if (s.italic) out += '.italic()';
+  if (s.underline) out += '.underline()';
+  if (s.strike) out += '.strike()';
   if (s.flex) out += `.flex("${s.flex.direction}", ${s.flex.gap}, "${s.flex.justify}", "${s.flex.items}")`;
   if (s.fade !== undefined) out += `.fade(${s.fade})`;
   if (s.size) out += `.size(${s.size.join(', ')})`;
@@ -357,6 +373,7 @@ function styleTail(s: JavaStyle): string {
   // constructor arity stays the shape gate's business.
   if (s.margin) out += `.margin(${s.margin.join(', ')})`;
   if (s.lineHeight !== undefined) out += `.leading(${s.lineHeight})`;
+  if (s.letterSpacing !== undefined) out += `.tracking(${s.letterSpacing})`;
   if (s.gradient) out += `.gradient(${s.gradient.angle}, new String[]{ ${s.gradient.stops.map((st) => `"${st.at}:${st.color}"`).join(', ')} })`;
   if (s.shadow) out += `.shadow(${s.shadow.x}, ${s.shadow.y}, ${s.shadow.blur}, ${s.shadow.spread}, "${s.shadow.color}")`;
   if (s.minSize) out += `.minSize(${s.minSize.join(', ')})`;
@@ -400,12 +417,8 @@ function warnJavaDrops(css: string, warnings: string[]): void {
     if (/is not a single class|@media guard|:hover half/.test(w)) continue;
     warnings.push(w);
   }
-  // Two declarations the cascade resolves and Swing genuinely cannot draw. They
-  // are named once per file rather than disappearing with the rest of the rule.
-  // R257: box-shadow is drawn now (the shadow rings in the theme's border), so
-  // only the glyph spacing stays on the cannot-do list.
-  const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  if (/letter-spacing\s*:/.test(body)) warnings.push('java: letter-spacing has no Swing glyph equivalent - dropped');
+  // R419: letter-spacing is drawn now (glyph tracking), and box-shadow was
+  // already painted by the theme's shadow ring - nothing here is a drop.
 }
 
 /** The sheet of the file being emitted: the site's theme first, then its own
@@ -625,6 +638,19 @@ public final class RoseTheme {
         public String shadowColor;
         /** R257: the unitless line-height multiplier. */
         public double lineHeight = 1;
+        /** R419: glyph tracking in px (CSS letter-spacing). */
+        public double tracking;
+        /** R407: the browser's inline-tag defaults - a lean, an underline, a
+         *  strike - applied by the font and the label's HTML view. */
+        public boolean italic, underline, strike;
+
+        public Style tracking(double value) { this.tracking = value; return this; }
+
+        public Style italic() { this.italic = true; return this; }
+
+        public Style underline() { this.underline = true; return this; }
+
+        public Style strike() { this.strike = true; return this; }
 
         public Style pad(int top, int right, int bottom, int left) {
             this.padTop = top; this.padRight = right; this.padBottom = bottom; this.padLeft = left;
@@ -1063,18 +1089,30 @@ ${rows || '        // no style rules'}
             widget.setFont(widget.getFont().deriveFont((float) (px > 0 ? px : 14)));
         } else if (prop.equals("font-weight")) {
             boolean bold = v.equals("bold") || v.equals("bolder") || decimal(v.replaceAll("[^0-9.]", "")) >= 700;
-            widget.setFont(widget.getFont().deriveFont(bold ? Font.BOLD : Font.PLAIN));
+            int style = widget.getFont().getStyle();
+            widget.setFont(widget.getFont().deriveFont(bold ? (style | Font.BOLD) : (style & ~Font.BOLD)));
+        } else if (prop.equals("font-style")) {
+            // R409: a live style:font-style binding keeps the weight it found.
+            int style = widget.getFont().getStyle();
+            widget.setFont(widget.getFont().deriveFont(v.contains("italic") || v.contains("oblique") ? (style | Font.ITALIC) : (style & ~Font.ITALIC)));
         } else if (prop.equals("opacity")) widget.setAlpha((float) Math.max(0, Math.min(1, decimal(v.replaceAll("[^0-9.]", "")))));
         else if (prop.equals("display") || prop.equals("visibility")) widget.setVisible(!v.equals("none") && !v.equals("hidden"));
     }
 
     private static void applyLabelColors(JComponent widget, Style style) {
         widget.setForeground(color(style.color));
-        widget.setFont(new Font(style.fontName, style.bold ? Font.BOLD : Font.PLAIN, style.fontSize));
+        int fontStyle = (style.bold ? Font.BOLD : Font.PLAIN) | (style.italic ? Font.ITALIC : Font.PLAIN);
+        widget.setFont(new Font(style.fontName, fontStyle, style.fontSize));
         if (style.alpha < 1) widget.setAlpha((float) style.alpha);
         // R257: line-height scales the font, the same way a label takes it.
         if (style.lineHeight != 1) {
             widget.setFont(widget.getFont().deriveFont((float) (widget.getFont().getSize2D() * style.lineHeight)));
+        }
+        // R419: CSS letter-spacing is Swing's glyph tracking (em units).
+        if (style.tracking != 0) {
+            java.util.Map<java.awt.font.TextAttribute, Object> attrs = new java.util.HashMap<>();
+            attrs.put(java.awt.font.TextAttribute.TRACKING, style.tracking / Math.max(1, style.fontSize));
+            widget.setFont(widget.getFont().deriveFont(attrs));
         }
         widget.putClientProperty("rosezm.style", style);
     }
@@ -1272,10 +1310,23 @@ ${rows || '        // no style rules'}
     }
 
     public static JLabel label(String text, Style style) {
-        JLabel label = new JLabel(text);
+        JLabel label = new JLabel(style == null ? text : decorate(text, style));
         if (style != null) applyLabel(label, style);
         label.setAlignmentX(Component.LEFT_ALIGNMENT);
         return label;
+    }
+
+    /** R407: Swing draws underline, strikethrough and multi-line text through
+     *  its HTML view; a plain JLabel is single-line and collapses spaces. */
+    private static String decorate(String text, Style style) {
+        boolean multiline = text.indexOf('\\n') >= 0;
+        if (!style.underline && !style.strike && !multiline) return text;
+        String esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\\n", "<br>");
+        // A pre keeps its indentation and does not wrap: HTML would do both.
+        if (multiline) esc = esc.replace(" ", "&nbsp;");
+        String body = style.underline && style.strike ? "<u><strike>" + esc + "</strike></u>"
+            : style.underline ? "<u>" + esc + "</u>" : style.strike ? "<strike>" + esc + "</strike>" : esc;
+        return "<html>" + body + "</html>";
     }
     /** Swing renders HTML in a JLabel natively - {@html} content needs no
      *  translation, only the html wrapper the widget requires. */
@@ -1293,6 +1344,49 @@ ${rows || '        // no style rules'}
       if (style != null) applyLabel(label, style);
       label.setAlignmentX(Component.LEFT_ALIGNMENT);
       return label;
+    }
+
+    /** One styled run of a flowing line. */
+    public static final class Run {
+        public final String text;
+        public final Style style;
+
+        public Run(String text, Style style) {
+            this.text = text;
+            this.style = style;
+        }
+    }
+
+    /** A line of inline runs: Swing flows a bold word inside one paragraph
+     *  through its HTML view, not a stack of labels. */
+    public static JLabel richLabel(Run... runs) {
+        StringBuilder html = new StringBuilder("<html>");
+        for (Run run : runs) {
+            String text = run.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\\n", "<br>");
+            Style s = run.style;
+            if (s != null) {
+                if (s.underline) text = "<u>" + text + "</u>";
+                if (s.strike) text = "<strike>" + text + "</strike>";
+                if (s.italic) text = "<i>" + text + "</i>";
+                if (s.bold) text = "<b>" + text + "</b>";
+                if ("Monospaced".equals(s.fontName)) text = "<tt>" + text + "</tt>";
+                text = "<font color=\"" + s.color + "\">" + text + "</font>";
+            }
+            html.append(text);
+        }
+        html.append("</html>");
+        JLabel label = new JLabel(html.toString());
+        if (runs.length > 0 && runs[0].style != null) {
+            applyLabel(label, runs[0].style);
+            // A styled paragraph keeps its fill: the label is the paragraph now.
+            Style base = runs[0].style;
+            if (base.background != null && !base.background.isEmpty()) {
+                label.setOpaque(true);
+                label.setBackground(color(base.background));
+            }
+        }
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return label;
     }
 
     public static void applyLabel(JLabel label, Style style) {
@@ -1358,7 +1452,10 @@ ${rows || '        // no style rules'}
      *  look-and-feel defaults. */
     public static JButton button(JPanel parent, String text, Style style, ActionListener onClick) {
         JButton button = button(parent, text, onClick);
-        if (style != null) applyButton(button, style);
+        if (style != null) {
+            applyButton(button, style);
+            button.setText(decorate(text, style));
+        }
         return button;
     }
 
@@ -1390,6 +1487,7 @@ ${rows || '        // no style rules'}
         JButton button = link(parent, text, onClick);
         if (style != null) {
             applyLabelColors(button, style);
+            button.setText(decorate(text, style));
             int[] inset = style.insets();
             if (inset[0] > 0 || inset[1] > 0 || inset[2] > 0 || inset[3] > 0) {
                 button.setBorder(new EmptyBorder(inset[0], inset[1], inset[2], inset[3]));
@@ -2799,13 +2897,43 @@ function varTyped(init: string): boolean {
 function javaText(nodes: IrNode[], ctx: JavaCtx): string {
   const parts: string[] = [];
   for (const n of nodes) {
-    if (n.kind === 'text') parts.push(JSON.stringify(n.value.replace(/\s+/g, ' ')));
+    if (n.kind === 'text') parts.push(JSON.stringify(n.preserve ? n.value : n.value.replace(/\s+/g, ' ')));
     else if (n.kind === 'expr') parts.push(`RoseTheme.text(${javaExpr(n.code, ctx)})`);
   }
   if (!parts.length) return '';
   if (parts.length === 1) return parts[0];
   const first = parts[0].startsWith('"') ? parts[0] : `"" + ${parts[0]}`;
   return [first, ...parts.slice(1)].join(' + ');
+}
+
+/** Inline formatting tags that may flow inside a text tag. */
+const JAVA_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into RoseTheme.Run expressions, or null
+ *  when a child is not inline text or carries a runtime-bound style. */
+function javaInlineRuns(children: IrNode[], ctx: JavaCtx, base: StyleModel): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`new RoseTheme.Run(${javaText([c], ctx) || '""'}, ${styleLiteral(base)})`);
+      continue;
+    }
+    if (c.kind !== 'element' || !JAVA_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    if (binding.hasDynamic) return null;
+    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const own = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    ctx.ancestors.push(subject);
+    let inner: string[] | null;
+    try {
+      inner = javaInlineRuns(c.children, ctx, mergeModels(base, own));
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
 }
 
 function emitNode(node: IrNode, ctx: JavaCtx): void {
@@ -3057,6 +3185,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     }
     emit(`${comp.cls}View.build(${ctx.app}, ${ctx.parent}${args.length ? ', ' + args.join(', ') : ''}${slotArgs.length ? ', ' + slotArgs.join(', ') : ''});`, ctx);
     return;
+  }
+  if (TEXT_TAGS.has(tag) && !styleBinding.hasDynamic && node.children.some((c) => c.kind === 'element' && JAVA_INLINE.has(c.tag.toLowerCase()))) {
+    // A paragraph with inline tags is ONE flowing line: one JLabel HTML view,
+    // not a stack of labels.
+    const runs = javaInlineRuns(node.children, ctx, styled.model);
+    if (runs && runs.length) {
+      emit(`${ctx.parent}.add(RoseTheme.richLabel(${runs.join(', ')}));`, ctx);
+      return;
+    }
   }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = javaCase(javaText(node.children, ctx) || '""', styled.model.textTransform);

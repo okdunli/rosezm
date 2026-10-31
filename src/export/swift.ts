@@ -60,7 +60,7 @@ export interface EmitSwiftOptions {
 
 const APP = 'rosezmApp';
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
@@ -448,7 +448,11 @@ function swiftTextModsOf(model: StyleModel, fontMap: Map<string, string>): strin
   if (model.fontSize !== undefined || model.fontFamily) {
     const size = n(model.fontSize ?? 16);
     const custom = model.fontFamily ? fontMap.get(model.fontFamily) : undefined;
-    out.push(custom ? `.font(.custom(${JSON.stringify(model.fontFamily)}, size: ${size}))` : `.font(.system(size: ${size}))`);
+    // A generic family is a design, not a face name: `.custom("monospace")`
+    // falls back to the body font on iOS, so the code tag rendered plain.
+    const generic = model.fontFamily && /^(serif|monospace|sans-serif)$/i.test(model.fontFamily) ? model.fontFamily.toLowerCase() : '';
+    const design = generic === 'monospace' ? ', design: .monospaced' : generic === 'serif' ? ', design: .serif' : '';
+    out.push(custom ? `.font(.custom(${JSON.stringify(model.fontFamily)}, size: ${size}))` : `.font(.system(size: ${size}${design}))`);
   }
   if (model.fontWeight !== undefined) out.push(`.fontWeight(${swiftWeightOf(model.fontWeight)})`);
   if (model.italic) out.push('.italic()');
@@ -456,6 +460,9 @@ function swiftTextModsOf(model: StyleModel, fontMap: Map<string, string>): strin
   if (model.underline) out.push('.underline()');
   if (model.strike) out.push('.strikethrough()');
   if (model.textAlign) out.push(`.multilineTextAlignment(${SWIFT_TEXT_ALIGN[model.textAlign] ?? '.leading'})`);
+  // R415: one line with a tail ellipsis - SwiftUI's own truncation pair.
+  if (model.ellipsis) out.push('.lineLimit(1).truncationMode(.tail)');
+  else if (model.nowrap) out.push('.lineLimit(1)');
   if (model.lineHeight !== undefined && model.fontSize !== undefined && model.lineHeight > 1) {
     out.push(`.lineSpacing(${n(Math.round((model.fontSize * model.lineHeight - model.fontSize) * 10) / 10)})`);
   }
@@ -492,6 +499,8 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
   }
   if (model.shadow) out.push(`.shadow(color: Color.rose(${JSON.stringify(hexOf(model.shadow.color))}), radius: ${n(model.shadow.blur)}, x: ${n(model.shadow.x)}, y: ${n(model.shadow.y)})`);
   if (model.opacity !== undefined) out.push(`.opacity(${n(model.opacity)})`);
+  // R420: CSS aspect-ratio is SwiftUI's own aspectRatio modifier.
+  if (model.aspectRatio !== undefined) out.push(`.aspectRatio(${n(model.aspectRatio)}, contentMode: .fit)`);
   if (model.width && model.width.u !== 'auto') {
     out.push(model.width.u === '%' ? '.frame(maxWidth: .infinity)' : `.frame(width: ${n(model.width.n)})`);
   }
@@ -808,7 +817,12 @@ func roseEdges(_ e: [Double]?) -> EdgeInsets {
 func roseFontOf(_ s: RoseStyle?) -> Font? {
     guard let s = s, s.fontSize != nil || s.fontFamily != nil else { return nil }
     let size = CGFloat(s.fontSize ?? 16)
-    if let f = s.fontFamily { return .custom(f, size: size) }
+    if let f = s.fontFamily {
+        if f == "monospace" { return .system(size: size, design: .monospaced) }
+        if f == "serif" { return .system(size: size, design: .serif) }
+        if f == "sans-serif" { return .system(size: size) }
+        return .custom(f, size: size)
+    }
     return .system(size: size)
 }
 
@@ -2359,13 +2373,18 @@ function emitScoped(nodes: IrNode[], ctx: SwiftCtx): void {
   ctx.constAlias = saved;
 }
 
-function textOf(nodes: IrNode[], ctx: SwiftCtx): string {
+function textOf(nodes: IrNode[], ctx: SwiftCtx, trim = true): string {
   let out = '';
   for (const n of nodes) {
-    if (n.kind === 'text') out += n.value.replace(/\s+/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (n.kind === 'text') {
+      let raw = n.preserve ? n.value : n.value.replace(/\s+/g, ' ');
+      raw = raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      // A SwiftUI Text carries the line breaks of a <pre> as \n escapes.
+      out += n.preserve ? raw.replace(/\r?\n|\r/g, '\\n').replace(/\t/g, '\\t') : raw;
+    }
     else if (n.kind === 'expr') out += '\\(' + swiftExpr(n.code, ctx) + ')';
   }
-  out = out.trim();
+  if (trim) out = out.trim();
   if (!out) return '';
   return '"' + out + '"';
 }
@@ -2585,6 +2604,42 @@ function activeVarName(activeKey: string): string {
   return '__pressed' + activeKey.replace(/[^\w$]/g, '_');
 }
 
+/** Inline formatting tags that may flow inside a text tag. */
+const SWIFT_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Text-returning SwiftUI modifiers only: Text + Text concatenation needs both
+ *  sides to stay Text, and textAlign/lineSpacing return some View. */
+function swiftInlineMods(model: StyleModel, fontMap: Map<string, string>): string[] {
+  return swiftTextModsOf(model, fontMap).filter((m) => !/^\.(multilineTextAlignment|lineSpacing|lineLimit)\(/.test(m));
+}
+
+/** Flatten a text tag's inline children into Text operands, or null when a
+ *  child is not inline text or carries a runtime-bound style (concatenation
+ *  cannot take a View modifier). */
+function swiftInlineRuns(children: IrNode[], ctx: SwiftCtx, mods: string[]): Array<{ text: string; mods: string[] }> | null {
+  const runs: Array<{ text: string; mods: string[] }> = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push({ text: textOf([c], ctx, false), mods });
+      continue;
+    }
+    if (c.kind !== 'element' || !SWIFT_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    const child = swiftStyleOf(c, binding, ctx);
+    if (child.expr) return null;
+    ctx.ancestors.push({ tag: c.tag.toLowerCase(), classes: binding.staticClasses });
+    let inner: Array<{ text: string; mods: string[] }> | null;
+    try {
+      inner = swiftInlineRuns(c.children, ctx, [...mods, ...swiftInlineMods(child.model, ctx.fontMap)]);
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
 function emitElementStyled(
   node: Extract<IrNode, { kind: 'element' }>,
   ctx: SwiftCtx,
@@ -2681,6 +2736,16 @@ function emitElementStyled(
     emit(`${comp.view}(\n${all}\n${pad})`, ctx);
     return;
   }
+  if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && SWIFT_INLINE.has(c.tag.toLowerCase()))) {
+    // "a <strong>b</strong> c" is one flowing line on the web; Text + Text is
+    // the one SwiftUI spelling that keeps it a single paragraph.
+    const runs = swiftInlineRuns(node.children, ctx, []);
+    if (runs && runs.length) {
+      const concat = runs.map((r) => `Text(${r.text})${r.mods.join('')}`).join(' + ');
+      emitTextRun(`${runs.length > 1 ? `(${concat})` : concat}${[...textMods, ...boxMods].join('')}`, inlineConsts(node.children), ctx);
+      return;
+    }
+  }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = textOf(node.children, ctx);
     // The box half travels with the text half: padding/background/opacity on a
@@ -2717,9 +2782,27 @@ function emitElementStyled(
     const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
     const label = alt ? `.accessibilityLabel(${JSON.stringify(alt)})` : '';
     const asset = ctx.assets.get(url);
-    if (asset) { emit(`Image(${JSON.stringify(asset)}).resizable().scaledToFit().frame(width: 72)${label}${boxMods.join('')}`, ctx); return; }
+    // R418: object-fit picks the SwiftUI content mode; cover clips the overflow.
+    const fitModel = model;
+    const fitChain = fitModel.objectFit === 'cover' ? '.resizable().scaledToFill().clipped()'
+      : fitModel.objectFit === 'fill' ? '.resizable()'
+      : '.resizable().scaledToFit()';
+    if (asset) { emit(`Image(${JSON.stringify(asset)})${fitChain}.frame(width: 72)${label}${boxMods.join('')}`, ctx); return; }
     const shape = ctx.vectors.get(url);
     if (shape) { emit(`${swiftVectorExpr(shape)}${label}${boxMods.join('')}`, ctx); return; }
+    // R416: a remote (or site-relative) image loads at runtime instead of
+    // collapsing to a placeholder - AsyncImage is SwiftUI's own loader.
+    if (url) {
+      const source = /^https?:\/\//i.test(url)
+        ? `URL(string: ${JSON.stringify(url)})`
+        : `(roseApiBase.isEmpty ? nil : URL(string: roseApiBase + ${JSON.stringify(url)}))`;
+      emit(`AsyncImage(url: ${source}) { phase in
+          if let image = phase.image { image${fitChain} }
+          else if phase.error != nil { Image(systemName: "photo") }
+          else { ProgressView() }
+      }.frame(width: 72)${label}${boxMods.join('')}`, ctx);
+      return;
+    }
     emit(`Image(systemName: "photo")${label}${boxMods.join('')}`, ctx);
     return;
   }

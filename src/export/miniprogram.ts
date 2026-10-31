@@ -1764,6 +1764,11 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       else if (lit) styles.push(`${cssPropOf(ent.key)}:${escapeAttr(lit)}`);
     }
   };
+  // A table row is a horizontal strip: WXML has no table layout, so the row is
+  // a flex box (cells side by side) unless the page styled it itself.
+  if (node.tag.toLowerCase() === 'tr' && !node.attrs.some((a) => a.name.toLowerCase() === 'style')) {
+    styles.push('display:flex');
+  }
   for (const attr of node.attrs) {
     const name = attr.name;
     const low = name.toLowerCase();

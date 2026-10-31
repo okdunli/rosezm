@@ -42,7 +42,7 @@ export interface EmitCppOptions {
 }
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 /** The viewport an @media-guarded rule is decided at - the phone width the web
  *  build's base theme targets, and the same reference every sibling emitter uses. */
 const REFERENCE_WIDTH = 390;
@@ -259,6 +259,21 @@ interface CppStyle {
   maxHeight: number;
   /** R257: the sibling stacking order (CSS z-index). */
   zIndex: number;
+  /** R414: the four corner radii, tl/tr/br/bl in px - QSS paints them. */
+  radiusTl: number;
+  radiusTr: number;
+  radiusBr: number;
+  radiusBl: number;
+  /** R414: CSS letter-spacing in px - QFont::AbsoluteSpacing carries it. */
+  letterSpacing: number;
+  /** R414: box-shadow x/y/blur; Qt's effect has no spread. */
+  shadowX: number;
+  shadowY: number;
+  shadowBlur: number;
+  shadowColor: string;
+  /** R415: white-space: nowrap / text-overflow: ellipsis. */
+  nowrap: boolean;
+  ellipsis: boolean;
 }
 
 /** R225: an out-of-flow model contributes its offset; anything else stays put. */
@@ -357,10 +372,6 @@ function warnCppDrops(css: string, warnings: string[]): void {
     if (/is not a single class|@media guard|:hover half/.test(w)) continue;
     warnings.push(w);
   }
-  // Two declarations the cascade resolves and Qt genuinely cannot draw.
-  const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  if (/letter-spacing\s*:/.test(body)) warnings.push('cpp: letter-spacing has no Qt glyph equivalent - dropped');
-  if (/box-shadow\s*:/.test(body)) warnings.push('cpp: box-shadow has no Qt equivalent - the widget paints flat');
 }
 
 /** The sheet of the file being emitted: the site's theme, then its own `<style>`,
@@ -419,6 +430,17 @@ function cppStyleOf(m: StyleModel): CppStyle {
     minHeight: m.minHeight && m.minHeight.u === 'px' ? Math.round(m.minHeight.n) : 0,
     maxHeight: m.maxHeight && m.maxHeight.u === 'px' ? Math.round(m.maxHeight.n) : 0,
     zIndex: m.zIndex ?? 0,
+    radiusTl: Math.round(m.radius?.[0] ?? 0),
+    radiusTr: Math.round(m.radius?.[1] ?? 0),
+    radiusBr: Math.round(m.radius?.[2] ?? 0),
+    radiusBl: Math.round(m.radius?.[3] ?? 0),
+    letterSpacing: m.letterSpacing ?? 0,
+    shadowX: m.shadow ? Math.round(m.shadow.x) : 0,
+    shadowY: m.shadow ? Math.round(m.shadow.y) : 0,
+    shadowBlur: m.shadow ? Math.round(m.shadow.blur) : 0,
+    shadowColor: m.shadow ? m.shadow.color : '',
+    nowrap: m.nowrap === true,
+    ellipsis: m.ellipsis === true,
   };
 }
 
@@ -440,7 +462,7 @@ function qssGradient(g: { angle: number; stops: Array<{ at: number; color: Color
  *  table row could not (a descendant rule, an inherited colour, style=""). */
 function cppStyleLiteral(m: StyleModel): string {
   const s = cppStyleOf(m);
-  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}}`;
+  return `RoseStyle{${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, "${s.fontFamily}", "${s.borderColor}", ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, "${s.direction}", ${s.gap}, "${s.justify}", "${s.items}", ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}}`;
 }
 
 /** The typography a container hands its children: Qt has no CSS inheritance, so
@@ -455,29 +477,13 @@ function textCarry(m: StyleModel): StyleModel | null {
   if (m.strike !== undefined) out.strike = m.strike;
   if (m.fontFamily !== undefined) out.fontFamily = m.fontFamily;
   if (m.textTransform !== undefined) out.textTransform = m.textTransform;
+  // CSS inherits letter-spacing; a container hands it down like colour.
+  if (m.letterSpacing !== undefined) out.letterSpacing = m.letterSpacing;
   return isEmptyModel(out) ? null : out;
 }
 
-/** What the cascade resolved and Qt genuinely cannot draw, named once per
- *  element - never a silent drop, and never a warning about a construct the
- *  engine does carry. */
-function noteCppUnsupported(model: StyleModel, binding: ElementStyleBinding, node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): void {
-  const who = binding.staticClasses.length ? `<${node.tag} class="${binding.staticClasses.join(' ')}">` : `<${node.tag}>`;
-  if (model.letterSpacing !== undefined) ctx.warnings.push(`cpp: letter-spacing on ${who} - Qt has no glyph-level tracking, dropped`);
-  if (model.shadow) ctx.warnings.push(`cpp: box-shadow on ${who} - Qt widgets paint flat, dropped`);
-  if (model.radius !== undefined) {
-    // R257: name the radius the user wrote - "6px" or "12px" is the difference
-    // between a real review of what is lost and a shrug. Edge is a list of
-    // px numbers (per-corner, tl/tr/br/bl).
-    const radii = [...new Set(model.radius.map((n) => `${n}px`))];
-    ctx.warnings.push(`cpp: border-radius on ${who} - Qt widgets are rectangular, the ${radii.join('/')} corner stays square`);
-  }
-  // R221: the dynamic half is resolved at runtime by rose_resolve/rose_apply_prop,
-  // so a bound class or style:prop is no longer a drop.
-}
-
 function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
-  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}}},`).join('\n');
+  const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}}},`).join('\n');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, which return raw JSON the same way
@@ -545,6 +551,7 @@ RoseValue rose_native(const std::string& capability, const RoseValue& options);
 #include <QNetworkRequest>
 #include <QFont>
 #include <QGraphicsOpacityEffect>
+#include <QGraphicsDropShadowEffect>
 #include <QLabel>
 #include <QPaintEvent>
 #include <QPixmap>
@@ -685,6 +692,14 @@ struct RoseStyle {
     int min_width = 0, max_width = 0, min_height = 0, max_height = 0;
     /// R257: the sibling stacking order (CSS z-index).
     int z_index = 0;
+    /// R414: the four corner radii, tl/tr/br/bl in px - QSS paints them.
+    int radius_tl = 0, radius_tr = 0, radius_br = 0, radius_bl = 0;
+    /// R414: CSS letter-spacing (px) and the box-shadow Qt's effect can paint.
+    double letter_spacing = 0;
+    int shadow_x = 0, shadow_y = 0, shadow_blur = 0;
+    std::string shadow_color;
+    /// R415: one line (nowrap); QLabel clips without an ellipsis.
+    bool nowrap = false, ellipsis = false;
 
     bool is_flex() const { return !direction.empty(); }
     /// The insets, the uniform shorthand folded into the scalar.
@@ -696,6 +711,13 @@ struct RoseStyle {
     bool has_margin() const { return margin_top != 0 || margin_right != 0 || margin_bottom != 0 || margin_left != 0; }
     /// True when any px constraint or size is set.
     bool has_constraints() const { return width > 0 || height > 0 || min_width > 0 || max_width > 0 || min_height > 0 || max_height > 0; }
+};
+
+/// One styled run of a flowing line: inline tags stay in one QLabel instead of
+/// stacking as separate widgets.
+struct RoseRun {
+    RoseStyle style;
+    std::string text;
 };
 
 /** A vector image: absolute M/L/C/Z path data (already in box coordinates),
@@ -859,12 +881,14 @@ RoseStyle rose_resolve(const std::vector<std::string>& classes, const std::strin
 RoseStyle rose_apply_prop(const RoseStyle& style, const std::string& prop, const std::string& value);
 QLabel* rose_label(QWidget* parent, const std::string& text, const std::string& className);
 QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::string& className);
+QLabel* rose_rich_label(QWidget* parent, const std::vector<RoseRun>& runs, const RoseStyle& style = RoseStyle{});
 QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{}, bool enabled = true);
 QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style = RoseStyle{});
 QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& app, const std::string& key, const RoseStyle& style = RoseStyle{}, bool enabled = true, int maxLength = 0, bool password = false);
 QSlider* rose_slider(QWidget* parent, RoseApp& app, const std::string& key, int min, int max);
 QWidget* rose_spacer(QWidget* parent, int height);
 QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& style = RoseStyle{});
+QLabel* rose_remote_image(QWidget* parent, const std::string& url, const RoseStyle& style = RoseStyle{});
 RoseVector* rose_vector(QWidget* parent, const std::vector<std::string>& fills, const std::vector<std::string>& data);
 QCheckBox* rose_checkbox(QWidget* parent, const std::string& text, bool checked, std::function<void(bool)> onChange);
 QRadioButton* rose_radio(QWidget* parent, const std::string& text, const std::string& value, const std::string& current, std::function<void(std::string)> onSelect);
@@ -1027,6 +1051,42 @@ ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `#in
 ` : ''}
 #include <regex>
 #include <sstream>
+
+/// A QSS colour: the compiled table stores "#rrggbb", a dynamic style:prop may
+/// store a bare hex or a CSS name - exactly one hash belongs in front.
+static std::string rose_css_color(const std::string& value) {
+    if (value.empty() || value[0] == '#') return value;
+    if (value.rfind("rgb", 0) == 0 || value.rfind("hsl", 0) == 0) return value;
+    bool hex = true;
+    for (char c : value) {
+        if (!std::isxdigit(static_cast<unsigned char>(c))) { hex = false; break; }
+    }
+    return hex ? "#" + value : value;
+}
+
+/// The QSS corner block: a uniform radius is one property, a split one is four.
+static std::string rose_radius_qss(const RoseStyle& style) {
+    if (style.radius_tl <= 0 && style.radius_tr <= 0 && style.radius_br <= 0 && style.radius_bl <= 0) return "";
+    if (style.radius_tl == style.radius_tr && style.radius_tr == style.radius_br && style.radius_br == style.radius_bl) {
+        return "border-radius: " + std::to_string(style.radius_tl) + "px;";
+    }
+    return "border-top-left-radius: " + std::to_string(style.radius_tl) + "px;"
+        + "border-top-right-radius: " + std::to_string(style.radius_tr) + "px;"
+        + "border-bottom-right-radius: " + std::to_string(style.radius_br) + "px;"
+        + "border-bottom-left-radius: " + std::to_string(style.radius_bl) + "px;";
+}
+
+/// R414: CSS box-shadow through Qt's drop-shadow effect. spread has no Qt
+/// equivalent; blur carries the softness. shortcut: no spread, upgrade to a
+/// nine-patch when a design depends on an exact spread.
+static void rose_apply_shadow(QWidget* widget, const RoseStyle& style) {
+    if (style.shadow_blur <= 0 && style.shadow_x == 0 && style.shadow_y == 0) return;
+    auto* shadow = new QGraphicsDropShadowEffect(widget);
+    shadow->setBlurRadius(style.shadow_blur);
+    shadow->setOffset(style.shadow_x, style.shadow_y);
+    shadow->setColor(QColor(QString::fromStdString(rose_css_color(style.shadow_color))));
+    widget->setGraphicsEffect(shadow);
+}
 
 // --- RoseValue views (JSON text, no recursive variant needed) --------------------
 namespace {
@@ -1569,10 +1629,13 @@ void rose_apply_box(QWidget* widget, const RoseStyle& style) {
     // merge), so a border overwrote a fill.
     std::string sheet;
     if (!style.gradient.empty()) sheet += "background: " + style.gradient + ";";
-    else if (!style.background.empty()) sheet += "background: #" + style.background + ";";
+    else if (!style.background.empty()) sheet += "background: " + rose_css_color(style.background) + ";";
     if (style.border_width > 0 && !style.border_color.empty()) {
-        sheet += "border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";";
+        sheet += "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";";
     }
+    // R414: the corner radius the CSS asked for - QSS paints it on the fill and
+    // the border together, so a card is no longer a square.
+    sheet += rose_radius_qss(style);
     if (!sheet.empty()) widget->setStyleSheet(QString::fromStdString(sheet));
     if (auto* box = qobject_cast<QBoxLayout*>(widget->layout())) {
         // R257: the QSS box model has two halves - padding is inside the border
@@ -1586,11 +1649,13 @@ void rose_apply_box(QWidget* widget, const RoseStyle& style) {
         // A non-layout box: the margin still reaches the widget through QSS,
         // which owns the outer half of the box model for plain QWidget.
         widget->setStyleSheet(QString::fromStdString(
-            (style.background.empty() && style.gradient.empty() ? "" : (style.gradient.empty() ? "background: #" + style.background + ";" : "background: " + style.gradient + ";"))
-            + (style.border_width > 0 && !style.border_color.empty() ? "border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";" : "")
+            (style.background.empty() && style.gradient.empty() ? "" : (style.gradient.empty() ? "background: " + rose_css_color(style.background) + ";" : "background: " + style.gradient + ";"))
+            + (style.border_width > 0 && !style.border_color.empty() ? "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";" : "")
             + "margin: " + std::to_string(style.margin_top) + "px " + std::to_string(style.margin_right) + "px "
-            + std::to_string(style.margin_bottom) + "px " + std::to_string(style.margin_left) + "px;"));
+            + std::to_string(style.margin_bottom) + "px " + std::to_string(style.margin_left) + "px;" + rose_radius_qss(style)));
     }
+    // R414: box-shadow through the shared drop-shadow helper.
+    rose_apply_shadow(widget, style);
     // R257: the px constraints - minimums/maximums keep the widget within the
     // range the CSS gave, where the R230 fixed sizes pin it exactly.
     if (style.min_width > 0) widget->setMinimumWidth(style.min_width);
@@ -1639,9 +1704,13 @@ void rose_apply_text(QLabel* label, const RoseStyle& style) {
     font.setUnderline(style.underline);
     font.setStrikeOut(style.strike);
     font.setStyleHint(rose_font_hint(style.fontFamily));
+    // R414: glyph tracking is a font property in Qt, not a stylesheet one.
+    if (style.letter_spacing != 0) font.setLetterSpacing(QFont::AbsoluteSpacing, style.letter_spacing);
     label->setFont(font);
+    // R415: one line - a QLabel's own word wrap is the switch.
+    if (style.nowrap || style.ellipsis) label->setWordWrap(false);
     std::string sheet;
-    if (!style.color.empty()) sheet += "color: #" + style.color + ";";
+    if (!style.color.empty()) sheet += "color: " + rose_css_color(style.color) + ";";
     // R257: the alignment QSS gives QLabel (text-align is QPushButton-only
     // there), the line height through rich text, and the case transform.
     if (!style.text_align.empty()) {
@@ -1665,7 +1734,10 @@ void rose_apply_text(QLabel* label, const RoseStyle& style) {
         else if (style.text_transform == "lowercase") label->setText(text.toLower());
         else if (style.text_transform == "capitalize") label->setText(rose_capitalize(text));
     }
+    // R414: a badge or pill is a rounded label, and QSS clips it.
+    sheet += rose_radius_qss(style);
     if (!sheet.empty()) label->setStyleSheet(QString::fromStdString(sheet));
+    rose_apply_shadow(label, style);
     if (style.alpha < 1.0) {
         auto* effect = new QGraphicsOpacityEffect(label);
         effect->setOpacity(style.alpha);
@@ -1812,6 +1884,18 @@ RoseStyle rose_merge_style(const RoseStyle& base, const RoseStyle& over) {
     if (over.min_height != 0) out.min_height = over.min_height;
     if (over.max_height != 0) out.max_height = over.max_height;
     if (over.z_index != 0) out.z_index = over.z_index;
+    // R414: the corner radii travel through every cascade half (hover, focus).
+    if (over.radius_tl != 0) out.radius_tl = over.radius_tl;
+    if (over.radius_tr != 0) out.radius_tr = over.radius_tr;
+    if (over.radius_br != 0) out.radius_br = over.radius_br;
+    if (over.radius_bl != 0) out.radius_bl = over.radius_bl;
+    if (over.letter_spacing != 0) out.letter_spacing = over.letter_spacing;
+    if (over.shadow_x != 0 || over.shadow_y != 0 || over.shadow_blur != 0 || !over.shadow_color.empty()) {
+        out.shadow_x = over.shadow_x; out.shadow_y = over.shadow_y;
+        out.shadow_blur = over.shadow_blur; out.shadow_color = over.shadow_color;
+    }
+    if (over.nowrap) out.nowrap = true;
+    if (over.ellipsis) out.ellipsis = true;
     return out;
 }
 
@@ -1879,11 +1963,26 @@ RoseStyle rose_apply_prop(const RoseStyle& style, const std::string& prop, const
         if (value.find("line-through") != std::string::npos) out.strike = true;
     }
     else if (prop == "line-height") { try { out.line_height = std::stod(value); } catch (...) {} }
+    else if (prop == "letter-spacing") { try { out.letter_spacing = std::stod(value); } catch (...) {} }
     else if (prop == "min-width") out.min_width = number();
     else if (prop == "max-width") out.max_width = number();
     else if (prop == "min-height") out.min_height = number();
     else if (prop == "max-height") out.max_height = number();
     else if (prop == "z-index") out.z_index = number();
+    // R414: the runtime half of the corner radius, uniform or per corner.
+    else if (prop == "border-radius") {
+        const std::vector<int> parts = edges();
+        if (!parts.empty()) {
+            out.radius_tl = out.radius_tr = out.radius_br = out.radius_bl = parts[0];
+            if (parts.size() > 1) { out.radius_tr = parts[1]; out.radius_bl = parts[1]; }
+            if (parts.size() > 2) out.radius_br = parts[2];
+            if (parts.size() > 3) out.radius_bl = parts[3];
+        }
+    }
+    else if (prop == "border-top-left-radius") out.radius_tl = number();
+    else if (prop == "border-top-right-radius") out.radius_tr = number();
+    else if (prop == "border-bottom-right-radius") out.radius_br = number();
+    else if (prop == "border-bottom-left-radius") out.radius_bl = number();
     return out;
 }
 
@@ -1936,6 +2035,31 @@ QLabel* rose_html_label(QWidget* parent, const std::string& html, const std::str
     return label;
 }
 
+/** A line of inline runs: the browser flows a bold word inside one paragraph,
+ *  and so does this QLabel - RichText spans, not a stack of labels. */
+QLabel* rose_rich_label(QWidget* parent, const std::vector<RoseRun>& runs, const RoseStyle& style) {
+    auto* label = new QLabel(parent);
+    label->setTextFormat(Qt::RichText);
+    label->setWordWrap(true);
+    rose_apply_text(label, style);
+    std::string html;
+    for (const RoseRun& run : runs) {
+        const std::string family = run.style.fontFamily == "Monospace" ? "monospace"
+            : run.style.fontFamily == "Serif" ? "serif" : "sans-serif";
+        std::string css = "font-size:" + std::to_string(run.style.fontSize) + "px;font-family:" + family + ";";
+        if (!run.style.color.empty()) css += "color:" + rose_css_color(run.style.color) + ";";
+        if (run.style.bold) css += "font-weight:700;";
+        if (run.style.italic) css += "font-style:italic;";
+        if (run.style.underline && run.style.strike) css += "text-decoration:underline line-through;";
+        else if (run.style.underline) css += "text-decoration:underline;";
+        else if (run.style.strike) css += "text-decoration:line-through;";
+        html += "<span style=\"" + css + "\">" + QString::fromStdString(run.text).toHtmlEscaped().toStdString() + "</span>";
+    }
+    label->setText(QString::fromStdString(html));
+    if (auto* outer = qobject_cast<QBoxLayout*>(parent->layout())) outer->addWidget(label);
+    return label;
+}
+
 QPushButton* rose_button(QWidget* parent, const std::string& text, std::function<void()> onClick, const RoseStyle& style, bool enabled) {
     auto* button = new QPushButton(QString::fromStdString(text));
     button->setCursor(Qt::PointingHandCursor);
@@ -1947,9 +2071,9 @@ QPushButton* rose_button(QWidget* parent, const std::string& text, std::function
     } else {
         std::string sheet;
         if (!style.gradient.empty()) sheet += "background: " + style.gradient + ";";
-        else if (!style.background.empty()) sheet += "background: #" + style.background + ";";
-        if (!style.color.empty()) sheet += "color: #" + style.color + ";";
-        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";";
+        else if (!style.background.empty()) sheet += "background: " + rose_css_color(style.background) + ";";
+        if (!style.color.empty()) sheet += "color: " + rose_css_color(style.color) + ";";
+        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";";
         sheet += "padding: " + std::to_string(style.inset_top()) + "px " + std::to_string(style.inset_right()) + "px "
             + std::to_string(style.inset_bottom()) + "px " + std::to_string(style.inset_left()) + "px;";
         // R257: the margin half of the box model, where a styled button asked.
@@ -1981,9 +2105,9 @@ QPushButton* rose_link(QWidget* parent, const std::string& text, std::function<v
     } else {
         std::string sheet = "text-align: left;";
         if (!style.gradient.empty()) sheet += "background: " + style.gradient + ";";
-        else if (!style.background.empty()) sheet += "background: #" + style.background + ";";
-        if (!style.color.empty()) sheet += "color: #" + style.color + ";";
-        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";";
+        else if (!style.background.empty()) sheet += "background: " + rose_css_color(style.background) + ";";
+        if (!style.color.empty()) sheet += "color: " + rose_css_color(style.color) + ";";
+        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";";
         sheet += "padding: " + std::to_string(style.inset_top()) + "px " + std::to_string(style.inset_right()) + "px "
             + std::to_string(style.inset_bottom()) + "px " + std::to_string(style.inset_left()) + "px;";
         if (style.fontSize != 14 || style.bold || style.italic) {
@@ -2021,9 +2145,9 @@ QLineEdit* rose_input(QWidget* parent, const std::string& placeholder, RoseApp& 
     } else {
         std::string sheet;
         if (!style.gradient.empty()) sheet += "background: " + style.gradient + ";";
-        else if (!style.background.empty()) sheet += "background: #" + style.background + ";";
-        if (!style.color.empty()) sheet += "color: #" + style.color + ";";
-        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid #" + style.border_color + ";";
+        else if (!style.background.empty()) sheet += "background: " + rose_css_color(style.background) + ";";
+        if (!style.color.empty()) sheet += "color: " + rose_css_color(style.color) + ";";
+        if (style.border_width > 0 && !style.border_color.empty()) sheet += "border: " + std::to_string(style.border_width) + "px solid " + rose_css_color(style.border_color) + ";";
         sheet += "padding: " + std::to_string(style.inset_top()) + "px " + std::to_string(style.inset_right()) + "px "
             + std::to_string(style.inset_bottom()) + "px " + std::to_string(style.inset_left()) + "px;";
         if (style.fontSize != 14 || style.bold || style.italic) {
@@ -2223,6 +2347,27 @@ QLabel* rose_image(QWidget* parent, const std::string& asset, const RoseStyle& s
     else label->setText("[image]");
     // The box half of the image's style (background, border, radius, padding)
     // now travels with the picture, like the web's border-radius on an <img>.
+    rose_apply_box(label, style);
+    if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(label);
+    return label;
+}
+
+/// R417: a remote (or site-relative) image. QNetworkAccessManager fetches it
+/// and the label swaps in the pixmap when it arrives; a slow host never blocks
+/// the page. The box style applies immediately, so the frame is right at once.
+QLabel* rose_remote_image(QWidget* parent, const std::string& url, const RoseStyle& style) {
+    auto* label = new QLabel(parent);
+    label->setText("[image]");
+    const std::string full = url.rfind("http", 0) == 0 ? url : rose_api_base() + url;
+    auto* manager = new QNetworkAccessManager(label);
+    QObject::connect(manager, &QNetworkAccessManager::finished, label, [label](QNetworkReply* reply) {
+        if (reply->error() == QNetworkReply::NoError) {
+            QPixmap pixmap;
+            if (pixmap.loadFromData(reply->readAll())) label->setPixmap(pixmap.scaledToHeight(96, Qt::SmoothTransformation));
+        }
+        reply->deleteLater();
+    });
+    manager->get(QNetworkRequest(QUrl(QString::fromStdString(full))));
     rose_apply_box(label, style);
     if (auto* outer = qobject_cast<QVBoxLayout*>(parent->layout())) outer->addWidget(label);
     return label;
@@ -2587,7 +2732,7 @@ function emitNodes(nodes: IrNode[], ctx: CppCtx): void {
 function cppText(nodes: IrNode[], ctx: CppCtx): string {
   const parts: string[] = [];
   for (const n of nodes) {
-    if (n.kind === 'text') parts.push(JSON.stringify(n.value.replace(/\s+/g, ' ')));
+    if (n.kind === 'text') parts.push(JSON.stringify(n.preserve ? n.value : n.value.replace(/\s+/g, ' ')));
     else if (n.kind === 'expr') parts.push(`rose_str(${cppExpr(n.code, ctx)})`);
   }
   if (!parts.length) return '';
@@ -2733,6 +2878,36 @@ function emitNode(node: IrNode, ctx: CppCtx): void {
   }
 }
 
+/** Inline formatting tags that may flow inside a text tag. */
+const CPP_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into RoseRun initializers, or null
+ *  when a child is not inline text or carries a runtime-bound style. */
+function cppInlineRuns(children: IrNode[], ctx: CppCtx, base: StyleModel): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`RoseRun{${cppStyleLiteral(base)}, ${cppText([c], ctx) || 'std::string()'}}`);
+      continue;
+    }
+    if (c.kind !== 'element' || !CPP_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    if (binding.dynamicClassExprs.length || binding.dynamicStyle.length) return null;
+    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const own = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    ctx.ancestors.push(subject);
+    let inner: string[] | null;
+    try {
+      inner = cppInlineRuns(c.children, ctx, mergeModels(base, own));
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): void {
   const tag = node.tag.toLowerCase();
   // A component body's `<slot />` / `<slot name="x" prop={expr} />` invokes the
@@ -2768,7 +2943,6 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
   const resolved = cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH });
   const model = mergeModels(mergeModels(ctx.inherited, resolved.model), styleBinding.inlineStyle);
   if (model.display === 'none') return;
-  noteCppUnsupported(model, styleBinding, node, ctx);
   // R221: when the class list or a `style:prop` is decided by state, the
   // resolved model cannot know it at build time. Emit the same inline
   // RoseStyle as the base, then merge the runtime-resolved classes and the
@@ -2829,6 +3003,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
     emit(`build${comp.cls}View(${ctx.app}, ${ctx.parent}${args.length ? ', ' + args.join(', ') : ''}${slotArgs.length ? ', ' + slotArgs.join(', ') : ''});`, ctx);
     return;
   }
+  if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && CPP_INLINE.has(c.tag.toLowerCase()))) {
+    // A paragraph with inline tags is ONE flowing line on the web: one QLabel
+    // with RichText spans, not a stack of labels.
+    const runs = cppInlineRuns(node.children, ctx, model);
+    if (runs && runs.length) {
+      emit(`{ auto* __l = rose_rich_label(${ctx.parent}, { ${runs.join(', ')} }${hasStyle ? ', ' + styleExpr : ''}); }`, ctx);
+      return;
+    }
+  }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = cppText(node.children, ctx) || '""';
     if (!hasStyle) {
@@ -2869,8 +3052,14 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: CppCtx): v
     if (asset) { emit(`rose_image(${ctx.parent}, "${asset}"${hasStyle ? `, ${styleExpr}` : ''});`, ctx); return; }
     const shape = svgShapes.get(url);
     if (shape) { emit(`rose_vector(${ctx.parent}, ${cppVectorExpr(shape)});`, ctx); return; }
-    ctx.warnings.push(`cpp: <img ${url}> has no bundled raster asset - shown as a placeholder`);
-    emit(`rose_label(${ctx.parent}, "[image: ${url.replace(/"/g, '\\"')}]", std::string());`, ctx);
+    if (url) {
+      // R417: a remote (or site-relative) image is fetched at runtime, so a
+      // slow host never blocks the page build.
+      emit(`rose_remote_image(${ctx.parent}, ${JSON.stringify(url)}${hasStyle ? `, ${styleExpr}` : ''});`, ctx);
+      return;
+    }
+    ctx.warnings.push(`cpp: <img> has no src - shown as a placeholder`);
+    emit(`rose_label(${ctx.parent}, "[image]", std::string());`, ctx);
     return;
   }
   if (tag === 'a') {

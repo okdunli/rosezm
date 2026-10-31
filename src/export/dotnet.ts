@@ -45,7 +45,7 @@ export interface EmitDotnetOptions {
 
 const NS = 'rosezmApp';
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
-const ROW_TAGS = new Set(['header', 'footer', 'nav']);
+const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Public raster images copied for this export: /rose.png -> Assets/rose.png. */
 let assetMap = new Map<string, string>();
@@ -289,6 +289,8 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
   // runtime half is complete; the static half applies them where it can.
   if (opts.table && model.letterSpacing !== undefined) put('LetterSpacing', csNum(model.letterSpacing));
   if (model.textAlign) put('TextAlign', JSON.stringify(model.textAlign));
+  if (model.nowrap !== undefined) put('Nowrap', model.nowrap ? 'true' : 'false');
+  if (model.ellipsis !== undefined) put('Ellipsis', model.ellipsis ? 'true' : 'false');
   if (opts.table && model.textTransform) put('TextTransform', JSON.stringify(model.textTransform));
   if (model.underline !== undefined) put('Underline', model.underline ? 'true' : 'false');
   if (model.strike !== undefined) put('Strike', model.strike ? 'true' : 'false');
@@ -460,6 +462,9 @@ public sealed class RoseStyle
     public string? TextTransform;
     public bool? Underline;
     public bool? Strike;
+    /// <summary>R415: one line, and (when Ellipsis) trimmed with an ellipsis.</summary>
+    public bool? Nowrap;
+    public bool? Ellipsis;
     /* colour and box */
     public string? Background;
     public RoseGradient? Gradient;
@@ -1160,6 +1165,13 @@ ${hoverRows.join('\n') || '        // no hover rules'}
                 : style.TextAlign == "justify" ? TextAlignment.Justify
                 : TextAlignment.Left;
         }
+        // R415: one line; an ellipsis is WPF's own TextTrimming.
+        if (style.Ellipsis == true)
+        {
+            block.TextWrapping = TextWrapping.NoWrap;
+            block.TextTrimming = TextTrimming.CharacterEllipsis;
+        }
+        else if (style.Nowrap == true) block.TextWrapping = TextWrapping.NoWrap;
         var decorations = new TextDecorationCollection();
         if (style.Underline == true) decorations.Add(TextDecorations.Underline[0]);
         if (style.Strike == true) decorations.Add(TextDecorations.Strikethrough[0]);
@@ -1441,9 +1453,9 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return panel;
     }
 
-    public static System.Windows.Controls.Image Image(Panel parent, string asset)
+    public static System.Windows.Controls.Image Image(Panel parent, string asset, Stretch stretch = Stretch.Uniform)
     {
-        var image = new System.Windows.Controls.Image { Stretch = System.Windows.Media.Stretch.Uniform, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
+        var image = new System.Windows.Controls.Image { Stretch = stretch, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
         try
         {
             var path = System.IO.Path.Combine(System.AppContext.BaseDirectory, asset);
@@ -1452,6 +1464,24 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         catch
         {
             // A missing asset must not crash the window.
+        }
+        parent.Children.Add(image);
+        return image;
+    }
+
+    /// <summary>R417: a remote (or site-relative) image. BitmapImage downloads
+    /// it in the background; a slow host never blocks the window.</summary>
+    public static System.Windows.Controls.Image RemoteImage(Panel parent, string url, Stretch stretch = Stretch.Uniform)
+    {
+        var image = new System.Windows.Controls.Image { Stretch = stretch, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
+        try
+        {
+            var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+            image.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(full, UriKind.RelativeOrAbsolute));
+        }
+        catch
+        {
+            // A bad URL renders an empty image, not a crashed window.
         }
         parent.Children.Add(image);
         return image;
@@ -1479,6 +1509,44 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     {
         var block = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
         if (style != null) ApplyText(block, style);
+        parent.Children.Add(block);
+        return block;
+    }
+
+    /// <summary>A line of inline runs: the browser flows a bold word inside one
+    /// paragraph, and so does this TextBlock - not a stack of Labels.</summary>
+    public static TextBlock Rich(Panel parent, (string Text, RoseStyle? Style)[] runs)
+    {
+        var block = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        if (runs.Length > 0 && runs[0].Style != null)
+        {
+            if (runs[0].Style.Ellipsis == true)
+            {
+                block.TextWrapping = TextWrapping.NoWrap;
+                block.TextTrimming = TextTrimming.CharacterEllipsis;
+            }
+            else if (runs[0].Style.Nowrap == true) block.TextWrapping = TextWrapping.NoWrap;
+        }
+        foreach (var (text, style) in runs)
+        {
+            var run = new Run(text);
+            if (style != null)
+            {
+                if (style.Color != null) run.Foreground = new SolidColorBrush(FromHex(style.Color));
+                if (style.FontSize != null) run.FontSize = style.FontSize.Value;
+                if (style.FontWeight != null) run.FontWeight = style.FontWeight >= 700 ? FontWeights.Bold : style.FontWeight >= 500 ? FontWeights.Medium : FontWeights.Normal;
+                if (style.FontFamily != null) run.FontFamily = new FontFamily(style.FontFamily);
+                if (style.Italic == true) run.FontStyle = FontStyles.Italic;
+                if (style.Underline == true || style.Strike == true)
+                {
+                    var decos = new TextDecorationCollection();
+                    if (style.Underline == true) decos.Add(TextDecorations.Underline[0]);
+                    if (style.Strike == true) decos.Add(TextDecorations.Strikethrough[0]);
+                    run.TextDecorations = decos;
+                }
+            }
+            block.Inlines.Add(run);
+        }
         parent.Children.Add(block);
         return block;
     }
@@ -2740,7 +2808,7 @@ function collapseNullTests(code: string): string {
 function csText(nodes: IrNode[], ctx: NetCtx): string {
   const parts: string[] = [];
   for (const n of nodes) {
-    if (n.kind === 'text') parts.push(JSON.stringify(n.value.replace(/\s+/g, ' ')));
+    if (n.kind === 'text') parts.push(JSON.stringify(n.preserve ? n.value : n.value.replace(/\s+/g, ' ')));
     else if (n.kind === 'expr') {
       const value = csExpr(n.code, ctx);
       // A typed string read already IS `RoseTheme.Str(...)`; wrapping it again
@@ -2918,6 +2986,36 @@ function flexDirection(model: StyleModel, tag: string): 'row' | 'column' | undef
   return undefined;
 }
 
+/** Inline formatting tags that may flow inside a text tag. */
+const DOTNET_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', 'mark', 'kbd', 'samp', 'tt', 'var', 'cite', 'q', 'abbr', 'small', 'sub', 'sup', 'span', 'time']);
+
+/** Flatten a text tag's inline children into (text, style) runs, or null when
+ *  a child is not inline text or carries a runtime-bound style. */
+function dotnetInlineRuns(children: IrNode[], ctx: NetCtx, base: StyleModel): string[] | null {
+  const runs: string[] = [];
+  for (const c of children) {
+    if (c.kind === 'text' || c.kind === 'expr') {
+      runs.push(`(${capText(csText([c], ctx) || '""', base.textTransform)}, ${csStyle(base)})`);
+      continue;
+    }
+    if (c.kind !== 'element' || !DOTNET_INLINE.has(c.tag.toLowerCase())) return null;
+    const binding = elementStyleBinding(c);
+    if (binding.dynamicClassExprs.length || binding.dynamicStyle.length) return null;
+    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const own = mergeModels(cascadeFor(ctx.styles.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    ctx.ancestors.push(subject);
+    let inner: string[] | null;
+    try {
+      inner = dotnetInlineRuns(c.children, ctx, mergeModels(base, own));
+    } finally {
+      ctx.ancestors.pop();
+    }
+    if (!inner) return null;
+    runs.push(...inner);
+  }
+  return runs;
+}
+
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): void {
   const tag = node.tag.toLowerCase();
   // A component body's `<slot />` / `<slot name="x" prop={expr} />` invokes the
@@ -3039,6 +3137,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     attach(target);
     return;
   }
+  if (TEXT_TAGS.has(tag) && !needVar && node.children.some((c) => c.kind === 'element' && DOTNET_INLINE.has(c.tag.toLowerCase()))) {
+    // A paragraph with inline tags is ONE flowing line on the web: one
+    // TextBlock with inline Runs, not a stack of Labels.
+    const runs = dotnetInlineRuns(node.children, ctx, model);
+    if (runs && runs.length) {
+      emit(`RoseTheme.Rich(${ctx.parent}, new (string, RoseStyle?)[] { ${runs.join(', ')} });`, ctx);
+      return;
+    }
+  }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = capText(csText(node.children, ctx) || '""', model.textTransform);
     const style = withStyle(model);
@@ -3079,12 +3186,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const asset = assetMap.get(url);
+    // R418: object-fit becomes the WPF Stretch; absent keeps Uniform.
+    const stretch = own.objectFit === 'cover' ? ', Stretch.UniformToFill'
+      : own.objectFit === 'fill' ? ', Stretch.Fill'
+      : own.objectFit === 'none' ? ', Stretch.None' : '';
     // An image has no text, so only its own box rules apply.
     const style = withStyle(own);
     if (asset) {
-      if (!needVar && !style) { emit(`RoseTheme.Image(${ctx.parent}, "${asset}");`, ctx); return; }
+      if (!needVar && !style) { emit(`RoseTheme.Image(${ctx.parent}, "${asset}"${stretch});`, ctx); return; }
       const target = `img${++ctx.counter.c}`;
-      emit(`var ${target} = RoseTheme.Image(${ctx.parent}, "${asset}");`, ctx);
+      emit(`var ${target} = RoseTheme.Image(${ctx.parent}, "${asset}"${stretch});`, ctx);
       if (style) emit(`RoseTheme.Apply(${target}, ${style.slice(2)});`, ctx);
       attach(target);
       return;
@@ -3098,8 +3209,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       attach(target);
       return;
     }
-    ctx.warnings.push(`dotnet: <img ${url}> has no bundled raster asset - shown as a placeholder`);
-    emit(`RoseTheme.Label(${ctx.parent}, "[image: ${url.replace(/"/g, '\\"')}]"${withStyle(model)});`, ctx);
+    if (url) {
+      // R417: a remote (or site-relative) image is downloaded by BitmapImage.
+      const target = `img${++ctx.counter.c}`;
+      emit(`var ${target} = RoseTheme.RemoteImage(${ctx.parent}, ${JSON.stringify(url)}${stretch});`, ctx);
+      if (style) emit(`RoseTheme.Apply(${target}, ${style.slice(2)});`, ctx);
+      attach(target);
+      return;
+    }
+    ctx.warnings.push(`dotnet: <img> has no src - shown as a placeholder`);
+    emit(`RoseTheme.Label(${ctx.parent}, "[image]"${withStyle(model)});`, ctx);
     return;
   }
   if (tag === 'a') {
