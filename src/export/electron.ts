@@ -26,6 +26,7 @@ import { nativeUsage, NATIVE_TARGETS, type NativeCapability } from './native-api
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
+import { DOM_BRIDGE_BRANCHES } from './desktop-shell.js';
 
 export interface EmitElectronOptions {
   projectRoot: string;
@@ -89,7 +90,7 @@ export async function emitElectron(opts: EmitElectronOptions): Promise<{ pages: 
   const shellGaps = native.filter((c) => !NATIVE_TARGETS.electron.capabilities.includes(c));
   for (const gap of shellGaps) opts.warnings.push(`electron: useNative('${gap}') has no preload branch - the renderer answers the contract's null at runtime`);
 
-  await fs.promises.writeFile(path.join(out, 'main.cjs'), renderMain(opts.apiBase ?? '', app, native.includes('make-phone-call')), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'main.cjs'), renderMain(opts.apiBase ?? '', app, native.includes('make-phone-call'), native.includes('save-image')), 'utf8');
   // useNative(...): this shell ships the framework's real web bundle
   // untouched - it has no script-translation step of its own - and the bundle
   // leaves the call as a bare global. The preload is the sanctioned bridge
@@ -154,6 +155,7 @@ async function takePhoto(quality) {
 ` : ''}
 contextBridge.exposeInMainWorld('useNative', async (capability, options) => {
   const opts = optionOf(options);
+  options = opts;
   try {
 ${native.includes('camera') ? `    if (capability === 'camera') {
       return await takePhoto(typeof opts.quality === 'number' ? opts.quality : 0.85);
@@ -218,6 +220,11 @@ ${native.includes('camera') ? `    if (capability === 'camera') {
       } finally {
         stream.getTracks().forEach(function (track) { track.stop(); });
       }
+    }
+` : ''}${native.includes('toast') ? DOM_BRIDGE_BRANCHES.toast : ''}${native.includes('modal') ? DOM_BRIDGE_BRANCHES.modal : ''}${native.includes('get-network-type') ? DOM_BRIDGE_BRANCHES['get-network-type'] : ''}${native.includes('get-system-info') ? DOM_BRIDGE_BRANCHES['get-system-info'] : ''}${native.includes('get-battery') ? DOM_BRIDGE_BRANCHES['get-battery'] : ''}${native.includes('save-image') ? `    if (capability === 'save-image') {
+      const file = String(opts.filePath ?? '');
+      if (!file) return false;
+      return await ipcRenderer.invoke('rosezm:saveImage', file);
     }
 ` : ''}    return null;
   } catch (_err) {
@@ -302,7 +309,7 @@ fine on a real desktop (BUG.md, 2026-10-30 correction).
 `;
 }
 
-function renderMain(apiBase: string, app: AppIdentity, dial = false): string {
+function renderMain(apiBase: string, app: AppIdentity, dial = false, saveImage = false): string {
   return `'use strict';
 
 // rosezm - the exported desktop shell.
@@ -313,7 +320,7 @@ function renderMain(apiBase: string, app: AppIdentity, dial = false): string {
 //    (server actions, unbaked /api routes, middleware-gated pages);
 // 3. open a hardened BrowserWindow (contextIsolation on, nodeIntegration off).
 
-const { app, BrowserWindow, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, dialog } = require('electron');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -349,6 +356,32 @@ const MIME = {
 if (dial) ipcMain.handle('rosezm:openExternal', (_e, uri) => {
   if (typeof uri === 'string' && /^(tel:|mailto:|https?:)/.test(uri)) return shell.openExternal(uri).then(() => true).catch(() => false);
   return false;
+});
+
+// save-image rides IPC too: only the main process can open a native save
+// dialog, and a data: URL has no filesystem path - both shapes land here.
+if (saveImage) ipcMain.handle('rosezm:saveImage', async (_e, filePath) => {
+  const source = typeof filePath === 'string' ? filePath : '';
+  if (!source) return false;
+  const inline = source.startsWith('data:');
+  if (!inline && !fs.existsSync(source)) return false;
+  const result = await dialog.showSaveDialog({ title: 'Save image' });
+  if (result.canceled || !result.filePath) return false;
+  try {
+    if (inline) {
+      const comma = source.indexOf(',');
+      if (comma < 0) return false;
+      const meta = source.slice(5, comma);
+      const payload = source.slice(comma + 1);
+      const bytes = meta.includes(';base64') ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload), 'utf8');
+      fs.writeFileSync(result.filePath, bytes);
+    } else {
+      fs.copyFileSync(source, result.filePath);
+    }
+    return true;
+  } catch (_err) {
+    return false;
+  }
 });
 
 function safePath(urlPath) {

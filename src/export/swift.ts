@@ -2665,11 +2665,16 @@ function emitElementStyled(
   if (tag === 'img') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
+    // The alt text is the VoiceOver label; an image without one is announced
+    // by its role alone. Empty alt stays unlabelled (decorative).
+    const altAttr = node.attrs.find((a) => a.name === 'alt');
+    const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
+    const label = alt ? `.accessibilityLabel(${JSON.stringify(alt)})` : '';
     const asset = ctx.assets.get(url);
-    if (asset) { emit(`Image(${JSON.stringify(asset)}).resizable().scaledToFit().frame(width: 72)${boxMods.join('')}`, ctx); return; }
+    if (asset) { emit(`Image(${JSON.stringify(asset)}).resizable().scaledToFit().frame(width: 72)${label}${boxMods.join('')}`, ctx); return; }
     const shape = ctx.vectors.get(url);
-    if (shape) { emit(`${swiftVectorExpr(shape)}${boxMods.join('')}`, ctx); return; }
-    emit(`Image(systemName: "photo")${boxMods.join('')}`, ctx);
+    if (shape) { emit(`${swiftVectorExpr(shape)}${label}${boxMods.join('')}`, ctx); return; }
+    emit(`Image(systemName: "photo")${label}${boxMods.join('')}`, ctx);
     return;
   }
   if (tag === 'a') {

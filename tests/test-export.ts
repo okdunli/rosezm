@@ -397,6 +397,27 @@ try {
     const e = await exportProject('electron', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-electron') });
     const shell = readFileSync(join(e.outDir, 'preload.cjs'), 'utf8');
     assert(shell.includes("capability === 'vibrate'"), 'electron: the preload answers vibrate through navigator.vibrate');
+    const domProj = join(scratch, 'dom-caps-proj');
+    mkdirSync(join(domProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(domProj, 'src/pages/index.rose'), `<script>
+  async function all(): Promise<void> {
+    await useNative('toast', { title: 't' });
+    await useNative('modal', { title: 't', message: 'm' });
+    await useNative('get-network-type', {});
+    await useNative('get-system-info', {});
+    await useNative('get-battery', {});
+    await useNative('save-image', { filePath: '/tmp/x.png' });
+  }
+</script>
+<button on:click={all}>go</button>`);
+    const eDom = await exportProject('electron', domProj, { apiBase: 'x', outRoot: join(scratch, 'dom-caps-electron') });
+    const eDomPre = readFileSync(join(eDom.outDir, 'preload.cjs'), 'utf8');
+    assert(['toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery'].every((c) => eDomPre.includes(`capability === '${c}'`)), 'electron: the preload answers toast, modal and the info capabilities');
+    const eDomMain = readFileSync(join(eDom.outDir, 'main.cjs'), 'utf8');
+    assert(eDomPre.includes("capability === 'save-image'") && eDomPre.includes("invoke('rosezm:saveImage'"), 'electron: the preload saves through the main process');
+    assert(eDomMain.includes("ipcMain.handle('rosezm:saveImage'") && eDomMain.includes('showSaveDialog'), 'electron: the main process opens a native Save As dialog');
+    const checkSaveMain = spawnSync(process.execPath, ['--check', join(eDom.outDir, 'main.cjs')], { encoding: 'utf8' });
+    assert(checkSaveMain.status === 0, 'electron: the save-image main process is valid CommonJS');
     const f = await exportProject('flutter', svProj, { apiBase: 'x', outRoot: join(scratch, 'scanvibe-flutter') });
     const fKit = readFileSync(join(f.outDir, 'lib', 'rosezm.dart'), 'utf8');
     assert(fKit.includes("case 'make-phone-call':") && fKit.includes('HapticFeedback.mediumImpact()'), 'flutter: dial and vibrate ride the kit switch');
@@ -1352,6 +1373,49 @@ try {
     }
     const fDeploy = readFileSync(join(scratch, 'scaffold-flutter', 'flutter', 'DEPLOY.md'), 'utf8');
     assert(fDeploy.includes('flutter create --platforms=android,ios --org dev.rosezm') && fDeploy.includes('flutter build appbundle'), 'flutter: DEPLOY.md carries the runner scaffold and the release commands');
+  }
+
+  // Every exported tree ships a .gitignore: the DEPLOY manuals say "push this
+  // folder to GitHub", and an Android keystore committed once is a key handed
+  // to the world. One list per toolchain, merged with anything the emitter
+  // already wrote.
+  {
+    const giProj = join(scratch, 'gitignore-proj');
+    mkdirSync(join(giProj, 'src/pages'), { recursive: true });
+    writeFileSync(join(giProj, 'src/pages/index.rose'), '<div>hi</div>\n');
+    const allTargets = ['weapp', 'qq', 'alipay', 'baidu', 'toutiao', 'flutter', 'android', 'xcode', 'arkts', 'electron', 'wails', 'tauri', 'python', 'dotnet', 'java', 'cpp', 'zig'] as const;
+    for (const target of allTargets) {
+      const r = await exportProject(target, giProj, { apiBase: 'x', outRoot: join(scratch, `gitignore-${target}`) });
+      const ignore = readFileSync(join(r.outDir, '.gitignore'), 'utf8');
+      assert(ignore.includes('node_modules/') && ignore.includes('.DS_Store'), `${target}: the export ships a .gitignore that keeps caches out of the first commit`);
+    }
+    const androidIgnore = readFileSync(join(scratch, 'gitignore-android', 'android', '.gitignore'), 'utf8');
+    assert(androidIgnore.includes('*.jks') && androidIgnore.includes('key.properties'), 'android: the signing keystore is git-ignored');
+    const flutterIgnore = readFileSync(join(scratch, 'gitignore-flutter', 'flutter', '.gitignore'), 'utf8');
+    assert(flutterIgnore.includes('*.jks') && flutterIgnore.includes('.dart_tool/'), 'flutter: the keystore and the Dart caches are git-ignored');
+  }
+
+  // Alt text is the accessibility label on every UI target: a screen reader has
+  // to announce the image, not "image". Each platform spells it its own way.
+  {
+    const altProj = join(scratch, 'alt-proj');
+    mkdirSync(join(altProj, 'src/pages'), { recursive: true });
+    mkdirSync(join(altProj, 'public'), { recursive: true });
+    writeFileSync(join(altProj, 'public', 'logo.png'), Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63fcffff3f0300050001a5f645400000000049454e44ae426082', 'hex'));
+    writeFileSync(join(altProj, 'src/pages/index.rose'), '<img src="/logo.png" alt="Rose logo" width="40" height="40">\n');
+    const alt: Array<[string, string, string]> = [
+      ['android', join('app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'contentDescription = "Rose logo"'],
+      ['flutter', join('lib', 'pages', 'index.dart'), "semanticLabel: 'Rose logo'"],
+      ['xcode', join('rosezmApp', 'Pages', 'IndexView.swift'), '.accessibilityLabel("Rose logo")'],
+      ['arkts', join('entry', 'src', 'main', 'ets', 'pages', 'IndexPage.ets'), '.accessibilityText("Rose logo")'],
+    ];
+    for (const [target, rel, needle] of alt) {
+      const r = await exportProject(target as never, altProj, { apiBase: 'x', outRoot: join(scratch, `alt-${target}`) });
+      assert(readFileSync(join(r.outDir, rel), 'utf8').includes(needle), `${target}: img alt becomes the accessibility label`);
+    }
+    const altW = await exportProject('weapp', altProj, { apiBase: 'x', outRoot: join(scratch, 'alt-weapp') });
+    const altWxml = readFileSync(join(altW.outDir, 'pages', 'index', 'index.wxml'), 'utf8');
+    assert(altWxml.includes('aria-label="Rose logo"') && !/\salt=/.test(altWxml), 'weapp: img alt becomes aria-label, not an unknown alt attribute');
   }
 
   // 11. the desktop JVM family: Java Swing, stdlib only.
@@ -3679,16 +3743,20 @@ try {
     // matrix omits is dead code the emitter never reaches. Check the source
     // first - it names the file when the promise breaks - then the runtime
     // warning contract.
-    const branchFiles: Array<[string, keyof typeof NATIVE_TARGETS]> = [
-      ['src/export/arkts.ts', 'arkts'], ['src/export/android.ts', 'android'],
-      ['src/export/swift.ts', 'xcode'], ['src/export/dart.ts', 'flutter'],
-      ['src/export/electron.ts', 'electron'], ['src/export/python.ts', 'python'],
-      ['src/export/dotnet.ts', 'dotnet'], ['src/export/java.ts', 'java'],
-      ['src/export/cpp.ts', 'cpp'],
+    const branchFiles: Array<[string[], keyof typeof NATIVE_TARGETS]> = [
+      [['src/export/arkts.ts'], 'arkts'], [['src/export/android.ts'], 'android'],
+      [['src/export/swift.ts'], 'xcode'], [['src/export/dart.ts'], 'flutter'],
+      // Electron reuses the DOM branches the desktop shells define.
+      [['src/export/electron.ts', 'src/export/desktop-shell.ts'], 'electron'],
+      [['src/export/python.ts'], 'python'], [['src/export/dotnet.ts'], 'dotnet'],
+      [['src/export/java.ts'], 'java'], [['src/export/cpp.ts'], 'cpp'],
     ];
-    for (const [file, target] of branchFiles) {
-      const src = readFileSync(fileURLToPath(new URL(file, repo)), 'utf8');
-      const branches = new Set(Array.from(src.matchAll(/native\.includes\('([a-z-]+)'\)/g), (m) => m[1]));
+    for (const [files, target] of branchFiles) {
+      const branches = new Set<string>();
+      for (const file of files) {
+        const src = readFileSync(fileURLToPath(new URL(file, repo)), 'utf8');
+        for (const m of src.matchAll(/native\.includes\('([a-z-]+)'\)/g)) branches.add(m[1]);
+      }
       for (const cap of branches) {
         assert(NATIVE_TARGETS[target].capabilities.includes(cap as never), `${target}: the ${cap} branch is advertised in the matrix`);
       }
@@ -5933,6 +6001,7 @@ h2 { font-size: 40px; }
     await useNative('camera', { quality: 0.5 });
     await useNative('share', { text: 'look' });
     await useNative('geolocation', {});
+    await useNative('get-battery', {});
   }
 </script>
 <button on:click={copy}>{note}</button>
@@ -5948,6 +6017,7 @@ h2 { font-size: 40px; }
           writeText: async (t: string) => { calls.push('write:' + t); },
         },
         share: async (data: { text: string }) => { calls.push('share:' + data.text); },
+        getBattery: async () => ({ level: 0.42, charging: true }),
       },
       fetch: async (url: unknown) => { calls.push('fetch:' + String(url)); return { ok: true }; },
       document: {
@@ -5970,6 +6040,7 @@ h2 { font-size: 40px; }
     assert(await win.useNative('share', { text: 'look' }) === true && calls.includes('share:look'), 'the shell reaches navigator.share for share');
     assert(await win.useNative('camera', { quality: 0.5 }) === null, 'camera with no mediaDevices is null - the contract\'s empty answer, not a throw inside a tap handler');
     assert(await win.useNative('geolocation') === null, 'geolocation with no navigator.geolocation is null too');
+    assert(JSON.stringify(await win.useNative('get-battery')) === '{"level":42,"charging":true}', 'the shell reads the battery through navigator.getBattery');
     win.fetch('/__rosezm/data?x=1', {});
     win.fetch('/about', {});
     win.fetch('/api/posts', { method: 'POST' });
@@ -6138,6 +6209,9 @@ h2 { font-size: 40px; }
       ['weapp', 'project.config.json', /"projectname": "acme-widgets"/],
       // The app-level window title is what a page without its own <title> shows.
       ['weapp', 'app.json', /"navigationBarTitleText": "Acme Widgets"/],
+      // Flutter's app bar shows the same rule: the page's <title>, else the
+      // app's name - never the framework's, and never a raw route path.
+      ['flutter', join('lib', 'pages', 'index.dart'), /AppBar\(title: const Text\("Acme Widgets"\)\)/],
       // The desktop window title is what the user sees in the taskbar; it is the
       // app's name, not the framework's.
       ['python', 'app.py', /self\.title\('Acme Widgets'\)/],
@@ -6149,6 +6223,10 @@ h2 { font-size: 40px; }
       const r = await exportProject(target as 'android', idProj, { apiBase: 'x', outRoot: join(scratch, `id-${target}`) });
       assert(re.test(readFileSync(join(r.outDir, rel), 'utf8')), `${target}: the store identity comes from rosezm.app.json, not a hardcoded default`);
     }
+    // A page's own <title> wins over the app name: the example's admin page.
+    const fx = await exportProject('flutter', example, { apiBase: 'x', outRoot: join(scratch, 'id-flutter-example') });
+    const adminDart = readFileSync(join(fx.outDir, 'lib', 'pages', 'admin.dart'), 'utf8');
+    assert(adminDart.includes('AppBar(title: const Text("Admin - rosezm"))'), 'flutter: the page <title> is the app bar title');
     // The name is user text that lands in XML: escaped, not trusted.
     writeFileSync(join(idProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.acme.widgets', name: "Ben & Jerry's <App>", version: '1.0.0', slug: 'acme' }));
     forgetAppIdentity();
@@ -6322,7 +6400,9 @@ h2 { font-size: 40px; }
 
   console.log(`\nAll export checks passed - one source tree, ${result.pages.length} pages to WeChat, ${alipay.pages.length} to Alipay, ${flutter.pages.length} to Flutter/Dart, ${python.pages.length} to Python/Tkinter, ${arkts.pages.length} to HarmonyOS ArkTS, ${android.pages.length} to Android/Compose, ${xcode.pages.length} to Xcode/SwiftUI, ${java.pages.length} to Java/Swing, ${dotnet.pages.length} to .NET/WPF, ${cpp.pages.length} to C++/Qt; the Electron shell wraps the built site - ${checks} assertions.\nEvery target in the registry is ready - one .rose tree, every platform.`);
 } finally {
-  rmSync(scratch, { recursive: true, force: true });
+  // Windows can still hold a handle in the temp tree for a moment (antivirus,
+  // a just-exited child); a cleanup failure must not turn a green run red.
+  try { rmSync(scratch, { recursive: true, force: true }); } catch { /* the OS temp dir reaps it */ }
 }
 
 /** Balanced braces/parens/brackets, skipping string literals and comments. */

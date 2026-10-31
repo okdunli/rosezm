@@ -283,7 +283,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
     );
   }
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'lib', 'pages', page.fileName + '.dart'), renderPage(page, components, warnings, content, allHoverKeys, allFocusKeys, allActiveKeys, globalCss), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'lib', 'pages', page.fileName + '.dart'), renderPage(page, components, warnings, content, allHoverKeys, allFocusKeys, allActiveKeys, globalCss, app.name), 'utf8');
   }
   await fs.promises.writeFile(path.join(out, 'lib', 'main.dart'), renderMain(pages, components, appDart), 'utf8');
   await writeDeployScaffold('flutter', out, warnings);
@@ -1781,7 +1781,7 @@ ${dynamicCases || '        // no dynamic routes in this app'}
 }
 
 function renderPage(
-  page: { route: string; className: string; fileName: string; nodes: IrNode[]; script: string; style: string; params: string[] },
+  page: { route: string; className: string; fileName: string; nodes: IrNode[]; script: string; style: string; params: string[]; title: string },
   components: Array<{ name: string; className: string; nodes: IrNode[]; slots: SlotUsage }>,
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
@@ -1789,6 +1789,7 @@ function renderPage(
   focusKeys: Set<string> = new Set(),
   activeKeys: Set<string> = new Set(),
   globalCss: string = '',
+  appName: string = 'rosezm',
 ): string {
   const facts = scanState(page.script);
   // `__rosezmContent` is a server-side bridge over the markdown collections.
@@ -2012,7 +2013,7 @@ ${methods}
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text(${JSON.stringify(page.route === '/' ? 'rosezm' : page.route)})),
+      appBar: AppBar(title: const Text(${JSON.stringify(page.title || appName)})),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: ${body},
@@ -2420,13 +2421,20 @@ function emitElementStyled(
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     if (!url) return 'const SizedBox.shrink()';
+    // The alt text is the semantic label a screen reader announces; a widget
+    // with none is announced as "image". Empty alt stays unlabelled.
+    const altAttr = node.attrs.find((a) => a.name === 'alt');
+    const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
+    const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const label = alt ? `, semanticLabel: '${esc(alt)}'` : '';
+    const wrap = (w: string): string => (alt ? `Semantics(label: '${esc(alt)}', image: true, child: ${w})` : w);
     let base = '';
     const asset = assetMap.get(url);
     if (asset) {
       const width = node.attrs.find((a) => a.name === 'width');
       const height = node.attrs.find((a) => a.name === 'height');
       const size = [width ? `width: ${width.value.kind === 'text' ? width.value.text : 48}.0` : '', height ? `height: ${height.value.kind === 'text' ? height.value.text : 48}.0` : ''].filter(Boolean).join(', ');
-      base = `Image.asset('${asset}', fit: BoxFit.contain${size ? ', ' + size : ''})`;
+      base = `Image.asset('${asset}', fit: BoxFit.contain${size ? ', ' + size : ''}${label})`;
     } else {
       const vector = svgShapes.get(url);
       if (vector) {
@@ -2436,12 +2444,12 @@ function emitElementStyled(
         const height = node.attrs.find((a) => a.name === 'height');
         const w = width && width.value.kind === 'text' ? Number(width.value.text) || 72 : 72;
         const h = height && height.value.kind === 'text' ? Number(height.value.text) || 72 : 72;
-        base = `SizedBox(width: ${w}.0, height: ${h}.0, child: CustomPaint(painter: RoseSvgPainter(ops: ${vector.name}Ops, fills: ${vector.name}Fills, vbWidth: ${vector.name}VbWidth, vbHeight: ${vector.name}VbHeight)))`;
+        base = wrap(`SizedBox(width: ${w}.0, height: ${h}.0, child: CustomPaint(painter: RoseSvgPainter(ops: ${vector.name}Ops, fills: ${vector.name}Fills, vbWidth: ${vector.name}VbWidth, vbHeight: ${vector.name}VbHeight)))`);
       } else if (/^data:/.test(url)) {
         ctx.warnings.push(`flutter: an inlined data-URI image has no Bundle asset - add it to pubspec assets`);
-        base = 'const Icon(Icons.image)';
+        base = wrap('const Icon(Icons.image)');
       } else {
-        base = `Image.network('${url.replace(/'/g, "\\'")}', fit: BoxFit.contain)`;
+        base = `Image.network('${url.replace(/'/g, "\\'")}', fit: BoxFit.contain${label})`;
       }
     }
     // border-radius / border / shadow / padding from the stylesheet now clip and

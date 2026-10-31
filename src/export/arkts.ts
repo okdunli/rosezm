@@ -2060,12 +2060,17 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   if (tag === 'img') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
+    // The alt text is what the screen reader announces; ArkUI spells it as the
+    // universal accessibilityText attribute. Empty alt stays unlabelled.
+    const altAttr = node.attrs.find((a) => a.name === 'alt');
+    const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
+    const label = alt ? `.accessibilityText(${JSON.stringify(alt)})` : '';
     const media = ctx.media.get(url);
-    if (media) emit(box(`Image($r('app.media.${media}')).objectFit(ImageFit.Contain)${model.width ? '' : '.width(72)'}${arkBoxMods(model).join('')}`), ctx);
+    if (media) emit(box(`Image($r('app.media.${media}')).objectFit(ImageFit.Contain)${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
     else if (ctx.vectors.has(url)) { emit(arktsVectorExpr(url, ctx), ctx); }
     else {
       ctx.warnings.push(`arkts: ${url || '<img>'} has no media resource - rendered as a placeholder`);
-      emit(`Text('[image: ${url.replace(/'/g, "\\'")}]')`, ctx);
+      emit(`Text('[image: ${url.replace(/'/g, "\\'")}]')${label}`, ctx);
     }
     return;
   }

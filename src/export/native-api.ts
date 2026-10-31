@@ -267,7 +267,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // on the other side of contextIsolation.
   electron: {
     helper: 'useNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery', 'save-image'],
     platform: {
       camera: 'navigator.mediaDevices.getUserMedia',
       geolocation: 'navigator.geolocation',
@@ -278,6 +278,10 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'make-phone-call': 'ipcRenderer.invoke + shell.openExternal(tel:)',
       toast: 'a DOM toast element (no native chrome needed)',
       modal: 'a DOM modal dialog (no native chrome needed)',
+      'get-network-type': 'navigator.onLine',
+      'get-system-info': 'navigator.userAgent',
+      'get-battery': 'navigator.getBattery',
+      'save-image': 'a Save As dialog in the main process',
     },
   },
   // Wired through the kit: the emitted rosezm.py defines rose_native(...) with

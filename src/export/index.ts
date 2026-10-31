@@ -8,6 +8,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { writeGitignore } from './gitignore.js';
 import { emitMiniProgram, DIALECTS, type MiniProgramTarget } from './miniprogram.js';
 import { emitFlutter } from './dart.js';
 import { emitPython } from './python.js';
@@ -218,6 +219,15 @@ async function discoverGlobalCss(root: string): Promise<string> {
 
 /** Export a Rose project to one target. Unsupported constructs are warnings, never silence. */
 export async function exportProject(target: TargetName, projectRoot: string, opts: ExportOptions = {}): Promise<ExportResult> {
+  const result = await exportInner(target, projectRoot, opts);
+  // Every exported repo wants the same first commit hygiene: no build caches,
+  // no node_modules, no signing keystore.
+  await writeGitignore(result.outDir, target);
+  return result;
+}
+
+/** The dispatch behind exportProject: one emitter, one result. */
+async function exportInner(target: TargetName, projectRoot: string, opts: ExportOptions = {}): Promise<ExportResult> {
   const info = TARGETS[target];
   if (!info) {
     throw new Error(`unknown export target "${target}"\n${targetList()}`);

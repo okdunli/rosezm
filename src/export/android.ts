@@ -2763,12 +2763,18 @@ function emitElementStyled(
   if (tag === 'img') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
+    // The alt text is the accessibility label: a screen reader announces it,
+    // and an image without one is announced as "image" - the same rule the web
+    // follows. Empty alt stays null (a decorative image).
+    const altAttr = node.attrs.find((a) => a.name === 'alt');
+    const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
+    const desc = alt ? `contentDescription = "${alt.replace(/"/g, '\\"')}"` : 'contentDescription = null';
     const drawableName = ctx.media.get(url);
     // border-radius / border / shadow / padding from the stylesheet now frame
     // the image the same way they do on the web - no longer a bare asset.
     const boxParts = resolved.expr ? [`.roseBox(${resolved.expr})`] : (resolved.model ? composeModifiersOf(resolved.model) : []);
     const box = boxParts.length ? `, modifier = Modifier${boxParts.join('')}` : '';
-    if (drawableName) emit(`Image(painter = painterResource(id = R.drawable.${drawableName}), contentDescription = null${box})`, ctx);
+    if (drawableName) emit(`Image(painter = painterResource(id = R.drawable.${drawableName}), ${desc}${box})`, ctx);
     else emit(`Text("[image: ${(url || '').replace(/"/g, '\\"')}]"${box})`, ctx);
     return;
   }

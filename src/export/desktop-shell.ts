@@ -97,7 +97,7 @@ async function copyTree(from: string, to: string): Promise<void> {
  * too (the "warned, never silent" rule) instead of only at the first tap.
  */
 export const SHELL_BRIDGE_CAPABILITIES: ReadonlySet<NativeCapability> = new Set([
-  'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info',
+  'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery',
 ]);
 
 /** The page-requested capabilities this shell's bridge cannot answer. */
@@ -133,6 +133,70 @@ function walkHtml(dir: string): string[] {
   }
   return out;
 }
+
+/** The capability branches the desktop shells and the Electron preload share:
+ *  every one is answered by the WebView's own DOM and browser APIs, so one
+ *  spelling serves both renderers. `options` is the normalized option bag. */
+export const DOM_BRIDGE_BRANCHES: Record<string, string> = {
+  toast: `    if (capability === 'toast') {
+      var t = document.createElement('div');
+      t.textContent = String(options.title == null ? '' : options.title);
+      t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 18px;border-radius:8px;font:14px system-ui;z-index:2147483647;opacity:0;transition:opacity .2s';
+      document.body.appendChild(t);
+      requestAnimationFrame(function () { t.style.opacity = '1'; });
+      setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 250); }, typeof options.duration === 'number' ? options.duration : 2000);
+      return true;
+    }
+`,
+  modal: `    if (capability === 'modal') {
+      var result = await new Promise(function (resolve) {
+        var backdrop = document.createElement('div');
+        backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483647';
+        var box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;color:#222;border-radius:12px;padding:20px 24px;font:15px system-ui;min-width:260px;z-index:2147483647';
+        var title = document.createElement('div');
+        title.textContent = String(options.title == null ? '' : options.title);
+        title.style.cssText = 'font-weight:600;margin-bottom:8px';
+        var message = document.createElement('div');
+        message.textContent = String(options.message == null ? '' : options.message);
+        message.style.cssText = 'margin-bottom:16px;white-space:pre-wrap';
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
+        var no = document.createElement('button');
+        no.textContent = 'Cancel';
+        no.style.cssText = 'padding:6px 16px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer';
+        var yes = document.createElement('button');
+        yes.textContent = 'OK';
+        yes.style.cssText = 'padding:6px 16px;border-radius:6px;border:none;background:#e91e63;color:#fff;cursor:pointer';
+        function done(v) { backdrop.remove(); resolve(v); }
+        no.onclick = function () { done(false); };
+        yes.onclick = function () { done(true); };
+        row.appendChild(no);
+        row.appendChild(yes);
+        box.appendChild(title);
+        box.appendChild(message);
+        box.appendChild(row);
+        backdrop.appendChild(box);
+        document.body.appendChild(backdrop);
+      });
+      return result;
+    }
+`,
+  'get-network-type': `    if (capability === 'get-network-type') {
+      return { type: navigator.onLine ? 'wifi' : 'none' };
+    }
+`,
+  'get-system-info': `    if (capability === 'get-system-info') {
+      return { platform: 'web', userAgent: navigator.userAgent };
+    }
+`,
+  'get-battery': `    if (capability === 'get-battery') {
+      if (typeof navigator.getBattery !== 'function') return null;
+      var battery = await navigator.getBattery();
+      return { level: Math.round(battery.level * 100), charging: !!battery.charging };
+    }
+`,
+};
 
 function renderBridge(apiBase: string, native: NativeCapability[]): string {
   return `/**
@@ -314,66 +378,21 @@ function renderCapabilities(native: NativeCapability[]): string {
   if (native.includes('toast')) {
     // A DOM toast: no native chrome needed - the WebView paints it, and the
     // auto-dismiss keeps the contract's fire-and-forget shape.
-    branches.push(`    if (capability === 'toast') {
-      var t = document.createElement('div');
-      t.textContent = String(options.title == null ? '' : options.title);
-      t.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 18px;border-radius:8px;font:14px system-ui;z-index:2147483647;opacity:0;transition:opacity .2s';
-      document.body.appendChild(t);
-      requestAnimationFrame(function () { t.style.opacity = '1'; });
-      setTimeout(function () { t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 250); }, typeof options.duration === 'number' ? options.duration : 2000);
-      return true;
-    }
-`);
+    branches.push(DOM_BRIDGE_BRANCHES.toast);
   }
   if (native.includes('modal')) {
     // A DOM confirm modal: resolves true on confirm, false on dismiss - the
     // boolean the mini-program showModal contract spells as res.confirm.
-    branches.push(`    if (capability === 'modal') {
-      var result = await new Promise(function (resolve) {
-        var backdrop = document.createElement('div');
-        backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2147483647';
-        var box = document.createElement('div');
-        box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;color:#222;border-radius:12px;padding:20px 24px;font:15px system-ui;min-width:260px;z-index:2147483647';
-        var title = document.createElement('div');
-        title.textContent = String(options.title == null ? '' : options.title);
-        title.style.cssText = 'font-weight:600;margin-bottom:8px';
-        var message = document.createElement('div');
-        message.textContent = String(options.message == null ? '' : options.message);
-        message.style.cssText = 'margin-bottom:16px;white-space:pre-wrap';
-        var row = document.createElement('div');
-        row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end';
-        var no = document.createElement('button');
-        no.textContent = 'Cancel';
-        no.style.cssText = 'padding:6px 16px;border-radius:6px;border:1px solid #ccc;background:#fff;cursor:pointer';
-        var yes = document.createElement('button');
-        yes.textContent = 'OK';
-        yes.style.cssText = 'padding:6px 16px;border-radius:6px;border:none;background:#e91e63;color:#fff;cursor:pointer';
-        function done(v) { backdrop.remove(); resolve(v); }
-        no.onclick = function () { done(false); };
-        yes.onclick = function () { done(true); };
-        row.appendChild(no);
-        row.appendChild(yes);
-        box.appendChild(title);
-        box.appendChild(message);
-        box.appendChild(row);
-        backdrop.appendChild(box);
-        document.body.appendChild(backdrop);
-      });
-      return result;
-    }
-`);
+    branches.push(DOM_BRIDGE_BRANCHES.modal);
   }
   if (native.includes('get-network-type')) {
-    branches.push(`    if (capability === 'get-network-type') {
-      return { type: navigator.onLine ? 'wifi' : 'none' };
-    }
-`);
+    branches.push(DOM_BRIDGE_BRANCHES['get-network-type']);
   }
   if (native.includes('get-system-info')) {
-    branches.push(`    if (capability === 'get-system-info') {
-      return { platform: 'web', userAgent: navigator.userAgent };
-    }
-`);
+    branches.push(DOM_BRIDGE_BRANCHES['get-system-info']);
+  }
+  if (native.includes('get-battery')) {
+    branches.push(DOM_BRIDGE_BRANCHES['get-battery']);
   }
   return `  // useNative: the capabilities this project asked for, on the WebView's own
   // APIs. A denied permission is null - the contract's empty answer.

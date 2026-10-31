@@ -1878,7 +1878,20 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       out.push(`url="${attrToBinding(attr, ctx)}"`);
       continue;
     }
-    if (low === 'alt' || low === 'aria-label' || low === 'for' || low === 'rows') continue;
+    if (low === 'alt') {
+      // The mini program has no alt: its accessibility attribute is aria-label,
+      // which <image> honours. A page that wrote its own aria-label keeps it.
+      if ((node.tag.toLowerCase() === 'img' || node.tag.toLowerCase() === 'image')
+        && !node.attrs.some((a) => a.name.toLowerCase() === 'aria-label')) {
+        out.push(`aria-label="${attrToBinding(attr, ctx)}"`);
+      }
+      continue;
+    }
+    if (low === 'aria-label') {
+      out.push(`aria-label="${attrToBinding(attr, ctx)}"`);
+      continue;
+    }
+    if (low === 'for' || low === 'rows') continue;
     // R257: an <img width height> is a real size request. <image> defaults to
     // filling its box, so dropping the numbers made every sized icon render
     // full-screen. They ride the inline style (the one place the platform
