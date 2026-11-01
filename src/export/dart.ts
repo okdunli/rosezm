@@ -31,7 +31,7 @@ import { extractAppLifecycle } from './miniprogram.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
+import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
@@ -2359,7 +2359,14 @@ function renderPage(
   // A kv field is a server-side memo on the web. This target has no server at
   // load, so the field is seeded here from its own compute expression.
   const kvDecls = kvDeclarations(page.script ?? '').filter((k) => new Set([...facts.state.map((s) => s.name), ...facts.data]).has(k.name));
-  const kvSeedLines = kvDecls.map((k) => `    setState(() { ${k.name} = rosezmKv(${JSON.stringify(k.name)}, () => (${kvCallable(k.fn)}), ${k.ttl}); });`).join('\n');
+  // JS's clock has a Dart spelling; the dialect has no Date at all.
+  // (kept next to the seed it feeds)
+  const kvSeedLines = kvDecls.map((k) => {
+    const arrow = /^\s*\([^)]*\)\s*=>\s*([\s\S]*)$/.exec(k.fn);
+    const body = (arrow ? arrow[1] : k.fn).trim().replace(/;\s*$/, '');
+    const translated = (translateExpr(body.replace(/Date\.now\(\)/g, 'DateTime.now().millisecondsSinceEpoch'), DART_EXPR, new Set()) ?? body.replace(/Date\.now\(\)/g, 'DateTime.now().millisecondsSinceEpoch'));
+    return `    setState(() { ${k.name} = rosezmKv(${JSON.stringify(k.name)}, () => (${translated}), ${k.ttl}); });`;
+  }).join('\n');
   // R461: onPullDownRefresh is already a server action method; the pull gesture
   // is the missing half - RefreshIndicator drives it.
   const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');

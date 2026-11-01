@@ -1029,7 +1029,7 @@ try {
   // R159: a $kv field is seeded at load from its own compute expression, so the
   // page shows a real value rather than a permanent null.
   assert(/T rosezmKv<T>\(String name, T Function\(\) compute, int ttlSeconds\)/.test(fread('lib/rosezm.dart')), 'the Flutter kit ships a TTL memo helper');
-  assert(/rosezmKv\("stamp", \(\) => \(\(\(\) => Date\.now\(\)\)\(\)\), 60\)/.test(fread('lib/pages/kvdemo.dart')), 'a Flutter $kv field is seeded from its compute expression at load');
+  assert(/rosezmKv\("stamp", \(\) => \(DateTime\.now\(\)\.millisecondsSinceEpoch\), 60\)/.test(fread('lib/pages/kvdemo.dart')), 'a Flutter $kv field is seeded from its compute expression at load');
   // The api base is a --dart-define overridable at build time: the kit reads
   // ROSEZM_API with the exported base as the compile-time default.
   assert(fread('lib/rosezm.dart').includes("String.fromEnvironment('ROSEZM_API', defaultValue: \"https://api.example.com\")"), 'the Flutter kit reads ROSEZM_API with the baked base as default');
