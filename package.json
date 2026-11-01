@@ -1,6 +1,6 @@
 {
   "name": "rosezm",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Modular extensible full-stack framework for web and embedded applications, crafted with extreme romance and polished developer experience.",
   "type": "module",
   "scripts": {
