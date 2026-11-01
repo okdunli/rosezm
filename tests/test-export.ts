@@ -1502,10 +1502,12 @@ try {
     const bakeCli = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
     // Run inside the fixture: `build` writes dist/ next to the cwd, so a repo-root
     // run would drop the fixture's pages into the repository.
-    const built = spawnSync(process.execPath, ['--import', bakeLoader, bakeCli, 'build', '.'], { cwd: bakeRoot, encoding: 'utf8', timeout: 300_000 });
-    assert(built.status === 0 && existsSync(join(bakeRoot, 'dist', 'index.html')), 'the bake fixture builds a dist/ to read');
-    const baked = await exportProject('android', bakeRoot, { apiBase: '', outRoot: join(scratch, 'bake-out') });
-    const bakedKit = readFileSync(join(baked.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
+    // --build runs the project's own build first, so the bake can never be a
+    // stale frame from an older dist/.
+    const bakeOut = join(scratch, 'bake-out');
+    const built = spawnSync(process.execPath, ['--import', bakeLoader, bakeCli, 'export', 'android', bakeRoot, '--out', bakeOut, '--build'], { encoding: 'utf8', timeout: 300_000 });
+    assert(built.status === 0 && existsSync(join(bakeRoot, 'dist', 'index.html')), 'the export --build runs the project build first');
+    const bakedKit = readFileSync(join(bakeOut, 'android', 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
     assert(bakedKit.includes('ROSE_BAKED_JSON') && bakedKit.includes('baked hello'), 'the exported app carries the state the build baked for each route');
     assert(bakedKit.includes('return if (live.isEmpty()) baked else live'), 'a live data channel still wins over the baked state');
     // Every target that has a data channel bakes the same frame, or a device

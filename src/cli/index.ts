@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as zlib from 'zlib';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
+import { spawnSync } from 'child_process';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -2479,7 +2480,7 @@ async function exportCmd(): Promise<void> {
     }
     console.log('rosezm export targets:');
     for (const row of rows) console.log(`  ${row.status === 'ready' ? '✓' : '·'} ${row.name.padEnd(10)} ${row.family.padEnd(13)} ${row.summary}`);
-    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--watch] [--json]');
+    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--build] [--watch] [--json]');
     return;
   }
   // `export surface` prints what a vendored consumer may key on: the module
@@ -2588,6 +2589,20 @@ async function exportCmd(): Promise<void> {
     process.exit(1);
   }
   const started = Date.now();
+  // --build: the export bakes what `rosezm build` computed, so a stale dist/ is
+  // a stale first frame. Running the project's own build first (as a child, so
+  // it sees the same command a user would type) keeps the two in step.
+  const withBuild = rest.includes('--build');
+  const runProjectBuild = (): boolean => {
+    // Inside the project, so its dist/ lands next to its own sources - the
+    // export bakes from THAT tree, never from wherever the shell happened to be.
+    const r = spawnSync(process.execPath, [...process.execArgv, process.argv[1], 'build', '.'], { stdio: 'inherit', cwd: projectRoot });
+    return r.status === 0;
+  };
+  if (withBuild && !runProjectBuild()) {
+    console.error('rosezm export: the project build failed - nothing was exported (fix the build first)');
+    process.exit(1);
+  }
   const cloudMode = rest.includes("--cloud");
   const cloudEnvRaw = flag("--cloud-env");
   const result = await exportProject(target, projectRoot, {
@@ -2651,6 +2666,7 @@ async function exportCmd(): Promise<void> {
       busy = true;
       const at = Date.now();
       try {
+        if (withBuild) runProjectBuild();
         const next = await exportProject(target, projectRoot, {
           apiBase,
           outRoot: outRoot ? path.resolve(outRoot) : undefined,
@@ -2707,4 +2723,4 @@ else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud] [--watch]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud] [--build] [--watch]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');

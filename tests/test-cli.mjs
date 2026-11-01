@@ -133,7 +133,7 @@ const usage = await run([], REPO);
 assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), 'the usage line documents the dir argument and its default');
 // A native target is a build artifact: the edit loop is "save a .rose, get a
 // new tree", so the export grew a watcher instead of one-shot-only.
-assert(usage.out.includes('--watch'), 'the usage line documents the export watcher');
+assert(usage.out.includes('--watch') && usage.out.includes('--build'), 'the usage line documents the export watcher and its build step');
 
 {
   const watchRoot = path.join(tmp, 'watch-proj');
