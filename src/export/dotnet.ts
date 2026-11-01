@@ -414,6 +414,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 /// <summary>A CSS length: pixels, a percentage of the parent, or auto.</summary>
 public sealed class RoseLen
@@ -772,7 +773,7 @@ public class RosePanel : Panel
         var right = GetInsetRight(child);
         var top = GetInsetTop(child);
         var bottom = GetInsetBottom(child);
-        var margin = child.Margin;
+        var margin = (child as System.Windows.FrameworkElement)?.Margin ?? new Thickness(0);
         var stretchX = !double.IsNaN(left) && !double.IsNaN(right) && !double.IsPositiveInfinity(availW);
         var stretchY = !double.IsNaN(top) && !double.IsNaN(bottom) && !double.IsPositiveInfinity(availH);
         var width = stretchX ? Math.Max(0, availW - left - right - margin.Left - margin.Right) : child.DesiredSize.Width;
@@ -848,7 +849,7 @@ public class RosePanel : Panel
         for (var i = 0; i < count; i++)
         {
             var child = line[i];
-            var margin = child.Margin;
+            var margin = (child as System.Windows.FrameworkElement)?.Margin ?? new Thickness(0);
             var align = GetAlignSelf(child) ?? Align;
             var main = Math.Max(0, mains[i] - (horizontal ? margin.Left + margin.Right : margin.Top + margin.Bottom));
             var crossMargin = horizontal ? margin.Top + margin.Bottom : margin.Left + margin.Right;
@@ -884,9 +885,35 @@ public class RosePanel : Panel
                 var growBy = Shadow.Spread + Shadow.Blur * ring / 4.0;
                 var brush = new SolidColorBrush(Color.FromArgb((byte)alpha, shadowColor.R, shadowColor.G, shadowColor.B));
                 var rect = new Rect(Shadow.X - growBy, Shadow.Y - growBy, width + growBy * 2, height + growBy * 2);
-                dc.DrawRoundedRectangle(brush, null, rect,
-                    radius.TopLeft + growBy, radius.TopRight + growBy, radius.BottomRight + growBy, radius.BottomLeft + growBy);
+                dc.DrawGeometry(brush, null, CornerGeometry(rect,
+                    radius.TopLeft + growBy, radius.TopRight + growBy, radius.BottomRight + growBy, radius.BottomLeft + growBy));
             }
+        }
+
+
+        /// <summary>A rounded rectangle with a radius per corner: WPF's own
+        /// helpers take one pair, and CSS does not.</summary>
+        static System.Windows.Media.Geometry CornerGeometry(Rect rect, double tl, double tr, double br, double bl)
+        {
+            var geo = new System.Windows.Media.StreamGeometry();
+            using (var ctx = geo.Open())
+            {
+                var p1 = new Point(rect.Left + tl, rect.Top);
+                var p2 = new Point(rect.Right - tr, rect.Top);
+                var p3 = new Point(rect.Right, rect.Top + tr);
+                var p4 = new Point(rect.Right, rect.Bottom - br);
+                var p5 = new Point(rect.Right - br, rect.Bottom);
+                var p6 = new Point(rect.Left + bl, rect.Bottom);
+                var p7 = new Point(rect.Left, rect.Bottom - bl);
+                var p8 = new Point(rect.Left, rect.Top + tl);
+                ctx.BeginFigure(p1, true, true);
+                ctx.ArcTo(p2, new Size(tr, tr), 0, false, System.Windows.Media.SweepDirection.Clockwise, true, false);
+                ctx.ArcTo(p4, new Size(br, br), 0, false, System.Windows.Media.SweepDirection.Clockwise, true, false);
+                ctx.ArcTo(p6, new Size(bl, bl), 0, false, System.Windows.Media.SweepDirection.Clockwise, true, false);
+                ctx.ArcTo(p8, new Size(tl, tl), 0, false, System.Windows.Media.SweepDirection.Clockwise, true, false);
+            }
+            geo.Freeze();
+            return geo;
         }
 
         var hover = HoverStyle;
@@ -896,8 +923,8 @@ public class RosePanel : Panel
         var body = new Rect(0, 0, width, height);
         if (brushBody != null)
         {
-            dc.DrawRoundedRectangle(brushBody, null, body,
-                radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft);
+            dc.DrawGeometry(brushBody, null, CornerGeometry(body,
+                radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft));
         }
         // R484: the background picture is drawn under the content, clipped to the
         // panel's own rounded box - CSS paints it over the colour, under the text.
@@ -906,7 +933,7 @@ public class RosePanel : Panel
             var brush = RoseTheme.ImageBrushOf(Image, ImageFit, width, height);
             if (brush != null)
             {
-                dc.PushClip(new RectangleGeometry(body, radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft));
+                dc.PushClip(CornerGeometry(body, radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft));
                 dc.DrawRectangle(brush, null, body);
                 dc.Pop();
             }
@@ -924,9 +951,9 @@ public class RosePanel : Panel
                 if (style == "dashed") pen.DashStyle = DashStyles.Dash;
                 else if (style == "dotted") pen.DashStyle = DashStyles.Dot;
                 var inset = new Rect(thickness / 2, thickness / 2, Math.Max(0, width - thickness), Math.Max(0, height - thickness));
-                dc.DrawRoundedRectangle(null, pen, inset,
+                dc.DrawGeometry(null, pen, CornerGeometry(inset,
                     Math.Max(0, radius.TopLeft - thickness / 2), Math.Max(0, radius.TopRight - thickness / 2),
-                    Math.Max(0, radius.BottomRight - thickness / 2), Math.Max(0, radius.BottomLeft - thickness / 2));
+                    Math.Max(0, radius.BottomRight - thickness / 2), Math.Max(0, radius.BottomLeft - thickness / 2)));
             }
         }
     }
@@ -1183,6 +1210,41 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     };
 
     public static List<object?> AsList(object? value) => value as List<object?> ?? new List<object?>();
+    public static List<object?> List(params object?[] items) => RoseKit.List(items);
+    public static List<object?> Append(object? list, object? item) => RoseKit.Append(list, item);
+    public static List<object?> Concat(object? a, object? b) => RoseKit.Concat(a, b);
+    public static Dictionary<string, object?> Obj(params (string Key, object? Value)[] pairs)
+    {
+        var map = new Dictionary<string, object?>();
+        foreach (var (key, value) in pairs) map[key] = value;
+        return map;
+    }
+
+    public static List<object?> MapIdx(object? value, Func<object?, int, object?> fn)
+        => RoseKit.MapIdx(value, fn);
+    public static List<object?> Prepend(object? list, object? item) => RoseKit.Prepend(list, item);
+    public static List<object?> Map(object? value, Func<object?, object?> fn) => RoseKit.Map(value, fn);
+
+    /// An augmented assignment on a map entry, spelled as a call.
+    public static object? Bump(Dictionary<string, object?> map, string key, object? by)
+    {
+        var next = Int(map.TryGetValue(key, out var cur) ? cur : 0) + Int(by);
+        map[key] = next;
+        return next;
+    }
+
+    /// A state read treated as a condition: empty/zero/null are false.
+    public static bool Truth(object? value) => value switch
+    {
+        null => false,
+        bool b => b,
+        string s => s.Length > 0,
+        double d => d != 0,
+        int i => i != 0,
+        long l => l != 0,
+        System.Collections.ICollection c => c.Count > 0,
+        _ => true,
+    };
 
     public static object? Get(object? container, string key) => container is Dictionary<string, object?> map && map.TryGetValue(key, out var value) ? value : null;
 
@@ -1663,8 +1725,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         var image = new System.Windows.Controls.Image { Stretch = stretch, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
         try
         {
-            var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
-            image.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(full, UriKind.RelativeOrAbsolute));
+            var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : RoseKit.ApiBase + url;
+            image.Source = new System.Windows.Media.Imaging.BitmapImage(new System.Uri(full, System.UriKind.RelativeOrAbsolute));
         }
         catch
         {
@@ -1679,10 +1741,10 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     /// the element's own attributes.</summary>
     public static System.Windows.Controls.MediaElement Video(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
     {
-        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : RoseKit.ApiBase + url;
         var element = new System.Windows.Controls.MediaElement
         {
-            Source = new Uri(full, UriKind.RelativeOrAbsolute),
+            Source = new System.Uri(full, System.UriKind.RelativeOrAbsolute),
             LoadedBehavior = System.Windows.Controls.MediaState.Manual,
             UnloadedBehavior = System.Windows.Controls.MediaState.Manual,
             ScrubbingEnabled = true,
@@ -1700,11 +1762,11 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     /// stays hidden; the button and the file name are the whole UI.</summary>
     public static System.Windows.Controls.MediaElement Audio(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
     {
-        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+        var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : RoseKit.ApiBase + url;
         var row = new System.Windows.Controls.StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var element = new System.Windows.Controls.MediaElement
         {
-            Source = new Uri(full, UriKind.RelativeOrAbsolute),
+            Source = new System.Uri(full, System.UriKind.RelativeOrAbsolute),
             LoadedBehavior = System.Windows.Controls.MediaState.Manual,
             UnloadedBehavior = System.Windows.Controls.MediaState.Manual,
             Visibility = Visibility.Collapsed,
@@ -1814,7 +1876,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
             if (underline) run.TextDecorations.Add(TextDecorations.Underline);
             if (link != null)
             {
-                var hyper = new Hyperlink(run) { NavigateUri = new Uri(link, UriKind.RelativeOrAbsolute) };
+                var hyper = new Hyperlink(run) { NavigateUri = new System.Uri(link, System.UriKind.RelativeOrAbsolute) };
                 block.Inlines.Add(hyper);
             }
             else block.Inlines.Add(run);
@@ -1980,7 +2042,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (lo != null) picker.DisplayDateStart = lo;
         var hi = DateOf(max);
         if (hi != null) picker.DisplayDateEnd = hi;
-        picker.SelectedDateChanged += (_, e) => app.Set(stateKey, IsoDay(e.NewValue));
+        picker.SelectedDateChanged += (_, e) => app.Set(stateKey, IsoDay(e.AddedItems.Count > 0 ? e.AddedItems[0] as System.DateTime? : null));
         parent.Children.Add(picker);
         return picker;
     }
@@ -2210,17 +2272,17 @@ function renderKit(apiBase: string, content: Record<string, Array<Record<string,
     public static readonly string RoseContentJson = ${JSON.stringify(JSON.stringify(content))};
 
     public static List<Dictionary<string, object?>> RoseContentList(string coll) {
-        var out = new List<Dictionary<string, object?>>();
+        var entries = new List<Dictionary<string, object?>>();
         try {
             var root = System.Text.Json.JsonDocument.Parse(RoseContentJson).RootElement;
-            if (!root.TryGetProperty(coll, out var arr) || arr.ValueKind != System.Text.Json.JsonValueKind.Array) return out;
+            if (!root.TryGetProperty(coll, out var arr) || arr.ValueKind != System.Text.Json.JsonValueKind.Array) return entries;
             foreach (var e in arr.EnumerateArray()) {
                 var m = new Dictionary<string, object?>();
                 foreach (var p in e.EnumerateObject()) m[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText();
-                out.Add(m);
+                entries.Add(m);
             }
-        } catch (System.Text.Json.JsonException) { return out; }
-        return out;
+        } catch (System.Text.Json.JsonException) { return entries; }
+        return entries;
     }
 
     public static Dictionary<string, object?>? RoseContentGet(string coll, string slug) {
@@ -2244,6 +2306,10 @@ ${contentBlock}${nativeKit(native)}
 
     /// <summary>The {#await} reject branch: it always throws, so the catch arm renders.</summary>
     public static object? roseThrow(object? message) => throw new Exception(message?.ToString() ?? "error");
+    /// ActionError(message, code, field): the extras ride along in the text -
+    /// a desktop app has no HTTP response to fill in.
+    public static object? roseThrow(object? message, params object?[] rest)
+        => throw new Exception((message?.ToString() ?? "error") + (rest.Length > 0 ? " (" + string.Join(", ", rest) + ")" : ""));
 
     // [...list, item] / [item, ...list] without a JS spread in the source.
     public static List<object?> Append(object? list, object? item)
@@ -2380,6 +2446,11 @@ ${contentBlock}${nativeKit(native)}
     }
 
     public static List<object?> List(params object?[] items) => new List<object?>(items);
+    /// The pages call AsList bare (a state read used as a list).
+    public static List<object?> AsList(object? value) => RoseTheme.AsList(value);
+
+    /// A key event's character, the only part a rose handler reads.
+    public static string KeyOf(object? ev) => ev is System.Windows.Input.KeyEventArgs k ? k.Key.ToString() : "";
 
     // A middleware wall answers the data channel as it answers a document: a 302
     // to the sign-in page, or a bare 401/403. HttpClient follows a redirect on
@@ -2489,20 +2560,20 @@ ${contentBlock}${nativeKit(native)}
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("state", out var state)) root = state;
-        return Convert(root) as Dictionary<string, object?> ?? new Dictionary<string, object?>();
+        return JsonToObject(root) as Dictionary<string, object?> ?? new Dictionary<string, object?>();
     }
 
-    private static object? Convert(JsonElement element)
+    private static object? JsonToObject(JsonElement element)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
                 var map = new Dictionary<string, object?>();
-                foreach (var property in element.EnumerateObject()) map[property.Name] = Convert(property.Value);
+                foreach (var property in element.EnumerateObject()) map[property.Name] = JsonToObject(property.Value);
                 return map;
             case JsonValueKind.Array:
                 var list = new List<object?>();
-                foreach (var item in element.EnumerateArray()) list.Add(Convert(item));
+                foreach (var item in element.EnumerateArray()) list.Add(JsonToObject(item));
                 return list;
             case JsonValueKind.String:
                 return element.GetString();
@@ -2625,6 +2696,8 @@ function renderApp(pages: Array<{ route: string; cls: string; params: string[] }
 
 using System.Windows.Controls;
 using System.Windows.Media;
+using ${NS}.Pages;
+using static ${NS}.RoseKit;
 
 /// <summary>The window host, the shared state and the route table.</summary>
 public sealed class RoseApp
@@ -2819,6 +2892,18 @@ interface NetCtx {
   stateTypes: Map<string, string>;
   mapBinds: Set<string>;
   components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage }>;
+  /** The page's own top-level functions and how many parameters each declares:
+   *  every emitted one takes the app first, so a call site has to match. */
+  fnNames?: Set<string>;
+  fnArity?: Map<string, number>;
+  /** Zero-argument arrow consts (const docs = () => EXPR): inlined at the call
+   *  site, because there is no method the emitter would otherwise produce. */
+  arrowFns?: Map<string, string>;
+  /** A {@const} name that collided with an earlier one (or with a local the
+   *  emitter generates) is emitted under a suffix; this is the rename map every
+   *  later read goes through. C# forbids shadowing a local in a nested block. */
+  constNames?: Map<string, string>;
+  constSeq?: { n: number };
   lines: string[];
   depth: number;
   /** This page's or component's compiled classes and its cascade sheet. */
@@ -2897,6 +2982,9 @@ function renderPage(
   const ctx: NetCtx = {
     warnings,
     file: page.cls,
+    fnNames: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
+    fnArity: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => [m[1], m[2].trim() ? m[2].split(',').length : 0] as [string, number])),
+    arrowFns: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*([^;\n]+);?/gm)].map((m) => [m[1], m[2].trim()] as [string, string])),
     stateNames,
     derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
     awaits: [],
@@ -2927,12 +3015,12 @@ function renderPage(
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries, or an
     // optional single entry, so `posts[0]` and `post != null` both compile.
-    if (b.init.startsWith('RoseKit.RoseContentList(')) return `    private static readonly List<Dictionary<string, object?>> ${b.name} = ${b.init};`;
-    if (b.init.startsWith('RoseKit.RoseContentGet(')) return `    private static readonly Dictionary<string, object?>? ${b.name} = ${b.init};`;
+    if (b.init.startsWith('RoseKit.RoseContentList(')) return `    private static readonly List<Dictionary<string, object?>> ${b.name} = ${b.init.replace(/'([^']*)'/g, '"$1"')};`;
+    if (b.init.startsWith('RoseKit.RoseContentGet(')) return `    private static readonly Dictionary<string, object?>? ${b.name} = ${b.init.replace(/'([^']*)'/g, '"$1"')};`;
     return `    private static readonly Dictionary<string, object?> ${b.name} = ${csMapLiteral(b.init)};`;
   }).join('\n');
   const initialState = [
-    ...facts.state.map((s) => `        state.TryAdd("${s.name}", ${csLiteral(initialOf(page.script, s.name))});`),
+    ...facts.state.map((s) => `        state.TryAdd("${s.name}", ${csLiteral(initialOf(page.script, s.name).trim().replace(/^\(([\s\S]*)\)$/, '$1'))});`),
     ...facts.data.map((d) => `        state.TryAdd("${d}", null);`),
     // R124: a `{#defer}` flag is state, so it seeds like any other key.
     ...ctx.deferred.map((d) => `        state.TryAdd("${d.name}", false);`),
@@ -2957,6 +3045,10 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using ${NS};
+// The kit's static helpers (roseThrow, RoseCount) and the page's components are
+// called bare by the generated bodies.
+using static ${NS}.RoseKit;
+using ${NS}.Components;
 
 public static class ${page.cls}Page
 {
@@ -3218,7 +3310,14 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
       // expression the template path translates; no concat coercion is needed
       // here because C# `+` already turns into a string concat as soon as one
       // operand is a string, which is what JS does too.
-      emit(`var ${node.name} = ${csExpr(node.code, ctx)};`, ctx);
+      const taken = new Set<string>([...(ctx.constNames?.values() ?? []), 'g', 'p', 'b', 'line', 'ev', 'app', 'parent']);
+      let emitted = node.name;
+      if (taken.has(emitted) || (ctx.constNames?.has(node.name) ?? false)) {
+        ctx.constSeq ??= { n: 0 };
+        emitted = `${node.name}_${++ctx.constSeq.n}`;
+      }
+      (ctx.constNames ??= new Map()).set(node.name, emitted);
+      emit(`var ${emitted} = ${csExpr(node.code, ctx)};`, ctx);
       return;
     }
     case 'render':
@@ -3239,7 +3338,11 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
     case 'each': {
       const list = csExpr(node.items, ctx);
       const binding = /^[A-Za-z_$][\w$]*$/.test(node.binding) ? node.binding : 'item';
-      emit(`foreach (var ${binding} in RoseTheme.AsList(${list})) {`, ctx);
+      const listed = list.trim();
+      const eachSource = /^\[([\s\S]*)\]$/.test(listed)
+        ? `RoseTheme.List(${splitTopLevel(listed.slice(1, -1)).map((x) => csLiteral(x.trim())).filter(Boolean).join(', ')})`
+        : `RoseTheme.AsList(${listed})`;
+      emit(`foreach (var ${binding} in ${eachSource}) {`, ctx);
       ctx.depth++;
       const scoped: NetCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]) };
       emitNodes(node.children, scoped);
@@ -3472,15 +3575,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     // Two-way props: a call-site `bind:x={state}` passes the prop AND the
     // implicit change callback writing the parent's state back.
     const binds = callSiteBinds(node);
-    const args = declared
-      .filter((p) => !binds.has(p.name))
-      .map((p) => {
-        const attr = given.find((a) => a.name === p.name);
-        return attr ? csAttr(attr, ctx) : csLiteral(p.init);
-      });
-    for (const [, state] of binds) {
-      args.push(`${ctx.app}.V("${state}")`);
-      args.push(`v => { ${ctx.app}.Set("${state}", v); ${ctx.app}.Render(); }`);
+    const args: string[] = [];
+    for (const p of declared) {
+      if (binds.has(p.name)) {
+        const state = binds.get(p.name) as string;
+        args.push(`${ctx.app}.V("${state}")`);
+        args.push(`(object? v) => { ${ctx.app}.Set("${state}", v); ${ctx.app}.Render(); }`);
+        continue;
+      }
+      const attr = given.find((a) => a.name === p.name);
+      args.push(attr ? csAttr(attr, ctx) : csLiteral(p.init));
     }
     // Slots (the web contract): each slot's content is an action the component
     // invokes with the panel to fill; a named slot also receives the scoped
@@ -3732,7 +3836,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         ctx.depth++;
         emit(`var picker = new DatePicker { SelectedDate = RoseTheme.DateOf(${propName}?.ToString() ?? "") };`, ctx);
         if (style) emit(`RoseTheme.Apply(picker, ${style});`, ctx);
-        emit(`picker.SelectedDateChanged += (_, e) => ${handler}(RoseTheme.IsoDay(e.NewValue));`, ctx);
+        emit(`picker.SelectedDateChanged += (_, e) => ${handler}(RoseTheme.IsoDay(e.AddedItems.Count > 0 ? e.AddedItems[0] : null));`, ctx);
         emit(`${ctx.parent}.Children.Add(picker);`, ctx);
         ctx.depth--;
         emit('}', ctx);
@@ -3786,8 +3890,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     // form element to carry it.
     if (!click && typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text === 'submit' && (ctx.formSubmit || ctx.pageAction)) {
       const submitLabel = capText(csText(node.children, ctx) || '""', model.textTransform);
-      const run = ctx.formSubmit ? `${ctx.formSubmit}(${ctx.app})` : `${ctx.pageAction}(${ctx.app})`;
-      const call = `RoseTheme.Button(${ctx.parent}, ${submitLabel}, (_, _) => { ${run}; ${ctx.app}.Render(); }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
+      const arg = (fn: string) => `${fn}(${ctx.app}${(ctx.fnArity?.get(fn) ?? 0) > 0 ? ', ev' : ''})`;
+      const run = ctx.formSubmit ? arg(ctx.formSubmit) : arg(ctx.pageAction ?? '');
+      const call = `RoseTheme.Button(${ctx.parent}, ${submitLabel}, (_, ev) => { ${run}; ${ctx.app}.Render(); }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const b = `btn${++ctx.counter.c}`;
       emit(`var ${b} = ${call};`, ctx);
@@ -3797,7 +3902,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     let body = '';
     if (click && click.value.kind === 'expr') {
       const code = click.value.code.trim();
-      if (/^[A-Za-z_$][\w$]*$/.test(code)) body = `${code}(${ctx.app});`;
+      if (/^[A-Za-z_$][\w$]*$/.test(code)) body = `${code}(${ctx.app}${(ctx.fnArity?.get(code) ?? 0) > 0 ? ", ev" : ""});`;
       else {
         // An inline handler becomes the button's own lambda, through the
         // shared handler IR.
@@ -4005,12 +4110,37 @@ function csRenameCalls(code: string, renamed: Map<string, string>): string {
 }
 
 function csExpr(code: string, ctx: NetCtx): string {
-  return csStateFields(csExprInner(code, ctx));
+  let out = csStateFields(csExprInner(code, ctx));
+  if (ctx.constNames && ctx.constNames.size) {
+    for (const [from, to] of ctx.constNames) {
+      if (from !== to) out = out.replace(new RegExp('\\b' + from + '\\b', 'g'), to);
+    }
+  }
+  if (ctx.arrowFns && ctx.arrowFns.size) {
+    for (const [fn, bodyText] of ctx.arrowFns) {
+      out = out.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), () => csStateFields(csExprInner(bodyText, ctx)));
+      out = out.replace(new RegExp('\\b' + fn + '\\b(?!\\s*\\()', 'g'), () => csStateFields(csExprInner(bodyText, ctx)));
+    }
+  }
+  if (ctx.fnNames && ctx.fnNames.size) {
+    for (const fn of ctx.fnNames) {
+      out = out.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), `${fn}(app)`);
+      out = out.replace(new RegExp('\\b' + fn + '\\((?!\\)|app\\))', 'g'), `${fn}(app, `);
+    }
+  }
+  return out;
 }
 
 /** A field read on a state value ("{post.title}") does not compile in C#: the
  *  state is object?, and no member hangs off it. Same rule the Java target
  *  learned - the kit's Get is the only reader. */
+/** Names that are C# keywords take the verbatim prefix: "checked" as a
+ *  parameter name is a parse error, "@checked" is an identifier. */
+const CS_KEYWORDS = new Set(['checked', 'unchecked', 'lock', 'event', 'object', 'string', 'base', 'params', 'ref', 'out', 'in', 'is', 'as', 'new', 'null', 'true', 'false', 'default', 'class', 'namespace', 'public', 'private', 'static', 'void', 'return']);
+function csSafeName(name: string): string {
+  return CS_KEYWORDS.has(name) ? '@' + name : name;
+}
+
 function csStateFields(out: string): string {
   let o = out.replace(/app\.V\("([^"]+)"\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
     (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
@@ -4018,6 +4148,45 @@ function csStateFields(out: string): string {
     (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
   // JS .length / a list read used as a count is the kit's Count, not a member.
   o = o.replace(/app\.V\("([^"]+)"\)\.(?:length|Length|Count)\b/g, (_m, name: string) => `RoseKit.Count(app.V("${name}"))`);
+  o = o.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
+  // A state read is object?: C# refuses arithmetic, comparison and ! on one
+  // without the kit's conversion - the same coercion the Java target needs.
+  o = o.replace(/app\.V\("([^"]+)"\)\s*([-+*/%])\s*(-?\d+(?:\.\d+)?)/g, (_m, n: string, op: string, num: string) => `RoseTheme.Int(app.V("${n}")) ${op} ${num}`);
+  o = o.replace(/(-?\d+(?:\.\d+)?)\s*([-+*/%])\s*app\.V\("([^"]+)"\)/g, (_m, num: string, op: string, n: string) => `${num} ${op} RoseTheme.Int(app.V("${n}"))`);
+  o = o.replace(/app\.V\("([^"]+)"\)\s*(==|!=)\s*(-?\d+(?:\.\d+)?)/g, (_m, n: string, op: string, num: string) => `RoseTheme.Int(app.V("${n}")) ${op} ${num}`);
+  o = o.replace(/(-?\d+(?:\.\d+)?)\s*(==|!=)\s*app\.V\("([^"]+)"\)/g, (_m, num: string, op: string, n: string) => `${num} ${op} RoseTheme.Int(app.V("${n}"))`);
+  o = o.replace(/app\.V\("([^"]+)"\)\s*(==|!=)\s*("(?:[^"\\]|\\.)*")/g, (_m, n: string, op: string, lit: string) => `RoseTheme.Str(app.V("${n}")) ${op} ${lit}`);
+  o = o.replace(/("(?:[^"\\]|\\.)*")\s*(==|!=)\s*app\.V\("([^"]+)"\)/g, (_m, lit: string, op: string, n: string) => `${lit} ${op} RoseTheme.Str(app.V("${n}"))`);
+  o = o.replace(/!\s*app\.V\("([^"]+)"\)/g, (_m, n: string) => `!RoseTheme.Truth(app.V("${n}"))`);
+  o = o.replace(/!([A-Za-z_$][\w$]*)(?!\s*[.(])/g, (whole: string, id: string) =>
+    new RegExp('(?:var|string)\\s+' + id + '\\s*=').test(out) ? `string.IsNullOrEmpty(${id})` : whole);
+  // A list read used as a number is its length.
+  o = o.replace(/RoseTheme\.List\((app\.V\("[^"]+"\))\)(\s*[-+*/%]\s*-?\d)/g, 'RoseKit.Count($1)$2');
+  o = o.replace(/(RoseKit\.RoseContentGet\([^()]*\))\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
+    (_m, call, key) => `RoseTheme.Get(${call}, "${key}")`);
+  o = o.replace(/RoseTheme\.AsList\(\[([^\]]*)\]\)/g, (_m, inner: string) => {
+    const items = splitTopLevel(inner).map((x) => csLiteral(x.trim())).filter(Boolean);
+    return `RoseTheme.List(${items.join(', ')})`;
+  });
+  o = o.replace(/RoseTheme\.Get\(([^()]*)\)(\s*[-+*/%]\s*)(?![=])/g, (_m, inner: string, op: string) => `RoseTheme.Int(RoseTheme.Get(${inner}))${op}`);
+  o = o.replace(/RoseTheme\.Get\(([^,()]+), "([^"]+)"\)\s*\+=\s*([^;\n]+)/g,
+    (_m, container: string, key: string, by: string) => `RoseTheme.Bump(${container}, "${key}", ${by.trim()})`);
+  o = o.replace(/\b([A-Za-z_$][\w$]*)\[(\d+)\]/g, (_m, name: string, at: string) => `RoseTheme.Index(${name}, ${at})`);
+  o = o.replace(/!RoseTheme\.Str\(((?:[^()]|\([^()]*\))*)\)(\.Trim\(\))?/g, (_m, inner, trim) => `string.IsNullOrEmpty(RoseTheme.Str(${inner})${trim ?? ""})`);
+  o = o.replace(/!([A-Za-z_$][\w$]*)\(app\)/g, (_m, fn: string) => `!RoseTheme.Truth(${fn}(app))`);
+  o = o.replace(/!RoseTheme\.Get\(((?:[^()]|\([^()]*\))*)\)/g, (_m, inner: string) => `!RoseTheme.Truth(RoseTheme.Get(${inner}))`);
+  o = o.replace(/(RoseKit\.Count\([^()]*\))\)\s*\?/g, '$1 > 0) ?');
+  o = o.replace(/RoseTheme\.Get\(([^()]*)\)\s*(==|!=)\s*(-?\d+(?:\.\d+)?)/g, (_m, inner: string, op: string, num: string) => `RoseTheme.Int(RoseTheme.Get(${inner})) ${op} ${num}`);
+  // A ternary condition must be a bool.
+  o = o.replace(/\.Count\)\s*\?/g, '.Count > 0) ?');
+  o = o.replace(/return\s+\{([^{}]*)\}/g, (_m, inner: string) => {
+    const entries = splitTopLevel(inner).map((part) => part.trim()).filter(Boolean).map((part) => {
+      const at = part.indexOf(':');
+      if (at < 0) return null;
+      return `["${part.slice(0, at).trim().replace(/^['"]|['"]$/g, '')}"] = ${part.slice(at + 1).trim()}`;
+    }).filter((x): x is string => !!x);
+    return `return new Dictionary<string, object?> { ${entries.join(', ')} }`;
+  });
   return o;
 }
 
@@ -4471,15 +4640,38 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     if (close < 0) continue;
     // Handler bodies are statements: they never pass through csExpr, so the
     // state-value coercions run here too (the same lesson the Java target taught).
-    const body = csStateFields(csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed));
-    methods.push(`    private static void ${csName}(RoseApp app)\n    {\n${body}\n        app.Render();\n    }`);
+    let body = csStateFields(csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed));
+    // A call INSIDE a body needs the app too: the emitted method takes it first.
+    // The rename (build -> build_) happens in csRenameCalls above, so the call
+    // has to be matched under BOTH names.
+    const callNames = new Set<string>();
+    for (const m2 of script.matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)) callNames.add(m2[1]);
+    for (const [, to] of renamed) callNames.add(to);
+    for (const fn of callNames) {
+      body = body.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), fn + '(app)');
+      body = body.replace(new RegExp('\\b' + fn + '\\((?!\\)|app\\))', 'g'), fn + '(app, ');
+    }
+    // This target ships no dictionary: a translation renders its key.
+    body = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
+    // A JS handler's event parameter has no C# counterpart unless the signature
+    // carries it - the body read e.key and the parameter had been dropped.
+    const params = m[2].split(',').map((x) => x.trim().split(/[:\s=]/)[0]).filter(Boolean);
+    for (const name of params) {
+      body = body.replace(new RegExp('\\b' + name + '\\.key\\b', 'g'), `RoseKit.KeyOf(${name})`);
+    }
+    for (const name of params) {
+      if (csSafeName(name) !== name) body = body.replace(new RegExp('\\b' + name + '\\b', 'g'), '@' + name);
+    }
+    const paramDecl = actions.includes(csName) ? '' : params.map((name) => `, object? ${csSafeName(name)}`).join('');
+    const returnsValue = /\breturn\s+[^;\s]/.test(body);
+    methods.push(`    private static object? ${csName}(RoseApp app${paramDecl})\n    {\n${body}${returnsValue ? '' : '\n        app.Render();'}\n        return null;\n    }`);
   }
   return methods.join('\n\n');
 }
 
 const NET_EXPR: ExprDialect = {
   get: (o, k) => `RoseTheme.Get(${o}, "${k}")`,
-  count: (e) => `RoseTheme.Count(${e})`,
+  count: (e) => `RoseKit.Count(${e})`,
   bool: (e) => `RoseTheme.Bool(${e})`,
   merge: (b, p) => `RoseTheme.Merge(${b}, ${p})`,
   obj: (pairs) => `RoseTheme.Obj(${pairs.map(([k, v]) => `("${k}", ${v})`).join(', ')})`,
@@ -4756,16 +4948,23 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   const slotParams: string[] = [];
   // Two-way props: the inputs that render a prop get an implicit change callback.
   const twoWay = inputBoundProps(comp.nodes, props);
-  for (const p of twoWay) slotParams.push(`Action<object?> ${propChangeHandler(p)}`);
+  // Each two-way prop rides with its own callback, in declaration order.
+  const propParams = props.map((p) => (twoWay.includes(p)
+    ? `object? ${csSafeName(p)}, Action<object?> ${propChangeHandler(p)}`
+    : `object? ${csSafeName(p)}`));
+
   if (comp.slots.hasDefault) slotParams.push('Action<Panel> slotDefault');
   for (const s of comp.slots.named) slotParams.push(`Action<IDictionary<string, object?>, Panel> slot${s.name.charAt(0).toUpperCase()}${s.name.slice(1)}`);
+  for (const name of props) {
+    if (csSafeName(name) !== name) ctx.lines = ctx.lines.map((line) => line.replace(new RegExp('\\b' + name + '\\b', 'g'), csSafeName(name)));
+  }
   return `namespace ${NS}.Components;
 
 using System.Windows.Controls;
 
 public static class ${comp.cls}View
 {
-    public static Panel Build(RoseApp app, Panel parent${props.length ? ', object? ' + props.join(', object? ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''})
+    public static Panel Build(RoseApp app, Panel parent${propParams.length ? ', ' + propParams.join(', ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''})
     {
         var panel${comp.cls} = RoseTheme.Card(parent, ${csStyle(rootModel)});
 ${ctx.lines.join('\n')}

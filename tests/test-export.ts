@@ -3628,7 +3628,7 @@ try {
   const twNet = readFileSync(join(dotnet.outDir, 'Components/TextFieldView.cs'), 'utf8');
   const twNBind = readFileSync(join(dotnet.outDir, 'Pages/BindDemoPage.cs'), 'utf8');
   assert(twNet.includes('Action<object?> onValueChange') && twNet.includes('onValueChange(box.Text)'), 'WPF declares the implicit change callback and wires the box to it');
-  assert(twNBind.includes('v => { app.Set("name", v); app.Render(); }'), 'WPF writes the parent state from the change callback');
+  assert(twNBind.includes('(object? v) => { app.Set("name", v); app.Render(); }'), 'WPF writes the parent state from the change callback');
   const twCpp = readFileSync(join(cpp.outDir, 'src/components/TextFieldView.cpp'), 'utf8');
   const twCBind = readFileSync(join(cpp.outDir, 'src/pages/BindDemoPage.cpp'), 'utf8');
   const twHeader = readFileSync(join(cpp.outDir, 'src/pages.h'), 'utf8');
@@ -5953,7 +5953,7 @@ h2 { font-size: 40px; }
     assert(jvs.includes('return build_();'), 'java: the call site follows the rename');
     const nsv = await exportProject('dotnet', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-dotnet') });
     const nsvs = readFileSync(join(nsv.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
-    assert(nsvs.includes('private static void build_(RoseApp app)') && nsvs.includes('return build_();'), 'dotnet: the user function is renamed, the call site follows');
+    assert(nsvs.includes('private static object? build_(RoseApp app)') && nsvs.includes('return build_(app);'), 'dotnet: the user function is renamed, the call site follows');
     const cpv = await exportProject('cpp', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-cpp') });
     const cpvs = readFileSync(join(cpv.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
     assert(cpvs.includes('void build_(RoseApp& app) {') && cpvs.includes('return build_();'), 'cpp: the user function is renamed, the call site follows');
