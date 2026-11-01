@@ -1519,6 +1519,7 @@ try {
       ['dotnet', 'RoseKit.cs', 'BakedJson'],
       ['python', 'rosezm.py', 'BAKED = json.loads'],
       ['arkts', 'entry/src/main/ets/kit/RoseKit.ets', 'ROSE_BAKED'],
+      ['cpp', 'src/rose.h', 'ROSE_BAKED'],
     ];
     for (const [target, rel, needle] of bakeTargets) {
       const r = await exportProject(target as 'flutter', bakeRoot, { apiBase: '', outRoot: join(scratch, 'bake-' + target) });

@@ -27,7 +27,7 @@ import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, merg
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, qtFill, type SvgOp, type SvgShape } from './svg-path.js';
 import { literalOptions, nativeUsage, rewriteNativeCalls, type NativeCapability } from './native-api.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue } from './state-ops.js';
 
@@ -164,7 +164,7 @@ export async function emitCpp(opts: EmitCppOptions): Promise<{ pages: string[]; 
   const hasVideo = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'video'));
   const hasAudio = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'audio'));
   const hasMedia = hasVideo || hasAudio;
-  await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native, hasVideo, hasAudio), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'src', 'rose.h'), renderHeader(styles, opts.apiBase ?? '', content, native, hasVideo, hasAudio, bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'rose.cpp'), renderRoseCpp(pages, native, app, hasExternalLinks, hasVideo, hasAudio), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'pages.h'), renderPagesHeader(pages, components), 'utf8');
   await fs.promises.writeFile(path.join(out, 'src', 'main.cpp'), renderMain([...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
@@ -519,7 +519,16 @@ function textCarry(m: StyleModel): StyleModel | null {
   return isEmptyModel(out) ? null : out;
 }
 
-function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false): string {
+function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false, baked: Record<string, unknown> = {}): string {
+  // The state each route rendered with at build time: the first frame a desktop
+  // binary can paint with no server behind it.
+  const bakedBlock = Object.keys(baked).length
+    ? `/// The state each route rendered with at build time (see rosezm build).
+inline const RoseValue ROSE_BAKED = RoseValue::fromRaw(${JSON.stringify(JSON.stringify(baked))});
+
+inline RoseValue rose_baked_for(const std::string& route) { return rose_get(ROSE_BAKED, route); }
+`
+    : `inline RoseValue rose_baked_for(const std::string&) { return RoseValue(); }`;
   const styleRows = [...styles.entries()].map(([name, s]) => `    {"${name}", {${s.fontSize}, "${s.color}", ${s.background ? `"${s.background}"` : '""'}, ${s.padding}, ${s.bold ? 'true' : 'false'}, ${JSON.stringify(s.fontFamily)}, ${JSON.stringify(s.borderColor)}, ${s.borderWidth}, ${s.padTop}, ${s.padRight}, ${s.padBottom}, ${s.padLeft}, ${JSON.stringify(s.direction)}, ${s.gap}, ${JSON.stringify(s.justify)}, ${JSON.stringify(s.items)}, ${s.alpha}, ${s.absolute ? 'true' : 'false'}, ${s.insetX}, ${s.insetY}, ${s.scrolls ? 'true' : 'false'}, ${s.width}, ${s.height}, "${s.gradient}", ${s.marginTop}, ${s.marginRight}, ${s.marginBottom}, ${s.marginLeft}, "${s.textAlign}", ${s.lineHeight}, "${s.textTransform}", ${s.italic ? 'true' : 'false'}, ${s.underline ? 'true' : 'false'}, ${s.strike ? 'true' : 'false'}, ${s.minWidth}, ${s.maxWidth}, ${s.minHeight}, ${s.maxHeight}, ${s.zIndex}, ${s.radiusTl}, ${s.radiusTr}, ${s.radiusBr}, ${s.radiusBl}, ${s.letterSpacing}, ${s.shadowX}, ${s.shadowY}, ${s.shadowBlur}, "${s.shadowColor}", ${s.shadowSpread}, ${s.nowrap ? 'true' : 'false'}, ${s.ellipsis ? 'true' : 'false'}, ${s.wrap ? 'true' : 'false'}, "${s.image}", "${s.imageFit}", ${s.pointer ? 'true' : 'false'}}},`).join('\n');
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
@@ -970,7 +979,7 @@ RoseValue rose_obj(const std::vector<std::pair<std::string, RoseValue>>& pairs);
 int rose_count(const RoseValue& value);
 RoseValue rose_concat(const RoseValue& a, const RoseValue& b);
 RoseValue rose_string_list(const std::vector<std::string>& values);
-${contentBlock}
+${bakedBlock}${contentBlock}
 
 inline const std::map<std::string, RoseStyle>& rose_styles() {
     static const std::map<std::string, RoseStyle> kStyles = {
@@ -1632,6 +1641,13 @@ void RoseApp::render() {
     // widget exists, so a wall that moves the view leaves nothing half-built.
     if (std::find(loadedRoutes_.begin(), loadedRoutes_.end(), route_) == loadedRoutes_.end()) {
         loadedRoutes_.push_back(route_);
+        if (rose_api_base().size() == 0) {
+            // No backend: the build's own state is the first frame.
+            const RoseValue bakedState = rose_baked_for(route_);
+            for (const auto& key : rose_keys(bakedState)) {
+                if (!state_.count(key)) state_[key] = rose_get(bakedState, key);
+            }
+        }
         if (rose_api_base().size() > 0) {
             QNetworkAccessManager manager;
             QNetworkRequest request(QUrl(QString::fromStdString(rose_api_base() + "/__rosezm/data?path=" + route_)));
