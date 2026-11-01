@@ -2476,8 +2476,15 @@ function readGlobalCss(cssPath: string | undefined): string | undefined {
   }
 }
 
+/** Bytes as a reader wants them: 1.2 MB, not 1258291. */
+function humanBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 async function exportCmd(): Promise<void> {
-  const { exportProject, isTarget, targetList, TARGETS } = await import('../export/index.js');
+  const { exportProject, treeSize, isTarget, targetList, TARGETS } = await import('../export/index.js');
   // argv[0] is the command itself (`export`), argv[1] the target, argv[2] the dir.
   const rest = process.argv.slice(2);
   const target = rest[1];
@@ -2530,16 +2537,21 @@ async function exportCmd(): Promise<void> {
     const startedAll = Date.now();
     const done: string[] = [];
     const failures: Array<{ target: string; error: string }> = [];
-    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; error?: string }> = [];
+    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; bytes?: number; files?: number; ms?: number; error?: string }> = [];
     // One target's failure must not hide the other sixteen: a batch command
     // reports everything it did, everything that failed, and exits non-zero
     // only after it has actually finished trying.
     for (const info of Object.values(TARGETS)) {
       if (info.status !== 'ready') continue;
       try {
+        const at = Date.now();
         const result = await exportProject(info.name, projectRootAll, { apiBase: apiAll, outRoot: outRootAll, globalCss: readGlobalCss(cssAll), cloud: rest.includes('--cloud') ? true : undefined, cloudEnv: flagAll('--cloud-env') });
-        allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length });
-        if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) -> ${result.outDir}`);
+        // What the tree costs on disk, and what it took: the two numbers a team
+        // shipping seventeen targets actually argues about.
+        const size = await treeSize(result.outDir);
+        const ms = Date.now() - at;
+        allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length, bytes: size.bytes, files: size.files, ms });
+        if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) ${humanBytes(size.bytes).padStart(9)} ${String(ms).padStart(5)}ms -> ${result.outDir}`);
         done.push(info.name);
       } catch (err) {
         allResults.push({ target: info.name, pages: 0, components: 0, outDir: '', warnings: 0, error: err instanceof Error ? err.message : String(err) });
@@ -2637,6 +2649,12 @@ async function exportCmd(): Promise<void> {
   const rel = path.relative(process.cwd(), result.outDir) || result.outDir;
   console.log(`🌹 rosezm v${version()} export ${target} -> ${rel}`);
   console.log(`  ${result.pages.length} page(s), ${result.components.length} component(s) in ${Date.now() - started}ms`);
+  {
+    // What it costs on disk: the number a team shipping a native app asks for
+    // first, and the one nobody could answer before.
+    const size = await treeSize(result.outDir);
+    console.log(`  ${humanBytes(size.bytes)} on disk, ${size.files} file(s)`);
+  }
   if (result.pages.length) console.log(`  pages: ${result.pages.join(', ')}`);
   // Warnings grouped by kind: 38 one-line notes from one page is noise, not
   // information. --json keeps the full list for a tool.

@@ -1481,6 +1481,15 @@ try {
   const pySign = pread('pages/sign.py');
   assert(pySign.includes("'guests': (['Ada Lovelace', 'Grace Hopper']),"), 'Tk seeds the $store payload too');
 
+  // What a tree costs on disk, in the manifest a CI reads: seventeen targets is
+  // a size decision as much as a feature decision.
+  {
+    const sized = await exportProject('android', example, { apiBase: '', outRoot: join(scratch, 'sized') });
+    const manifest = JSON.parse(readFileSync(join(sized.outDir, 'rosezm-export.json'), 'utf8')) as { bytes?: number; files?: number };
+    assert(typeof manifest.bytes === 'number' && manifest.bytes > 50_000, `the manifest reports the tree's size (${manifest.bytes} bytes)`);
+    assert(typeof manifest.files === 'number' && manifest.files > 20, `the manifest reports the file count (${manifest.files})`);
+  }
+
   // The build must refuse a bundle that is not JavaScript. The reported case: a
   // type annotation survived a source rewrite, `Record<string, string>>` landed
   // in dist/server.js, the build said OK, and every route 500'd at import time.
