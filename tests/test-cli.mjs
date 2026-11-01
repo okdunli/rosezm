@@ -83,6 +83,10 @@ assert(fs.existsSync(path.join(app, 'rosezm.config.js')), 'the copied project ca
 
 const built = await run(['build', app], REPO);
 assert(built.code === 0, `rosezm build <dir> exits 0 on a foreign project (stderr: ${built.err.slice(0, 200)})`);
+// Which tree was compiled used to be invisible: a staged build pointed at the
+// wrong directory and nothing in the output said so. The first line now names
+// the project (and its realpath when it resolves through a symlink).
+assert(built.out.split('\n')[0].startsWith(`rosezm build ${fs.realpathSync(app)}`) || built.out.split('\n')[0].startsWith(`rosezm build ${app}`), `the build names the tree it compiles (${built.out.split('\n')[0]})`);
 const home = path.join(REPO, 'dist', 'index.html');
 assert(fs.existsSync(home), 'the build wrote dist/index.html');
 assert(fs.readFileSync(home, 'utf-8').includes('Guestbook'), 'the foreign project really rendered (its home page is in dist/)');

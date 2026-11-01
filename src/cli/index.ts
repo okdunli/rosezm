@@ -342,6 +342,11 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
 }
 
 async function build(): Promise<void> {
+  // Say WHICH tree is being compiled, out loud. A build that silently compiled
+  // a different directory than the one on screen cost a downstream project a
+  // day of debugging; when the path resolves through a symlink, print both.
+  const realSrc = (() => { try { return fs.realpathSync(SRC_DIR); } catch { return SRC_DIR; } })();
+  console.log(`rosezm build ${SRC_DIR}${realSrc === SRC_DIR ? '' : ` (realpath ${realSrc})`} -> ${OUT_DIR}`);
   const minify = !devMode && !argv.includes('--no-minify');
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
   // Before anything serves it: every emitted JS file must be JavaScript, not
