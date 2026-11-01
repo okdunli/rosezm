@@ -345,8 +345,12 @@ async function build(): Promise<void> {
   // Say WHICH tree is being compiled, out loud. A build that silently compiled
   // a different directory than the one on screen cost a downstream project a
   // day of debugging; when the path resolves through a symlink, print both.
-  const realSrc = (() => { try { return fs.realpathSync(SRC_DIR); } catch { return SRC_DIR; } })();
-  console.log(`rosezm build ${SRC_DIR}${realSrc === SRC_DIR ? '' : ` (realpath ${realSrc})`} -> ${OUT_DIR}`);
+  // --json promises the envelope is the ONLY thing on stdout, so the banner
+  // stays out of that mode (a CI parsing it broke when this line landed).
+  if (!asJson) {
+    const realSrc = (() => { try { return fs.realpathSync(SRC_DIR); } catch { return SRC_DIR; } })();
+    console.log(`rosezm build ${SRC_DIR}${realSrc === SRC_DIR ? '' : ` (realpath ${realSrc})`} -> ${OUT_DIR}`);
+  }
   const minify = !devMode && !argv.includes('--no-minify');
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
   // Before anything serves it: every emitted JS file must be JavaScript, not
@@ -2618,7 +2622,13 @@ async function exportCmd(): Promise<void> {
   const runProjectBuild = (): boolean => {
     // Inside the project, so its dist/ lands next to its own sources - the
     // export bakes from THAT tree, never from wherever the shell happened to be.
-    const r = spawnSync(process.execPath, [...process.execArgv, process.argv[1], 'build', '.'], { stdio: 'inherit', cwd: projectRoot });
+    // --json promises a clean envelope, so the child's human output goes to
+    // stderr (or nowhere); inheriting it corrupted the JSON the same way the
+    // build banner once did.
+    const r = spawnSync(process.execPath, [...process.execArgv, process.argv[1], 'build', '.'], {
+      stdio: asJson ? ['ignore', 'ignore', 'inherit'] : 'inherit',
+      cwd: projectRoot,
+    });
     return r.status === 0;
   };
   if (withBuild && !runProjectBuild()) {
@@ -2654,6 +2664,14 @@ async function exportCmd(): Promise<void> {
     // first, and the one nobody could answer before.
     const size = await treeSize(result.outDir);
     console.log(`  ${humanBytes(size.bytes)} on disk, ${size.files} file(s)`);
+  }
+  // Where to go next. Not a guessed command: the file that ships with the tree
+  // and already says it (and the emitter guarantees one exists).
+  for (const doc of ['DEPLOY.md', 'README.md']) {
+    if (fs.existsSync(path.join(result.outDir, doc))) {
+      console.log(`  next: read ${path.join(rel, doc)}`);
+      break;
+    }
   }
   if (result.pages.length) console.log(`  pages: ${result.pages.join(', ')}`);
   // Warnings grouped by kind: 38 one-line notes from one page is noise, not

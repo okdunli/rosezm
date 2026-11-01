@@ -57,6 +57,9 @@ function walk(dir: string): string[] {
 }
 
 let checks = 0;
+/** Toolchain gates that could not run here. A skipped gate is not a pass, and a
+ *  suite that says nothing about it reads as one - the report names them. */
+const skippedGates: string[] = [];
 const assert = (cond: boolean, msg: string) => {
   checks++;
   if (!cond) {
@@ -522,6 +525,7 @@ try {
     const jdkOk = (() => {
       try { return spawnSync('javac', ['-version'], { encoding: 'utf8', timeout: 20_000 }).status === 0; } catch { return false; }
     })();
+    if (!jdkOk) skippedGates.push('java (javac)');
     if (jdkOk) {
       const jr = await exportProject('java', example, { apiBase: 'x', outRoot: join(scratch, 'java-compile') });
       const files = walk(join(jr.outDir, 'src')).filter((f) => f.endsWith('.java'));
@@ -537,6 +541,7 @@ try {
     const flutterOk = (() => {
       try { return spawnSync('flutter', ['--version'], { encoding: 'utf8', timeout: 60_000 }).status === 0; } catch { return false; }
     })();
+    if (!flutterOk) skippedGates.push('flutter (flutter analyze)');
     if (flutterOk) {
       const fr = await exportProject('flutter', example, { apiBase: 'x', outRoot: join(scratch, 'flutter-analyze') });
       spawnSync('flutter', ['pub', 'get'], { cwd: fr.outDir, encoding: 'utf8', timeout: 600_000 });
@@ -551,6 +556,7 @@ try {
     const dotnetOk = (() => {
       try { return spawnSync('dotnet', ['--version'], { encoding: 'utf8', timeout: 20_000 }).status === 0; } catch { return false; }
     })();
+    if (!dotnetOk) skippedGates.push('dotnet (dotnet build)');
     if (dotnetOk) {
       const dr = await exportProject('dotnet', example, { apiBase: 'x', outRoot: join(scratch, 'dotnet-build') });
       const db = spawnSync('dotnet', ['build', '-p:EnableWindowsTargeting=true', '-v', 'q'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
@@ -577,6 +583,7 @@ try {
     const gradleOk = (() => {
       try { return spawnSync(gradle, ['--version'], { encoding: 'utf8', timeout: 120_000, shell: sh }).status === 0; } catch { return false; }
     })();
+    if (!(gradleOk && sdk)) skippedGates.push('android (gradle assembleDebug)');
     if (gradleOk && sdk) {
       const ar = await exportProject('android', example, { apiBase: 'x', outRoot: join(scratch, 'android-build') });
       const args = ['assembleDebug', '--no-daemon', '--console=plain'];
@@ -7704,6 +7711,19 @@ h2 { font-size: 40px; }
     assert(/STYLES\.put\("grid__Index", new Style\(.*\)\.grid\(2, 0, 8, 0\)\)/.test(nJava), 'java: the column count and gap reach the theme grid manager');
   }
 
+  if (skippedGates.length) {
+    // Loud on purpose: this suite's strongest claims come from these gates, and
+    // a machine without the toolchain must not look like a machine that passed.
+    console.log(`\nSKIPPED toolchain gates (not run here): ${skippedGates.join(', ')}`);
+    console.log(`  install them and re-run for the full proof - ${checks} assertions ran, these did not:`);
+    for (const gate of skippedGates) console.log(`    - ${gate}`);
+    // A release run says so: ROSEZM_REQUIRE_TOOLCHAINS=1 turns a skip into a
+    // failure, so a gate that quietly stopped running cannot ship.
+    if (process.env.ROSEZM_REQUIRE_TOOLCHAINS) {
+      console.error(`\nrosezm: ROSEZM_REQUIRE_TOOLCHAINS is set and ${skippedGates.length} gate(s) could not run - failing instead of passing quietly.`);
+      process.exit(1);
+    }
+  }
   console.log(`\nAll export checks passed - one source tree, ${result.pages.length} pages to WeChat, ${alipay.pages.length} to Alipay, ${flutter.pages.length} to Flutter/Dart, ${python.pages.length} to Python/Tkinter, ${arkts.pages.length} to HarmonyOS ArkTS, ${android.pages.length} to Android/Compose, ${xcode.pages.length} to Xcode/SwiftUI, ${java.pages.length} to Java/Swing, ${dotnet.pages.length} to .NET/WPF, ${cpp.pages.length} to C++/Qt; the Electron shell wraps the built site - ${checks} assertions.\nEvery target in the registry is ready - one .rose tree, every platform.`);
 } finally {
   // Windows can still hold a handle in the temp tree for a moment (antivirus,

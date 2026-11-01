@@ -170,6 +170,26 @@ assert(usage.out.includes('--watch') && usage.out.includes('--build'), 'the usag
 // programs. The line now says what is real, and the old copy is dead.
 assert(usage.out.includes('17 targets, one source tree') && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
 
+// An export ends with where to go next - the doc the tree actually ships, so
+// the pointer cannot go stale the way a hardcoded command would.
+{
+  const nextProj = path.join(tmp, 'next-proj');
+  fs.mkdirSync(path.join(nextProj, 'src', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(nextProj, 'src', 'pages', 'index.rose'), '<h1>next</h1>\n');
+  const nextOut = path.join(tmp, 'next-out');
+  const nextRun = await run(['export', 'weapp', nextProj, '--out', nextOut], REPO);
+  assert(nextRun.code === 0, `the export runs for the next-step check (stderr: ${nextRun.err.slice(0, 160)})`);
+  // --json is a promise: the envelope is the only thing on stdout, even when a
+  // child build runs first. Inheriting that child's output broke it once.
+  const jsonOut = path.join(tmp, 'next-json');
+  const jsonRun = await run(['export', 'android', nextProj, '--out', jsonOut, '--build', '--json'], REPO);
+  let envelopeOk = false;
+  try { const env = JSON.parse(jsonRun.out.trim()); envelopeOk = env.ok === true && env.target === 'android'; } catch { envelopeOk = false; }
+  assert(jsonRun.code === 0 && envelopeOk, `--build --json keeps stdout pure JSON (${jsonRun.out.trim().slice(0, 80)})`);
+  const docLine = nextRun.out.split('\n').find((l) => l.trim().startsWith('next: read ')) ?? '';
+  assert(docLine.includes('README.md') && fs.existsSync(path.join(nextOut, 'weapp', 'README.md')), `the export points at the doc it ships (${docLine.trim()})`);
+}
+
 const newUsage = await run(['new'], REPO);
 assert(newUsage.out.includes('rosezm new <name>'), 'rosezm new with no name prints its usage');
 const scaffoldDir = path.join(tmp, 'my-app');
