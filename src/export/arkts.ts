@@ -29,7 +29,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 
@@ -204,7 +204,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // named only roseData/roseAction/roseKv - TS2304 on 7 pages. The import list
   // is now completed from the kit's own export table, so a helper the kit grows
   // is picked up without a hardcoded list rotting beside it.
-  const kitSource = renderKit(opts.apiBase ?? '', content, native, pages.map((p) => ({ route: p.route, url: 'pages/' + p.struct })));
+  const kitSource = renderKit(opts.apiBase ?? '', content, native, pages.map((p) => ({ route: p.route, url: 'pages/' + p.struct })), bakeRouteStates(root));
   const kitExports = kitExportNames(kitSource);
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseKit.ets'), kitSource, 'utf8');
 
@@ -1145,7 +1145,10 @@ function arkContainer(m: StyleModel, tag: string): { open: string; layout: strin
   return { open: `Column(${gap ? `{ ${gap.slice(2)} }` : ''})`, layout };
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], pages: Array<{ route: string; url: string }> = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], pages: Array<{ route: string; url: string }> = [], bakedAll: Record<string, unknown> = {}): string {
+  // Only the routes this app carries, and never a name the object literal would
+  // have to escape: the table is JSON, so it is emitted as JSON.
+  const baked = Object.fromEntries(Object.entries(bakedAll).filter(([route]) => pages.some((p) => p.route === route)));
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, the same shape the server-side
@@ -1311,6 +1314,14 @@ import hilog from '@ohos.hilog';
 /// Base URL of the deployed rosezm server (rosezm export --api).
 export const ROSE_API_BASE: string = ${JSON.stringify(apiBase)}
 
+/// The state each route rendered with at build time: the first frame a device
+/// can paint with no server. A live data channel still wins when it answers.
+const ROSE_BAKED: Record<string, Record<string, Object>> = ${JSON.stringify(baked)};
+
+export function roseBakedFor(route: string): Record<string, Object> {
+  return ROSE_BAKED[route] ?? {};
+}
+
 /** A site-relative media path resolved against the deployed server; an
  *  absolute URL passes through, so Image(src) works for both. */
 export function roseAssetUrl(path: string): string {
@@ -1431,7 +1442,8 @@ let roseCookie: string = '';
 
 /// The JSON half of a render: the state the page's $data produced.
 export async function roseData(route: string): Promise<Record<string, Object>> {
-  if (ROSE_API_BASE.length === 0) return {};
+  const baked = roseBakedFor(route);
+  if (ROSE_API_BASE.length === 0) return baked;
   const header: Record<string, string> = {};
   if (roseCookie.length > 0) header['cookie'] = roseCookie;
   const client = http.createHttp();

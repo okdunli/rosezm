@@ -28,7 +28,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, parseColor, parseLen, declarationsOf, splitValues, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
 import { translateExpr, rewriteToFixedCalls, matchArrow, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
@@ -174,7 +174,7 @@ export async function emitJava(opts: EmitJavaOptions): Promise<{ pages: string[]
   // calls it ships the same kit it always did.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(srcRoot, 'RoseTheme.java'), renderTheme(styles), 'utf8');
-  await fs.promises.writeFile(path.join(srcRoot, 'RoseKit.java'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(srcRoot, 'RoseKit.java'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(srcRoot, 'RoseApp.java'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))], app), 'utf8');
   await fs.promises.writeFile(path.join(srcRoot, 'Main.java'), renderMain(), 'utf8');
   for (const comp of components) {
@@ -2607,7 +2607,7 @@ ${branches}            default:
 }`;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
   const contentBlock = content ? `
 
     /** The project's markdown collections, baked at export time. A page reads
@@ -2657,6 +2657,8 @@ public final class RoseKit {
     }
     /** The backend URL: ROSEZM_API overrides the value baked at export time, so dev/staging/prod switch without a re-export. */
     public static final String API_BASE = System.getenv("ROSEZM_API") != null ? System.getenv("ROSEZM_API") : ${JSON.stringify(apiBase)};
+    /** The state each route rendered with at build time, as JSON. */
+    private static final String BAKED_JSON = ${JSON.stringify(JSON.stringify(baked))};
 
     /** The session cookie the server last set: the raw Set-Cookie header value
      *  of the most recent response, relayed verbatim as the Cookie header on the
@@ -2675,14 +2677,26 @@ ${contentBlock}${nativeKit(native)}
     /** The same channel with the app's own router: a middleware wall is never
      *  parsed as data, and a redirect to a page this export carries is opened
      *  (the predicate says whether it could). */
+    /** The state the build baked for this route - the first frame a device can
+     *  paint without a server. Empty when the build had nothing to bake. */
+    @SuppressWarnings("unchecked")
+    public static Map<String, Object> baked(String route) {
+        if (BAKED_JSON.isEmpty()) return new LinkedHashMap<>();
+        Object parsed = Json.parse(BAKED_JSON);
+        if (!(parsed instanceof Map)) return new LinkedHashMap<>();
+        Object entry = ((Map<String, Object>) parsed).get(route);
+        return entry instanceof Map ? (Map<String, Object>) entry : new LinkedHashMap<>();
+    }
+
     @SuppressWarnings("unchecked")
     public static Map<String, Object> data(String route, java.util.function.Predicate<String> open) {
-        if (API_BASE.isEmpty()) return new LinkedHashMap<>();
+        Map<String, Object> baked = baked(route);
+        if (API_BASE.isEmpty()) return baked;
         try {
             Response response = request(API_BASE + "/__rosezm/data?path=" + URLEncoder.encode(route, "UTF-8"), "GET", null);
-            if (wall(route, response.status, response.location, open)) return new LinkedHashMap<>();
+            if (wall(route, response.status, response.location, open)) return baked;
             // Any other non-2xx is the same data-less screen it always was.
-            if (response.status < 200 || response.status >= 300) return new LinkedHashMap<>();
+            if (response.status < 200 || response.status >= 300) return baked;
             Object parsed = Json.parse(response.body);
             if (parsed instanceof Map) {
                 Object state = ((Map<String, Object>) parsed).get("state");
@@ -2692,7 +2706,7 @@ ${contentBlock}${nativeKit(native)}
         } catch (Exception ignored) {
             // A missing server is a data-less screen, not a crash.
         }
-        return new LinkedHashMap<>();
+        return baked;
     }
 
     /** Call a server action - the framework's own protocol: POST __action=<name>. */

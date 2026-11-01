@@ -1508,6 +1508,21 @@ try {
     const bakedKit = readFileSync(join(baked.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
     assert(bakedKit.includes('ROSE_BAKED_JSON') && bakedKit.includes('baked hello'), 'the exported app carries the state the build baked for each route');
     assert(bakedKit.includes('return if (live.isEmpty()) baked else live'), 'a live data channel still wins over the baked state');
+    // Every target that has a data channel bakes the same frame, or a device
+    // opens on its declared defaults and the app looks empty.
+    const bakeTargets: Array<[string, string, string]> = [
+      ['flutter', 'lib/rosezm.dart', 'rosezmBakedFor'],
+      ['xcode', 'rosezmApp/Kit/RoseKit.swift', 'rosezmBakedFor'],
+      ['java', 'src/main/java/dev/rosezm/app/RoseKit.java', 'BAKED_JSON'],
+      ['dotnet', 'RoseKit.cs', 'BakedJson'],
+      ['python', 'rosezm.py', 'BAKED = json.loads'],
+      ['arkts', 'entry/src/main/ets/kit/RoseKit.ets', 'ROSE_BAKED'],
+    ];
+    for (const [target, rel, needle] of bakeTargets) {
+      const r = await exportProject(target as 'flutter', bakeRoot, { apiBase: '', outRoot: join(scratch, 'bake-' + target) });
+      const txt = readFileSync(join(r.outDir, rel), 'utf8');
+      assert(txt.includes(needle) && txt.includes('baked hello'), `${target} bakes the build's state for the first frame`);
+    }
   }
 
   // 10. the desktop shell: Electron around the built web app. The CLI build

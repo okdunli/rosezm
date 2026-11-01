@@ -30,7 +30,7 @@ import { appIdentity, xmlEscape } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -261,7 +261,7 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // carries it as JSON). A device has no server, so without this a page's
   // lists start empty until the data channel answers - with it the app paints
   // the same first frame the web build does, and a live fetch still wins.
-  const baked = await bakeRouteStates(root);
+  const baked = bakeRouteStates(root);
   // useNative(...): the capabilities this project's pages asked for. Empty when
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
@@ -2794,42 +2794,6 @@ ${layout}
 ${pull ? '    }' : ''}
 }
 `, local);
-}
-
-/** The per-route state the web build baked into `dist/**<slash>index.html`, keyed by
- *  route. Absent (or unreadable) dist means no bake - the app then starts from
- *  each page's declared defaults, exactly as before. */
-async function bakeRouteStates(root: string): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = {};
-  const dist = path.join(root, 'dist');
-  const walk = async (dir: string): Promise<string[]> => {
-    let entries: import('node:fs').Dirent[] = [];
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return []; }
-    const files: string[] = [];
-    for (const e of entries) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) files.push(...(await walk(p)));
-      else if (e.name === 'index.html' || e.name === 'rosezm-state.json') files.push(p);
-    }
-    return files;
-  };
-  for (const file of await walk(dist)) {
-    let text = '';
-    try { text = await fs.promises.readFile(file, 'utf8'); } catch { continue; }
-    // The sibling file first: it exists even when the document carries no state
-    // script, and it is what `rosezm build` writes for this purpose.
-    const raw = file.endsWith('.json')
-      ? text
-      : (/<script type="application\/json" id="__rosezm_state">([\s\S]*?)<\/script>/.exec(text)?.[1] ?? '');
-    if (!raw) continue;
-    try {
-      const state = JSON.parse(raw);
-      if (!state || typeof state !== 'object') continue;
-      const rel = path.relative(dist, path.dirname(file)).split(path.sep).filter(Boolean).join('/');
-      out['/' + rel] = state;
-    } catch { /* a malformed state file is the build's problem, not the export's */ }
-  }
-  return out;
 }
 
 /** Every `rose*`/`Rose*` the finished file names gets its kit import, except

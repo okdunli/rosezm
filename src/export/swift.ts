@@ -32,7 +32,7 @@ import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/i
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, swiftFill, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -252,7 +252,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
-  await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route)), 'utf8');
+  await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route), bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseTheme.swift'), renderTheme(styles, fontMap), 'utf8');
   for (const comp of components) {
     await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap, globalCss), 'utf8');
@@ -1278,7 +1278,21 @@ ${branches}
 `;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = [], baked: Record<string, unknown> = {}): string {
+  // Only the routes this app carries; nothing else can ever be asked for.
+  const bakedRoutes = Object.fromEntries(Object.entries(baked).filter(([route]) => routes.includes(route)));
+  const bakedBlock = Object.keys(bakedRoutes).length
+    ? `/// The state each route rendered with at build time - the first frame a device
+/// can paint with no server. A live data channel still wins when it answers.
+private let rosezmBakedJson = ${JSON.stringify(JSON.stringify(bakedRoutes))}
+private lazy var rosezmBaked: [String: [String: Any]] = {
+    guard let data = rosezmBakedJson.data(using: .utf8),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+    return root.compactMapValues { $0 as? [String: Any] }
+}()
+func rosezmBakedFor(_ route: String) -> [String: Any] { rosezmBaked[route] ?? [:] }
+`
+    : `func rosezmBakedFor(_ route: String) -> [String: Any] { [:] }`;
   // A wall's redirect is only worth following to a route this export carries a
   // page for; the kit writes that table down so the console line can be the
   // whole answer when the target has no page.
@@ -1308,6 +1322,7 @@ func roseContentGet(_ coll: String, _ slug: String) -> [String: Any]? {
 /// it without re-exporting:
 ///   xcodebuild ROSE_API_BASE=https://staging.example.com -scheme rosezmApp build
 let roseApiBase = (Bundle.main.object(forInfoDictionaryKey: "RoseAPIBase") as? String) ?? ${JSON.stringify(apiBase)}
+${bakedBlock}
 
 /// The raw Set-Cookie of the most recent response, relayed back as Cookie on
 /// the next request - the middleware's session survives across requests
@@ -1421,24 +1436,25 @@ private let rosezmSession: URLSession = {
 /// wall that answered instead when the route is behind one (the patch is empty
 /// then - a wall's body is the sign-in page's HTML, never data).
 func roseData(_ route: String) async -> (patch: [String: Any], wall: RosezmWall?) {
+    let baked = rosezmBakedFor(route)
     guard !roseApiBase.isEmpty,
           let encoded = route.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-          let url = URL(string: roseApiBase + "/__rosezm/data?path=" + encoded) else { return ([:], nil) }
+          let url = URL(string: roseApiBase + "/__rosezm/data?path=" + encoded) else { return (baked, nil) }
     var request = URLRequest(url: url)
     if !rosezmCookie.isEmpty { request.setValue(rosezmCookie, forHTTPHeaderField: "Cookie") }
     do {
         let (data, response) = try await rosezmSession.data(for: request)
-        guard let http = response as? HTTPURLResponse else { return ([:], nil) }
+        guard let http = response as? HTTPURLResponse else { return (baked, nil) }
         if let cookie = http.value(forHTTPHeaderField: "Set-Cookie"), !cookie.isEmpty { rosezmCookie = cookie }
         if let wall = rosezmWall(http.statusCode, url.path, http.value(forHTTPHeaderField: "Location") ?? "") {
-            return ([:], wall)
+            return (baked, wall)
         }
-        guard http.statusCode == 200 else { return ([:], nil) }
+        guard http.statusCode == 200 else { return (baked, nil) }
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         return (json["state"] as? [String: Any] ?? [:], nil)
     } catch {
         // A missing server is a data-less screen, not a crash.
-        return ([:], nil)
+        return (baked, nil)
     }
 }
 

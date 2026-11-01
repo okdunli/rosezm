@@ -29,7 +29,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, wpfFill, type SvgShape } from './svg-path.js';
-import { rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
@@ -158,7 +158,7 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
   // calls it ships the same kit it always did.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(out, 'RoseTheme.cs'), renderTheme([...pageStyles].map(([scope, styles]) => ({ scope, styles })), shell, theme), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseApp.cs'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'rosezmApp.csproj'), renderCsproj(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'App.xaml'), renderAppXaml(), 'utf8');
@@ -2274,7 +2274,7 @@ ${branches}                default:
     }`;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
   const contentBlock = content ? `
     /// The project's markdown collections, baked at export time. A page reads
     /// them through RoseContentList / RoseContentGet, the same shape the
@@ -2312,6 +2312,24 @@ public static class RoseKit
 {
     /// <summary>The data channel base: ROSEZM_API overrides the URL baked at export.</summary>
     public static string ApiBase = Environment.GetEnvironmentVariable("ROSEZM_API") ?? ${JSON.stringify(apiBase)};
+
+    /// <summary>The state each route rendered with at build time, as JSON.</summary>
+    private static readonly string BakedJson = ${JSON.stringify(JSON.stringify(baked))};
+
+    /// <summary>The baked frame for a route: what a device paints with no server.</summary>
+    public static Dictionary<string, object?> Baked(string route)
+    {
+        var empty = new Dictionary<string, object?>();
+        if (BakedJson.Length == 0) return empty;
+        try
+        {
+            var root = System.Text.Json.JsonDocument.Parse(BakedJson).RootElement;
+            if (!root.TryGetProperty(route, out var entry) || entry.ValueKind != System.Text.Json.JsonValueKind.Object) return empty;
+            foreach (var p in entry.EnumerateObject()) empty[p.Name] = p.Value.ValueKind == System.Text.Json.JsonValueKind.String ? p.Value.GetString() : p.Value.GetRawText();
+        }
+        catch (System.Text.Json.JsonException) { return new Dictionary<string, object?>(); }
+        return empty;
+    }
 ${contentBlock}${nativeKit(native)}
 
     /// <summary>The {#await} reject branch: it always throws, so the catch arm renders.</summary>
@@ -2519,7 +2537,8 @@ ${contentBlock}${nativeKit(native)}
     /// <summary>The JSON half of a render: the state the page's $data produced.</summary>
     public static Dictionary<string, object?> Data(string route)
     {
-        if (ApiBase.Length == 0) return new Dictionary<string, object?>();
+        var baked = Baked(route);
+        if (ApiBase.Length == 0) return baked;
         WallStatus = 0;
         WallLocation = "";
         try
@@ -2529,16 +2548,16 @@ ${contentBlock}${nativeKit(native)}
             if (SessionCookie.Length > 0) request.Headers.Add("Cookie", SessionCookie);
             using var response = Http.SendAsync(request).GetAwaiter().GetResult();
             CaptureCookie(response);
-            // A wall's body is the sign-in page, never data: it is dropped.
-            if (IsWall(response)) return new Dictionary<string, object?>();
+            // A wall's body is the sign-in page, never data: the baked frame stands.
+            if (IsWall(response)) return baked;
             // Anything else non-2xx threw inside GetStringAsync before: no data.
-            if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300) return new Dictionary<string, object?>();
+            if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300) return baked;
             return State(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
         }
         catch (Exception)
         {
             // A missing server is a data-less screen, not a crash.
-            return new Dictionary<string, object?>();
+            return baked;
         }
     }
 

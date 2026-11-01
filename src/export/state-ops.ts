@@ -11,8 +11,8 @@
  * idiom through a callback.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { scanContentDir } from '../cli/content.js';
 import { matchArrow } from './expr-ir.js';
 
@@ -1470,6 +1470,43 @@ export function rewriteStoreGets(script: string): string {
     const payload = (args.length >= 2 ? args[1] : args[0])?.trim() ?? '';
     if (!payload) continue;
     out = out.replace(new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*\\.\\s*get\\s*\\(\\s*\\)`, 'g'), `(${payload})`);
+  }
+  return out;
+}
+
+/** The per-route state the web build baked next to each prerendered page,
+ *  keyed by route. Absent (or unreadable) dist means no bake - the app then
+ *  starts from each page's declared defaults, exactly as before. */
+export function bakeRouteStates(root: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const dist = join(root, 'dist');
+  const walk = (dir: string): string[] => {
+    let entries: string[] = [];
+    try { entries = readdirSync(dir); } catch { return []; }
+    const files: string[] = [];
+    for (const name of entries) {
+      const p = join(dir, name);
+      let isDir = false;
+      try { isDir = statSync(p).isDirectory(); } catch { continue; }
+      if (isDir) files.push(...walk(p));
+      else if (name === 'index.html' || name === 'rosezm-state.json') files.push(p);
+    }
+    return files;
+  };
+  for (const file of walk(dist)) {
+    let text = '';
+    try { text = readFileSync(file, 'utf8'); } catch { continue; }
+    // The sibling file first: it is what `rosezm build` writes for this purpose.
+    const raw = file.endsWith('.json')
+      ? text
+      : (/<script type="application\/json" id="__rosezm_state">([\s\S]*?)<\/script>/.exec(text)?.[1] ?? '');
+    if (!raw) continue;
+    try {
+      const state = JSON.parse(raw);
+      if (!state || typeof state !== 'object') continue;
+      const rel = relative(dist, dirname(file)).split(sep).filter(Boolean).join('/');
+      out['/' + rel] = state;
+    } catch { /* a malformed state file is the build's problem, not the export's */ }
   }
   return out;
 }

@@ -31,7 +31,7 @@ import { extractAppLifecycle } from './miniprogram.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, splitTopLevel, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
@@ -366,7 +366,7 @@ export async function emitFlutter(opts: EmitFlutterOptions): Promise<{ pages: st
   const hasVideo = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'video'));
   const hasAudio = [...pages.map((p) => p.nodes), ...components.map((c) => c.nodes)].some((nodes) => hasTagDeep(nodes, 'audio'));
   if ((hasVideo || hasAudio) && !nativeDeps.includes('video_player')) nativeDeps.push('video_player');
-  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route), hasExternalLinks, hasVideo, hasAudio), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'lib', 'rosezm.dart'), renderRoseKit(opts.apiBase ?? '', content, native, pages.filter((p) => p.params.length === 0).map((p) => p.route), hasExternalLinks, hasVideo, hasAudio, bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(out, 'lib', 'vectors.dart'), renderVectors(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pubspec.yaml'), renderPubspec(pages, [...assetMap.values()].filter((a) => !/\.(woff2?|ttf|otf)$/i.test(a)), fontFaces(allCss), nativeDeps, app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, app.scheme, app), 'utf8');
@@ -1341,8 +1341,26 @@ CrossAxisAlignment? _roseCross(String? a) {
 `;
 }
 
-function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = [], externalLinks = false, video = false, audio = false): string {
+function renderRoseKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], staticRoutes: string[] = [], externalLinks = false, video = false, audio = false, baked: Record<string, unknown> = {}): string {
   const q = JSON.stringify(apiBase);
+  // The state the build baked per route: a device has no server, so without it
+  // every page opened with its declared defaults.
+  const bakedRoutes = Object.fromEntries(Object.entries(baked).filter(([route]) => staticRoutes.includes(route)));
+  const bakedBlock = Object.keys(bakedRoutes).length
+    ? `/// The state each route rendered with at build time - the first frame. A live
+/// data channel still wins the moment it answers.
+const String rosezmBakedJson = ${JSON.stringify(JSON.stringify(bakedRoutes))};
+Map<String, Map<String, dynamic>>? _rosezmBaked;
+
+Map<String, dynamic> rosezmBakedFor(String route) {
+  final table = _rosezmBaked ??= () {
+    final root = jsonDecode(rosezmBakedJson) as Map<String, dynamic>;
+    return root.map((k, v) => MapEntry(k, Map<String, dynamic>.from(v as Map)));
+  }();
+  return table[route] ?? <String, dynamic>{};
+}
+`
+    : `Map<String, dynamic> rosezmBakedFor(String route) => <String, dynamic>{};`;
   const contentBlock = content ? `
 /// The project's markdown collections, baked at export time. A page reads them
 /// through roseContentList / roseContentGet, the same shape the server-side
@@ -1737,6 +1755,7 @@ Widget roseHtml(String html) {
 /// at build time without re-exporting:
 ///   flutter run --dart-define=ROSEZM_API=https://staging.example.com
 const String rosezmApiBase = String.fromEnvironment('ROSEZM_API', defaultValue: ${q});
+${bakedBlock}
 
 /// A cold-start deep link surfaces as the platform dispatcher's default route
 /// name - the RAW uri ("acme://blog/7"). The engine parses that as scheme +
@@ -1979,7 +1998,8 @@ bool rosezmWall(String route, String asked, int status, String location) {
 /// The JSON half of a render: the state the page's $data produced.
 /// Same contract the mini-program target uses (/__rosezm/data).
 Future<Map<String, dynamic>> rosezmData(String route) async {
-  if (rosezmApiBase.isEmpty) return <String, dynamic>{};
+  final baked = rosezmBakedFor(route);
+  if (rosezmApiBase.isEmpty) return baked;
   final client = HttpClient();
   try {
     final uri = Uri.parse('\$rosezmApiBase/__rosezm/data?path=\${Uri.encodeComponent(route)}');
@@ -2007,7 +2027,8 @@ Future<Map<String, dynamic>> rosezmData(String route) async {
   } finally {
     client.close(force: true);
   }
-  return <String, dynamic>{};
+  // The server is down or the wall answered: the baked frame is still true.
+  return baked;
 }
 
 /// Call a server action - the framework's own protocol: POST __action=<name>.

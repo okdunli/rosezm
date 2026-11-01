@@ -36,7 +36,7 @@ import { appIdentity, type AppIdentity } from './app-identity.js';
 import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode } from './ir.js';
 import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, ruleMatches, type StyleSheet, type StyleModel, type StyleSubject, type StyleRule, type Justify, type Align, type ElementStyleBinding, type Gradient } from './style-engine.js';
-import { rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
@@ -186,7 +186,7 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   // classes carry a :hover half (the same set STYLES carries at runtime).
   const hoverStyles = new Map(styles.filter((s) => s.className.startsWith('__hover_')).map((s) => [s.className, s.model]));
   await fs.promises.writeFile(path.join(out, 'styles.py'), renderStyles(styles), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'rosezm.py'), renderKit(opts.apiBase ?? '', content, native), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'rosezm.py'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pages', '__init__.py'), '', 'utf8');
   for (const page of pages) {
     await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), renderPage(page, components, warnings, content, compCss, globalCss, hoverStyles), 'utf8');
@@ -742,7 +742,7 @@ function renderStyles(rules: PyStyle[]): string {
   return lines.join('\n');
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
   const contentBlock = content ? `
 # The project's markdown collections, baked at export time. A page reads them
 # through rose_content_list / rose_content_get, the same shape the server-side
@@ -1307,6 +1307,15 @@ import urllib.request
 # a re-export; unset or empty keeps the export value.
 API_BASE = os.environ.get('ROSEZM_API') or ${JSON.stringify(apiBase)}
 
+# The state each route rendered with at build time: the first frame a device can
+# paint with no server. A live data channel still wins when it answers.
+BAKED = json.loads(${JSON.stringify(JSON.stringify(baked))})
+
+
+def baked_patch(route):
+    entry = BAKED.get(route)
+    return entry if isinstance(entry, dict) else {}
+
 # A middleware wall answers the data channel as it answers a document: a 302 to
 # the sign-in page, or a bare 401/403. urllib follows a redirect on its own,
 # which turned a wall into the sign-in page's HTML parsed as JSON - the page
@@ -1384,8 +1393,9 @@ def data_patch(route):
     """The JSON half of a render: the state the page's $data produced."""
     global WALL
     WALL = None
+    baked = baked_patch(route)
     if not API_BASE:
-        return {}
+        return baked
     url = API_BASE + '/__rosezm/data?path=' + urllib.parse.quote(route)
     try:
         request = urllib.request.Request(url)
@@ -1393,7 +1403,7 @@ def data_patch(route):
         # A junk --api base ('x' not 'http://x') builds a relative URL the
         # Request constructor refuses. The pages still render; only the
         # server half is dead - the same answer a missing server gets.
-        return {}
+        return baked
     if SESSION_COOKIE:
         request.add_header('Cookie', SESSION_COOKIE)
     try:
@@ -1401,16 +1411,16 @@ def data_patch(route):
             _rose_capture_cookie(response.headers)
             payload = json.loads(response.read().decode('utf-8'))
         state = payload.get('state')
-        return state if isinstance(state, dict) else {}
+        return state if isinstance(state, dict) else baked
     except urllib.error.HTTPError as error:
         # A wall's body is the sign-in page, never data: it is dropped, and the
         # app shell opens the page the redirect names (or says it has none).
         _rose_capture_cookie(error.headers)
         WALL = wall_status(error)
-        return {}
+        return baked
     except Exception:
         # A missing server is a data-less window, not a crash.
-        return {}
+        return baked
 
 
 def t(key, params=None):
