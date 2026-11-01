@@ -921,7 +921,7 @@ class RoseStyle {
     if (background == null && gradient == null && image == null && border == null && radius == null && shadow == null) return null;
     return BoxDecoration(
       color: background,
-      image: image == null ? null : DecorationImage(image: image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!), fit: imageFit ?? BoxFit.cover, repeat: imageRepeat ?? ImageRepeat.repeat),
+      image: image == null ? null : DecorationImage(image: (image!.startsWith('http') ? NetworkImage(image!) : AssetImage(image!)) as ImageProvider<Object>, fit: imageFit ?? BoxFit.cover, repeat: imageRepeat ?? ImageRepeat.repeat),
       gradient: _roseGradient(),
       border: border,
       borderRadius: radius,
@@ -954,7 +954,10 @@ class RoseStyle {
 
   BoxConstraints? get constraints {
     if (width == null && height == null && minWidth == null && maxWidth == null && minHeight == null && maxHeight == null) return null;
-    return BoxConstraints(minWidth: minWidth ?? 0, maxWidth: maxWidth ?? double.infinity, minHeight: minHeight ?? 0, maxHeight: maxHeight ?? double.infinity).tightFor(width: width, height: height);
+    // tightFor is a BoxConstraints CONSTRUCTOR, not an instance method.
+    return (width != null || height != null)
+        ? BoxConstraints.tightFor(width: width, height: height)
+        : BoxConstraints(minWidth: minWidth ?? 0, maxWidth: maxWidth ?? double.infinity, minHeight: minHeight ?? 0, maxHeight: maxHeight ?? double.infinity);
   }
 }
 
@@ -1843,6 +1846,8 @@ bool roseTruth(dynamic value) {
 
 /// The JS "a || b" - b when a is falsy. Dart has no truthiness operator.
 /// JS timers: setInterval/clearInterval in Dart's spelling.
+int roseLen(dynamic value) => value is List ? value.length : (value is Map ? value.length : (value is String ? value.length : 0));
+
 Timer roseEvery(int ms, void Function() fn) => Timer.periodic(Duration(milliseconds: ms), (_) => fn());
 void roseCancel(dynamic timer) {
   if (timer is Timer) timer.cancel();
@@ -2401,9 +2406,14 @@ function renderPage(
   // unreachable name. R189: the handler path needs it too, not just the
   // initializer path.
   const mapBinds = new Set(binds.map((b) => b.name));
+  // A zero-argument arrow const in the page script (const docs = () => EXPR) is
+  // a VALUE: a template that names it wants the body, not the function.
+  const arrowConsts = new Map<string, string>();
+  for (const m of (page.script ?? '').matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*([^;\n]+);?/gm)) arrowConsts.set(m[1], m[2].trim());
   const ctx: EmitCtx = {
     warnings,
     file: page.fileName,
+    constExprs: arrowConsts.size ? arrowConsts : undefined,
     components,
     styleClasses,
     inText: false,
@@ -2637,7 +2647,9 @@ function renderComponent(comp: { name: string; className: string; nodes: IrNode[
   const body = emitChildren(comp.nodes, { warnings, file: comp.name, components: [], styleClasses, inText: false, stateNames: new Set(propNames), mapBinds: new Set(), inline: new Map<string, string>(), awaits: [], deferred: [], scriptConsts: new Map(), componentProps: new Set(propNames), forms: [], formSubmit: null, pageAction: null, sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')), scope: comp.name, ancestors: [], hoverKeys: new Set<string>() });
   const defaults = new Map<string, string>();
   for (const m of (comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^;\n]+)/g)) {
-    defaults.set(m[1], dartLiteral(m[2].trim()));
+    const lit = dartLiteral(m[2].trim());
+    const isLiteral = /^(?:null|true|false|-?\d|'|")/.test(lit);
+    defaults.set(m[1], /^[\[\{]/.test(lit) ? 'const ' + lit : (isLiteral ? lit : 'null'));
   }
   const props = propNames.map((p) => `  final dynamic ${p};`);
   // Slots: the default slot is a widget; a named slot is a builder taking the
@@ -2731,7 +2743,11 @@ function withConsts(code: string, ctx: EmitCtx): string {
   if (!table || table.size === 0) return code;
   let out = code;
   for (const [name, expr] of table) {
-    out = out.replace(new RegExp(`(?<![\\w$.])${name.replace(/[$]/g, '\\$&')}(?![\\w$])`, 'g'), `(${expr})`);
+    const escaped = name.replace(/[$]/g, '\\$&');
+    // A named call collapses to the body first, so "docs()" does not become
+    // "(body)()" - the body is the value, not a function.
+    out = out.replace(new RegExp(`(?<![\\w$.])${escaped}\\(\\)`, 'g'), `(${expr})`);
+    out = out.replace(new RegExp(`(?<![\\w$.])${escaped}(?![\\w$(])`, 'g'), `(${expr})`);
   }
   return out;
 }
@@ -3165,7 +3181,7 @@ function emitElementStyled(
     if (type === 'checkbox') {
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
-      if (group) return `Checkbox(value: ((${group} as List).contains(${optionValue})), onChanged: (checked) { final list = List.of(${group} as List); if (checked) { list.add(${optionValue}); } else { list.remove(${optionValue}); } ${writeBack(group, 'list')}; })`;
+      if (group) return `Checkbox(value: ((${group} as List).contains(${optionValue})), onChanged: (checked) { final list = List.of(${group} as List); if (checked == true) { list.add(${optionValue}); } else { list.remove(${optionValue}); } ${writeBack(group, 'list')}; })`;
       if (checked) return `Checkbox(value: ${checked} == true, onChanged: (value) => ${writeBack(checked, 'value ?? false')})`;
       return 'Checkbox(value: false, onChanged: null)';
     }
@@ -3311,7 +3327,7 @@ function emitElementStyled(
     // toggling checkboxes (the same idiom the checkbox group uses), not a
     // single-choice dropdown that would collapse the array to a scalar.
     if (node.attrs.some((a) => a.name === 'multiple')) {
-      const boxes = optionPairs.map((o) => `Row(children: [Checkbox(value: ((${state} as List).contains(${JSON.stringify(o.value)})), onChanged: (checked) { final list = List.of(${state} as List); if (checked) { list.add(${JSON.stringify(o.value)}); } else { list.remove(${JSON.stringify(o.value)}); } __set('${state}', list); }), ${optionChild(o.label, o.cls)}])`).join(', ');
+      const boxes = optionPairs.map((o) => `Row(children: [Checkbox(value: ((${state} as List).contains(${JSON.stringify(o.value)})), onChanged: (checked) { final list = List.of(${state} as List); if (checked == true) { list.add(${JSON.stringify(o.value)}); } else { list.remove(${JSON.stringify(o.value)}); } __set('${state}', list); }), ${optionChild(o.label, o.cls)}])`).join(', ');
       return `Wrap(children: [${boxes}])`;
     }
     const dd = `DropdownButton<String>(items: <DropdownMenuItem<String>>[${items}], ${onChanged}, ${selected})`;
@@ -3490,7 +3506,11 @@ function dartExprRaw(code: string, stateNames: Set<string> = new Set(), mapBinds
     const names = [...dataNames].map(escapeRe).join('|');
     out = out.replace(new RegExp(`\\b(${names})\\s*\\(\\s*\\)((?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*)+)`, 'g'), (_m, name: string, chain: string) => {
       let expr = `${name}()`;
-      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) expr = `roseGet(${expr}, "${key.replace(/^\?/, '')}")`;
+      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) {
+        const k = key.replace(/^\?/, '');
+        // A list has no length key: the member is its length.
+        expr = k === 'length' ? `roseLen(${expr})` : `roseGet(${expr}, "${k}")`;
+      }
       return expr;
     });
   }

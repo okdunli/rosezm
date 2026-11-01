@@ -5756,7 +5756,7 @@ h2 { font-size: 40px; }
     assert(bfStyles.includes("'hero__index': RoseStyle(image: \"assets/images/rose.png\""), 'flutter: a background-image becomes the copied asset');
     assert(bfStyles.includes("image: \"https://example.com/a.png\""), 'flutter: a remote background-image keeps its URL');
     assert(readFileSync(join(bf.outDir, 'pubspec.yaml'), 'utf8').includes('assets/images/rose.png'), 'flutter: the background picture rides the pubspec');
-    assert(bfStyles.includes('DecorationImage(image: image!.startsWith') && existsSync(join(bf.outDir, 'assets', 'images', 'rose.png')), 'flutter: the box draws it and the file shipped');
+    assert(bfStyles.includes('DecorationImage(image: (image!.startsWith') && existsSync(join(bf.outDir, 'assets', 'images', 'rose.png')), 'flutter: the box draws it and the file shipped');
     const ba = await exportProject('android', bgproj, { apiBase: 'x', outRoot: join(scratch, 'bg-android') });
     const baPage = readFileSync(join(ba.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.kt'), 'utf8');
     assert(baPage.includes('.paint(painterResource(id = R.drawable.rose), contentScale = ContentScale.Crop)'), 'android: a background-image becomes a painter');
