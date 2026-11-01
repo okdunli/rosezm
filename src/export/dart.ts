@@ -1761,7 +1761,10 @@ String roseDeepLinkRoute(String name) {
 String rosezmCookie = '';
 
 /// The {#await} reject branch: a promise that never resolves, it throws.
-Never roseThrow(Object e) => throw e is Exception ? e : Exception(e.toString());
+/// ActionError(message, code, field): the extras ride in the text - a desktop
+/// app has no HTTP response to fill in.
+Never roseThrow(Object e, [Object? code, Object? field]) =>
+    throw e is Exception ? e : Exception(e.toString() + (code == null && field == null ? "" : " (" + [code, field].whereType<Object>().join(", ") + ")"));
 
 /// The {#boundary} fallback. Widget construction is eager (it runs inside the
 /// build method), so invoking the builder here and catching its throw swaps in
@@ -3568,6 +3571,11 @@ function dartExprRaw(code: string, stateNames: Set<string> = new Set(), mapBinds
   // Dart, unlike JS, has no `String + int`: coerce every string-bearing `+` chain
   // in templates so `'Item ' + name + count` runs at runtime instead of failing to compile.
   out = coerceStringConcat(out, (e) => `(${e}).toString()`);
+  // A list read through a "length" key is its length (a List has no such key),
+  // and a length used as a condition is "more than nothing".
+  out = out.replace(/\b([A-Za-z_$][\w$]*)\['length'\]/g, (_m, name: string) => `roseLen(${name})`);
+  out = out.replace(/(roseLen\([^()]*\)|\([^()]*\.length)\)\s*\?/g, '$1 > 0) ?');
+  out = out.replace(/\.length\)\s*\?/g, '.length > 0) ?');
   return out;
 }
 
