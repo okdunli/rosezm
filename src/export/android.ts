@@ -257,11 +257,16 @@ export async function emitAndroid(opts: EmitAndroidOptions): Promise<{ pages: st
   // The markdown collections, baked at export time so a page that reads them
   // works offline - the same static generation the web build does.
   const content = bakeContent(root);
+  // The state each route rendered with at build time (`dist/**/index.html`
+  // carries it as JSON). A device has no server, so without this a page's
+  // lists start empty until the data channel answers - with it the app paints
+  // the same first frame the web build does, and a live fetch still wins.
+  const baked = await bakeRouteStates(root);
   // useNative(...): the capabilities this project's pages asked for. Empty when
   // none did, so a plain app keeps a kit with no native block at all.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
 
-  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route), appKotlin.global, native.includes('scan-code')), 'utf8');
+  await fs.promises.writeFile(path.join(javaRoot, 'kit', 'RoseKit.kt'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route), appKotlin.global, native.includes('scan-code'), baked), 'utf8');
   // The style table for the dynamic half: a class bound to state has to be
   // resolved while the composable recomposes, so the compiled classes ship as
   // data and the kit merges them exactly like the cascade does.
@@ -1687,7 +1692,11 @@ ${branches}
 `;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = [], appGlobal: string | null = null, scanState = false): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = [], appGlobal: string | null = null, scanState = false, baked: Record<string, unknown> = {}): string {
+  // Only the routes this app actually carries, and never an empty document: a
+  // triple-quoted Kotlin literal cannot hold `$` unescaped.
+  const bakedRoutes = Object.fromEntries(Object.entries(baked).filter(([route]) => routes.includes(route)));
+  const bakedJson = Object.keys(bakedRoutes).length ? JSON.stringify(bakedRoutes).replace(/\$/g, '\\$') : '';
   const appGlobalBlock = appGlobal
     ? `\n// App-level globalData (src/app.rose): one map every page's handler reads.\nval roseAppGlobal = mutableMapOf<String, Any?>(\n${appGlobal.replace(/[{}]/g, '').trim().split(',').filter((s) => s.trim()).map((kv) => {
       const m = /^"?([^":]+)"?\s*:\s*(.+)$/.exec(kv.trim());
@@ -1737,6 +1746,11 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextDecoration
+${bakedJson ? `
+/// The build's own state, one entry per prerendered route.
+private val ROSE_BAKED_JSON: String = """${bakedJson}"""
+private val ROSE_BAKED: Map<String, Map<String, Any?>> by lazy { roseBaked(ROSE_BAKED_JSON) }
+` : 'private val ROSE_BAKED: Map<String, Map<String, Any?>> = emptyMap()'}
 ${appGlobalBlock}
 ${contentBlock}
 ${scanState ? `
@@ -1877,8 +1891,38 @@ private fun roseWall(route: String, status: Int, location: String?): Boolean {
 
 /// The JSON half of a render: the state the page's \$data produced.
 fun roseData(route: String): Map<String, Any?> {
-    if (ROSE_API_BASE.isEmpty()) return emptyMap()
-    return roseRequest(ROSE_API_BASE + "/__rosezm/data?path=" + java.net.URLEncoder.encode(route, "UTF-8"), "GET", null, route)
+    // The build-time state is the first frame; a live server, when one is
+    // configured, still wins the moment it answers.
+    val baked = ROSE_BAKED[route] ?: emptyMap()
+    if (ROSE_API_BASE.isEmpty()) return baked
+    val live = roseRequest(ROSE_API_BASE + "/__rosezm/data?path=" + java.net.URLEncoder.encode(route, "UTF-8"), "GET", null, route)
+    return if (live.isEmpty()) baked else live
+}
+
+/// The state each route rendered with at build time (rosezm build writes it
+/// into dist/**<slash>index.html). A device has no server, so without it every
+/// page started from its declared defaults - an empty list, a blank card.
+private fun roseBaked(json: String): Map<String, Map<String, Any?>> {
+    val root = try { JSONObject(json) } catch (e: Exception) { return emptyMap() }
+    val out = mutableMapOf<String, Map<String, Any?>>()
+    for (key in root.keys()) {
+        val o = root.optJSONObject(key) ?: continue
+        out[key] = roseBakedValue(o) as? Map<String, Any?> ?: emptyMap()
+    }
+    return out
+}
+
+private fun roseBakedValue(o: JSONObject): Map<String, Any?> {
+    val out = mutableMapOf<String, Any?>()
+    for (key in o.keys()) {
+        out[key] = when (val v = o.opt(key)) {
+            null -> null
+            is JSONObject -> roseBakedValue(v)
+            is org.json.JSONArray -> (0 until v.length()).map { i -> v.opt(i) }
+            else -> v
+        }
+    }
+    return out
 }
 
 /// Call a server action - the framework's own protocol: POST __action=<name>.
@@ -2750,6 +2794,42 @@ ${layout}
 ${pull ? '    }' : ''}
 }
 `, local);
+}
+
+/** The per-route state the web build baked into `dist/**<slash>index.html`, keyed by
+ *  route. Absent (or unreadable) dist means no bake - the app then starts from
+ *  each page's declared defaults, exactly as before. */
+async function bakeRouteStates(root: string): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  const dist = path.join(root, 'dist');
+  const walk = async (dir: string): Promise<string[]> => {
+    let entries: import('node:fs').Dirent[] = [];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return []; }
+    const files: string[] = [];
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) files.push(...(await walk(p)));
+      else if (e.name === 'index.html' || e.name === 'rosezm-state.json') files.push(p);
+    }
+    return files;
+  };
+  for (const file of await walk(dist)) {
+    let text = '';
+    try { text = await fs.promises.readFile(file, 'utf8'); } catch { continue; }
+    // The sibling file first: it exists even when the document carries no state
+    // script, and it is what `rosezm build` writes for this purpose.
+    const raw = file.endsWith('.json')
+      ? text
+      : (/<script type="application\/json" id="__rosezm_state">([\s\S]*?)<\/script>/.exec(text)?.[1] ?? '');
+    if (!raw) continue;
+    try {
+      const state = JSON.parse(raw);
+      if (!state || typeof state !== 'object') continue;
+      const rel = path.relative(dist, path.dirname(file)).split(path.sep).filter(Boolean).join('/');
+      out['/' + rel] = state;
+    } catch { /* a malformed state file is the build's problem, not the export's */ }
+  }
+  return out;
 }
 
 /** Every `rose*`/`Rose*` the finished file names gets its kit import, except

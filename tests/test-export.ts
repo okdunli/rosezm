@@ -1481,6 +1481,35 @@ try {
   const pySign = pread('pages/sign.py');
   assert(pySign.includes("'guests': (['Ada Lovelace', 'Grace Hopper']),"), 'Tk seeds the $store payload too');
 
+  // A device has no server: without the build's own state every exported page
+  // opened with its declared defaults (an empty list, a blank card). The export
+  // now carries the per-route state `rosezm build` wrote into dist/, and a live
+  // data channel still wins - so building first is part of the recipe.
+  {
+    const bakeRoot = join(scratch, 'bake-proj');
+    mkdirSync(join(bakeRoot, 'src/pages'), { recursive: true });
+    // Interactive on purpose: a zero-JS document carries no state (there is no
+    // client to hydrate), so only a route with the client bakes here.
+    writeFileSync(join(bakeRoot, 'src/pages/index.rose'), `<script>
+  let greeting = $data(async () => 'baked hello');
+  let n = $state(0);
+  function bump() { $setState('n', n() + 1); }
+</script>
+<h1>{greeting}</h1>
+<button on:click={bump}>bump {n}</button>
+`);
+    const bakeLoader = new URL('../node_modules/tsx/dist/esm/index.mjs', import.meta.url).href;
+    const bakeCli = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
+    // Run inside the fixture: `build` writes dist/ next to the cwd, so a repo-root
+    // run would drop the fixture's pages into the repository.
+    const built = spawnSync(process.execPath, ['--import', bakeLoader, bakeCli, 'build', '.'], { cwd: bakeRoot, encoding: 'utf8', timeout: 300_000 });
+    assert(built.status === 0 && existsSync(join(bakeRoot, 'dist', 'index.html')), 'the bake fixture builds a dist/ to read');
+    const baked = await exportProject('android', bakeRoot, { apiBase: '', outRoot: join(scratch, 'bake-out') });
+    const bakedKit = readFileSync(join(baked.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
+    assert(bakedKit.includes('ROSE_BAKED_JSON') && bakedKit.includes('baked hello'), 'the exported app carries the state the build baked for each route');
+    assert(bakedKit.includes('return if (live.isEmpty()) baked else live'), 'a live data channel still wins over the baked state');
+  }
+
   // 10. the desktop shell: Electron around the built web app. The CLI build
   // still proves `rosezm build` itself works (prerender + shell document);
   // the export no longer reads that dist/ - it compiles the sources itself,
