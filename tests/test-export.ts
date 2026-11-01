@@ -508,6 +508,23 @@ try {
     assert(xApp.includes('struct RoseAlertView') && xApp.includes('UIAlertController') && xApp.includes('RoseKit.roseModalTitle'), 'xcode: the modal rides an alert cover wired to the kit options');
     assert(xApp.includes('fullScreenCover(isPresented: Binding(get: { RoseKit.roseScanRequested }') && xApp.includes('struct RoseScannerView') && xApp.includes('DataScannerViewController'), 'xcode: the app presents the DataScanner cover and the kit ships the scanner view');
     assert(xKit.includes('RoseKit.roseScanRequested = true'), 'xcode: the scan bridge flips the request flag the app observes');
+  // R-AF: the exported Swing tree must actually COMPILE. The shape gate above
+  // reads the tree; this one hands it to a real javac when the machine has one
+  // (a JDK is not a dependency of the framework, so the check is skipped where
+  // java is absent rather than failing the suite on a machine without it).
+  {
+    const jdkOk = (() => {
+      try { return spawnSync('javac', ['-version'], { encoding: 'utf8', timeout: 20_000 }).status === 0; } catch { return false; }
+    })();
+    if (jdkOk) {
+      const jr = await exportProject('java', example, { apiBase: 'x', outRoot: join(scratch, 'java-compile') });
+      const files = walk(join(jr.outDir, 'src')).filter((f) => f.endsWith('.java'));
+      const outDir = join(scratch, 'java-classes');
+      mkdirSync(outDir, { recursive: true });
+      const jc = spawnSync('javac', ['-d', outDir, ...files], { encoding: 'utf8', timeout: 300_000 });
+      assert(jc.status === 0, `java: the exported Swing tree compiles with javac (${files.length} files)${jc.status === 0 ? '' : ': ' + (jc.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`);
+    }
+  }
   // R-AF: the exported SwiftUI tree must actually type-check. `swiftc` on a
   // Command Line Tools install cannot expand `@State` (the macro plugin ships
   // with Xcode), so the lock here is the shapes that failed before: a throwing
@@ -1990,7 +2007,7 @@ try {
   const jIndex = jread(`${japp}/pages/IndexPage.java`);
   assert(jIndex.includes('public static void build(RoseApp app, JPanel parent)'), 'a page is a Swing builder');
   assert(jIndex.includes('state.putIfAbsent("count", 0)') && jIndex.includes('state.putIfAbsent("items", List.of('), 'state is seeded once (a re-render keeps what a handler changed)');
-  assert(jIndex.includes('private static void increment(RoseApp app)') && jIndex.includes('app.set("count", RoseTheme.integer(app.v("count")) + 1)'), 'a handler mutates the typed state');
+  assert(jIndex.includes('private static Object increment(RoseApp app)') && jIndex.includes('app.set("count", RoseTheme.integer(app.v("count")) + 1)'), 'a handler mutates the typed state');
   assert(jIndex.includes('RoseTheme.label(') && jIndex.includes('RoseTheme.button(') && jIndex.includes('RoseTheme.link('), 'text/button/link map to Swing components');
   assert(jIndex.includes('for (Object itemObj : RoseTheme.list(app.v("items")))'), 'each becomes a for-each over the state list');
   assert(jIndex.includes('RoseTheme.card('), 'a CSS class becomes a styled panel');
@@ -2204,7 +2221,7 @@ try {
   // through the same state keys the widgets bind to, never through FormData,
   // and no JS-only construct (spread, String(), const, throw new) leaks.
   assert(jIndex.includes('RoseTheme.textField(panel8, "Your name", app, "name")'), 'a named input binds to the state key its handler reads');
-  assert(jIndex.includes('RoseTheme.button(panel8, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { signGuestbook(app); app.render(); })'), 'a submit button rides the form handler on the desktop, with the user button style on it');
+  assert(jIndex.includes('RoseTheme.button(panel8, "Sign", new RoseTheme.Style(16, "#222222", null, 8, false, "left", "SansSerif", "", 0).pad(8, 16, 8, 16).margin(0, 8, 0, 0), event -> { signGuestbook(app, event); app.render(); })'), 'a submit button rides the form handler on the desktop, with the user button style on it');
   assert(jIndex.includes('var guest = RoseTheme.text(app.v("name")).trim();'), 'a FormData read becomes the state read, once');
   assert(jIndex.includes('if (!guest.isEmpty())'), 'a string local tests emptiness, not JS truthiness');
   assert(jIndex.includes('RoseTheme.prepend(RoseTheme.list(app.v("guests")), guest)'), 'a spread state write becomes the kit append/prepend');

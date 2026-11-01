@@ -1393,6 +1393,12 @@ ${rows || '        // no style rules'}
     /** One cascaded style, on whatever widget the element became. The three
      *  Swing widget families a rosezm element maps to each have their own
      *  painter, so the style is handed to the one that fits. */
+    /** apply(widget, "class__Scope") - the caller has the class name, not the Style. */
+    public static void apply(JComponent widget, String styleKey) {
+        Style found = STYLES.get(styleKey);
+        if (found != null) apply(widget, found);
+    }
+
     public static void apply(JComponent widget, Style style) {
         if (widget == null || style == null) return;
         // R490: the hand cursor follows the style, so a clickable card shows one
@@ -1974,6 +1980,14 @@ ${rows || '        // no style rules'}
     /** A state read used in arithmetic: the kit's numbers are Objects. */
     public static double number(Object v) {
         return v instanceof Number num ? num.doubleValue() : decimal(String.valueOf(v));
+    }
+
+    /** obj.key += n, spelled as a call: Java has no setter to assign through. */
+    public static Object bump(Object container, String key, Object by) {
+        Object cur = get(container, key);
+        double next = number(cur) + number(by);
+        if (container instanceof Map<?, ?> m) ((Map<String, Object>) m).put(key, next);
+        return next;
     }
 
     public static void setAlpha(javax.swing.JComponent c, float alpha) {
@@ -3151,6 +3165,9 @@ interface JavaCtx {
   /** Zero-argument arrow consts (const docs = () => EXPR): inlined at the call
    *  site, because there is no method the emitter would otherwise produce. */
   arrowFns?: Map<string, string>;
+  /** How many parameters a page function declares: the wiring has to pass the
+   *  event when there is one, or the call does not match the signature. */
+  fnArity?: Map<string, number>;
   lines: string[];
   depth: number;
   styles: Map<string, JavaStyle>;
@@ -3249,6 +3266,7 @@ function renderPage(
     file: page.cls,
     fnNames: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
     arrowFns: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*([^;\n]+);?/gm)].map((m) => [m[1], m[2].trim()] as [string, string])),
+    fnArity: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => [m[1], m[2].trim() ? m[2].split(',').length : 0] as [string, number])),
     stateNames,
     awaits: [],
     deferred: [],
@@ -3817,15 +3835,19 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     // Two-way props: a call-site `bind:x={state}` passes the prop AND the
     // implicit change callback writing the parent's state back.
     const binds = callSiteBinds(node);
-    const args = declared
-      .filter((p) => !binds.has(p.name))
-      .map((p) => {
-        const attr = given.find((a) => a.name === p.name);
-        return attr ? javaAttr(attr, ctx) : javaLiteral(p.init);
-      });
-    for (const [, state] of binds) {
-      args.push(`${ctx.app}.v("${state}")`);
-      args.push(`v -> { ${ctx.app}.set("${state}", v); ${ctx.app}.render(); }`);
+    // The signature interleaves each two-way prop with its change callback, and
+    // takes the props in DECLARATION order - not in attribute order, which is
+    // what the call site used to do.
+    const args: string[] = [];
+    for (const p of declared) {
+      if (binds.has(p.name)) {
+        const state = binds.get(p.name) as string;
+        args.push(`${ctx.app}.v("${state}")`);
+        args.push(`v -> { ${ctx.app}.set("${state}", v); ${ctx.app}.render(); }`);
+        continue;
+      }
+      const attr = given.find((a) => a.name === p.name);
+      args.push(attr ? javaAttr(attr, ctx) : javaLiteral(p.init));
     }
     // Slots (the web contract): each slot's content is a lambda the component
     // invokes with the panel to fill; a named slot also receives the scoped
@@ -3902,7 +3924,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     const max = node.attrs.find((a) => a.name === 'max');
     const vExpr = value && value.value.kind === 'expr' ? javaExpr(value.value.code, ctx) : (value && value.value.kind === 'text' ? value.value.text : '0');
     const mExpr = max && max.value.kind === 'text' ? max.value.text : '100';
-    emit(`{ JProgressBar bar = new JProgressBar(0, ${mExpr}); bar.setValue(${vExpr}); bar.setStringPainted(false); ${ctx.parent}.add(bar);${styled.arg ? ` RoseTheme.apply(bar, ${styled.arg});` : ''} }`, ctx);
+    emit(`{ JProgressBar bar = new JProgressBar(0, ${mExpr}); bar.setValue((int) ${vExpr}); bar.setStringPainted(false); ${ctx.parent}.add(bar);${styled.arg ? ` RoseTheme.apply(bar, ${styled.arg});` : ''} }`, ctx);
     return;
   }
   if (tag === 'video') {
@@ -4100,7 +4122,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     // form element to carry it.
     if (!click && typeAttr && typeAttr.value.kind === 'text' && typeAttr.value.text === 'submit' && (ctx.formSubmit || ctx.pageAction)) {
       const submitLabel = javaCase(javaText(node.children, ctx) || '""', styled.model.textTransform);
-      const run = ctx.formSubmit ? `${ctx.formSubmit}(${ctx.app})` : `${ctx.pageAction}(${ctx.app})`;
+      const arg = (fn: string) => `${fn}(${ctx.app}${(ctx.fnArity?.get(fn) ?? 0) > 0 ? ', event' : ''})`;
+      const run = ctx.formSubmit ? arg(ctx.formSubmit) : arg(ctx.pageAction ?? '');
       const submitExpr = `RoseTheme.button(${ctx.parent}, ${submitLabel}${styleArg}, event -> { ${run}; ${ctx.app}.render(); }${btnEnable ? `, ${btnEnable}` : ''})`;
       if (styleBinding.hasDynamic) named('JButton', submitExpr);
       else emit(`${submitExpr};`, ctx);
@@ -4109,7 +4132,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: JavaCtx): 
     let body = '';
     if (click && click.value.kind === 'expr') {
       const code = click.value.code.trim();
-      if (/^[A-Za-z_$][\w$]*$/.test(code)) body = `${code}(${ctx.app});`;
+      if (/^[A-Za-z_$][\w$]*$/.test(code)) body = `${code}(${ctx.app}${(ctx.fnArity?.get(code) ?? 0) > 0 ? `, ${'event'}` : ''});`;
       else {
         // An inline handler becomes the button's own lambda, through the
         // shared handler IR.
@@ -4343,8 +4366,18 @@ function javaStateFields(out: string): string {
   o = o.replace(/RoseTheme\.bool\((app\.v\("[^"]+"\))\)\s*==\s*null/g, '$1 == null');
   // A list read used as a number ("m() + 5") is the number, not the list.
   o = o.replace(/RoseTheme\.list\((app\.v\("[^"]+"\))\)(\s*[-+*/%]\s*-?\d)/g, 'RoseTheme.number($1)$2');
+  // An augmented assignment on a map entry: Java cannot assign to a call, so
+  // the read-modify-write is spelled out through the kit's setter.
+  o = o.replace(/RoseTheme\.get\(([^(),]+), "([^"]+)"\)\s*\+=\s*([^;\n]+)/g,
+    (_m, obj: string, key: string, value: string) => `RoseTheme.bump(${obj}, "${key}", ${value.trim()})`);
+  // A list index is the kit's index read: a state value is a List in Java, and
+  // List has no [] operator.
+  o = o.replace(/\b([A-Za-z_$][\w$]*)\[(\d+)\]/g, (_m, name: string, at: string) => `RoseTheme.index(${name}, ${at})`);
+  // A kit read used in arithmetic is a number first.
+  o = o.replace(/RoseTheme\.get\(([^()]*)\)(\s*[-+*/%]\s*)(?![=])/g, (_m, inner: string, op: string) => `RoseTheme.number(RoseTheme.get(${inner}))${op}`);
   // A size as a condition is "more than nothing", not a boolean.
   o = o.replace(/([A-Za-z_$][\w$.()\[\]]*\.size\(\))\s*\?/g, '($1 > 0) ?');
+  o = o.replace(/\.size\(\)\)\s*\?/g, '.size() != 0) ?');
   o = o.replace(/RoseTheme\.get\(app\.v\("([^"]+)"\), "size"\)\(\)/g,
     (_m, n: string) => `RoseTheme.list(app.v("${n}")).size()`);
   return o;
@@ -4355,12 +4388,16 @@ function javaExpr(code: string, ctx: JavaCtx): string {
   if (ctx.arrowFns && ctx.arrowFns.size) {
     for (const [fn, bodyText] of ctx.arrowFns) {
       out = out.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), () => javaStateFields(javaExprInner(bodyText, ctx)));
+      // The identifier on its own is the same value: {#each docs as d}.
+      out = out.replace(new RegExp('\\b' + fn + '\\b(?!\\s*\\()', 'g'), () => javaStateFields(javaExprInner(bodyText, ctx)));
     }
   }
   // A page function is emitted as name(RoseApp) - a template calls it bare.
   if (ctx.fnNames && ctx.fnNames.size) {
     for (const fn of ctx.fnNames) {
       out = out.replace(new RegExp(`\\b${fn}\\(\\)`, 'g'), `${fn}(${ctx.app})`);
+      // name(arg): the emitted method takes the app first, then the arguments.
+      out = out.replace(new RegExp(`\\b${fn}\\((?!\\)|${ctx.app})`, 'g'), `${fn}(${ctx.app}, `);
     }
   }
   return out;
@@ -4668,7 +4705,11 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     for (const name of liveParams) {
       body = body.replace(new RegExp('\\b' + name + '\\.key\\b', 'g'), `RoseTheme.keyOf(${name})`);
     }
-    const paramDecl = liveParams.map((name) => `, Object ${name}`).join('');
+    // Every declared parameter is part of the signature: a call site passes them
+    // positionally, so an unused one still has to be there.
+    // A server ACTION is invoked by the kit, not by a template: its JS "form"
+    // parameter has no caller to pass one, so the signature stays app-only.
+    const paramDecl = actions.includes(javaName) ? '' : params.map((name) => `, Object ${name}`).join('');
     // "!name" on a local that holds a text value: Java has no truthiness, so
     // the emptiness test is the honest spelling of the same question.
     body = body.replace(/!([A-Za-z_$][\w$]*)(?!\s*[.(])/g, (whole: string, id: string) =>
@@ -4676,7 +4717,7 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     // A handler that returns a value cannot be a void method: the demo's i18n
     // helpers return the rendered string the template prints.
     const returnsValue = /\breturn\s+[^;\s]/.test(body);
-    methods.push(`    private static ${returnsValue ? 'Object' : 'void'} ${javaName}(RoseApp app${paramDecl}) {\n${body}${returnsValue ? '' : '\n        app.render();'}\n    }`);
+    methods.push(`    private static Object ${javaName}(RoseApp app${paramDecl}) {\n${body}${returnsValue ? '' : '\n        app.render();'}${returnsValue ? '' : '\n        return null;'}\n    }`);
   }
   return methods.join('\n\n');
 }
@@ -5086,7 +5127,9 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   const slotParams: string[] = [];
   // Two-way props: the inputs that render a prop get an implicit change callback.
   const twoWay = inputBoundProps(comp.nodes, props);
-  for (const p of twoWay) slotParams.push(`java.util.function.Consumer<Object> ${propChangeHandler(p)}`);
+  const propParams = props.map((p) => twoWay.includes(p)
+    ? `Object ${p}, java.util.function.Consumer<Object> ${propChangeHandler(p)}`
+    : `Object ${p}`);
   if (comp.slots.hasDefault) slotParams.push('java.util.function.Consumer<JPanel> slotDefault');
   for (const s of comp.slots.named) slotParams.push(`java.util.function.BiConsumer<Map<String, Object>, JPanel> slot${s.name.charAt(0).toUpperCase()}${s.name.slice(1)}`);
   return `package ${PKG}.components;
@@ -5100,7 +5143,7 @@ import java.util.*;
 public final class ${comp.cls}View {
     private ${comp.cls}View() {}
 
-    public static void build(RoseApp app, JPanel parent${props.length ? ', Object ' + props.join(', Object ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''}) {
+    public static void build(RoseApp app, JPanel parent${propParams.length ? ', ' + propParams.join(', ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''}) {
         JPanel panel0 = RoseTheme.col(parent);
 ${ctx.lines.join('\n')}
     }
