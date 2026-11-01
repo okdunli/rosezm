@@ -2741,10 +2741,14 @@ try {
     }
     assert(leaks.length === 0, `no generated JS contains a raw framework rune (${leaks.slice(0, 3).join('; ')})`);
     assert(read('utils/rosezm.js').includes('function roseThrow(message)'), 'the kit ships roseThrow');
-    assert(read('utils/rosezm.js').includes('module.exports = { rosePage, setApiBase, getApiBase, installFormData, roseThrow, __rosezmConfirm, __rosezmAlert, __rosezmPrompt, __rosezmOpen, __rosezmNative }'), 'the kit exports roseThrow, the dialog helpers and the native capability bridge');
+    // roseNavigate joined the shared runtime, so every page stops carrying its
+    // own 76-line copy of the same navigation.
+    assert(read('utils/rosezm.js').includes('module.exports = { rosePage, roseNavigate, setApiBase, getApiBase, installFormData, roseThrow, __rosezmConfirm, __rosezmAlert, __rosezmPrompt, __rosezmOpen, __rosezmNative }'), 'the kit exports navigation, roseThrow, the dialog helpers and the native capability bridge');
     // R258: the kit helpers ride along only when the page's script names them
   // (a page that never asks for a camera does not import the camera bridge).
-  assert(read('pages/sign/sign.js').includes('const { rosePage, roseThrow, getApiBase } = require'), 'a page that throws an ActionError imports roseThrow');
+  // Every page imports the shared navigation too: its 76-line body used to be
+  // generated into each of them.
+  assert(read('pages/sign/sign.js').includes('const { rosePage, roseThrow, getApiBase, roseNavigate } = require'), 'a page that throws an ActionError imports roseThrow, and every page shares one navigation');
     assert(read('pages/sign/sign.js').includes('roseThrow("The guestbook is full'), 'the action guard maps onto roseThrow');
     assert(!/\$store\s*\(/.test(read('pages/sign/sign.js')), 'the dead $store declaration is dropped');
   }

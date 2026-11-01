@@ -2719,7 +2719,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
     // The dialog helpers ride along because the script rewrite maps the
     // browser's confirm/alert/prompt onto them - a page that uses them would
     // otherwise hit an undeclared name at the first tap.
-    `const { rosePage, roseThrow, getApiBase${ctx.kitImports.length ? ', ' + ctx.kitImports.join(', ') : ''} } = require('../../utils/rosezm.js');`,
+    `const { rosePage, roseThrow, getApiBase, roseNavigate${ctx.kitImports.length ? ', ' + ctx.kitImports.join(', ') : ''} } = require('../../utils/rosezm.js');`,
     ...(contentBaked ? [`const __content = require('../../data/content.json');`] : []),
     '',
     '// The .rose <script> block, transformed: state declarations became `data`,',
@@ -2733,83 +2733,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
     '  const __setState = function (k, v) { __page.__set(k, v); };',
     '  const __set = __setState;',
     '  const __action = function (n, e) { return __page.__runAction(n, e); };',
-    `  var __ROUTES = require('../../utils/rosezm-routes.js');`,
-    '  const __rosezmNavigate = function (target, fields) {',
-    '    var q = Object.keys(fields || {}).filter(function (k) { return fields[k] !== undefined && fields[k] !== null && fields[k] !== \'\'; })',
-    '      .map(function (k) { return encodeURIComponent(k) + \'=\' + encodeURIComponent(String(fields[k])); }).join(\'&\');',
-    '    var url = q ? target + (target.indexOf(\'?\') === -1 ? \'?\' : \'&\') + q : target;',
-    '    var api = (typeof wx !== \'undefined\' && wx.navigateTo) ? wx',
-    '      : (typeof my !== \'undefined\' && my.navigateTo) ? my',
-    '      : (typeof swan !== \'undefined\' && swan.navigateTo) ? swan',
-    '      : (typeof tt !== \'undefined\' && tt.navigateTo) ? tt : null;',
-    '    if (!api) return;',
-    '    // Web-shaped target -> package path: /postDetail/p1 matches the',
-    '    // /postDetail/:id pattern in the route table and lands on',
-    '    // pages/postDetail-param-id/postDetail-param-id?id=p1. Static routes',
-    '    // pass through unchanged. Without this the three-step degrade (navigateTo',
-    '    // -> switchTab -> reLaunch) fails three times on a package path that does',
-    '    // not exist and the tap does nothing at all.',
-    '    if (target.charAt(0) === \'/\' && target.indexOf(\'.html\') < 0 && !/^\\/pages\\//.test(target)) {',
-    '      var pathOnly = target.split(\'?\')[0];',
-    '      var query = target.indexOf(\'?\') >= 0 ? target.slice(target.indexOf(\'?\') + 1) : \'\';',
-    '      var best = null;',
-    '      var segParams = null;',
-    '      for (var pattern in __ROUTES) {',
-    '        var pp = pattern.split(\'/\');',
-    '        var tp = pathOnly.split(\'/\');',
-    '        if (pp.length !== tp.length) continue;',
-    '        var ok = true;',
-    '        var segs = [];',
-    '        for (var i = 0; i < pp.length; i++) {',
-    '          if (pp[i].charAt(0) === \':\') { segs.push([pp[i].slice(1), tp[i]]); continue; }',
-    '          if (pp[i] !== tp[i]) { ok = false; break; }',
-    '        }',
-    '        if (ok) { best = __ROUTES[pattern]; segParams = segs; break; }',
-    '      }',
-    '      if (best) {',
-    '        // Dynamic segments ride as query params: /postDetail/p1 becomes',
-    '        // ?id=p1, and the kit seeds state.id from options in onLoad. Without',
-    '        // this the target page opened EMPTY (the param lived only in the',
-    '        // path, WeChat only hands launch options the query string) - the',
-    '        // tap looked dead even though navigation happened.',
-    '        var extra = [];',
-    '        if (segParams) {',
-    '          for (var s = 0; s < segParams.length; s++) {',
-    '            extra.push(encodeURIComponent(segParams[s][0]) + \'=\' + encodeURIComponent(segParams[s][1]));',
-    '          }',
-    '        }',
-    '        var qsAll = extra.concat(query ? [query] : []);',
-    '        url = \'/\' + best + (qsAll.length ? \'?\' + qsAll.join(\'&\') : \'\');',
-    '      }',
-    '    }',
-    '    // A tab page refuses navigateTo ("can not navigateTo a tabbar page"),',
-    '    // so the jump degrades: switchTab first (query dropped - the platform',
-    '    // contract), then reLaunch as the last resort. Bare-string targets',
-    '    // (location.href rewrites) pass as { url }.',
-    '    // Tab pages go straight to switchTab: a navigateTo at a tabbar page',
-    '    // always fails and only litters the console; url here is already the',
-    '    // resolved package path, and the tab set is keyed by package path.',
-    '    var bare = url.split(\'?\')[0];',
-    '    var isTab = (__ROUTES.__tabs || []).indexOf(bare.replace(/^\\//, \'\')) >= 0;',
-    '    if (isTab && api.switchTab) {',
-    '      api.switchTab({ url: url });',
-    '      return;',
-    '    }',
-    '    api.navigateTo({',
-    '      url: url,',
-    '      fail: function () {',
-    '        api.switchTab ? api.switchTab({ url: url, fail: function () {',
-    '          if (api.reLaunch) api.reLaunch({ url: url, fail: function (e) {',
-    '            console.warn(\'[rosezm] navigate failed after 3 steps:\', url, e);',
-    '            if (api.showToast) api.showToast({ title: \'页面跳转失败\', icon: \'none\' });',
-    '          } }); else {',
-    '            console.warn(\'[rosezm] navigate failed:\', url);',
-    '          }',
-    '        } })',
-    '          : (api.reLaunch && api.reLaunch({ url: url }));',
-    '      },',
-    '    });',
-    '  };',
+    '  const __rosezmNavigate = roseNavigate;',
     '  const __mount = function (fn) { __page.__mount(fn); };',
     '  const __cleanup = function (fn) { __page.__cleanup(fn); };',
     '  const __refresh = function () { return __page.__loadData(); };',
@@ -3490,6 +3414,81 @@ function routeOf(self, fallback) {
 }
 
 /**
+ * Navigate the way the web router does: a web route resolves to its package
+ * page, dynamic segments ride as query params, a package path passes through,
+ * and the jump degrades navigateTo -> switchTab -> reLaunch. It used to be
+ * generated into EVERY page (76 identical lines, ~4 KB, times the route count);
+ * one copy here is the whole point of a shared runtime.
+ */
+function roseNavigate(target, fields) {
+  var q = Object.keys(fields || {}).filter(function (k) { return fields[k] !== undefined && fields[k] !== null && fields[k] !== ''; })
+    .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(String(fields[k])); }).join('&');
+  var url = q ? target + (target.indexOf('?') === -1 ? '?' : '&') + q : target;
+  var api = (typeof wx !== 'undefined' && wx.navigateTo) ? wx
+    : (typeof my !== 'undefined' && my.navigateTo) ? my
+    : (typeof swan !== 'undefined' && swan.navigateTo) ? swan
+    : (typeof tt !== 'undefined' && tt.navigateTo) ? tt : null;
+  if (!api) return;
+  var table = {};
+  try { table = require('./rosezm-routes.js') || {}; } catch (e) { table = {}; }
+  // Web-shaped target -> package path: /postDetail/p1 matches the
+  // /postDetail/:id pattern and lands on pages/postDetail-param-id/...?id=p1.
+  if (target.charAt(0) === '/' && target.indexOf('.html') < 0 && !/^\\/pages\\//.test(target)) {
+    var pathOnly = target.split('?')[0];
+    var query = target.indexOf('?') >= 0 ? target.slice(target.indexOf('?') + 1) : '';
+    var best = null;
+    var segParams = null;
+    for (var pattern in table) {
+      if (pattern === '__tabs') continue;
+      var pp = pattern.split('/');
+      var tp = pathOnly.split('/');
+      if (pp.length !== tp.length) continue;
+      var ok = true;
+      var segs = [];
+      for (var i = 0; i < pp.length; i++) {
+        if (pp[i].charAt(0) === ':') { segs.push([pp[i].slice(1), tp[i]]); continue; }
+        if (pp[i] !== tp[i]) { ok = false; break; }
+      }
+      if (ok) { best = table[pattern]; segParams = segs; break; }
+    }
+    if (best) {
+      // Dynamic segments ride as query params: WeChat only hands launch options
+      // the query string, so a param that lived in the path reached the page
+      // empty and the tap looked dead.
+      var extra = [];
+      if (segParams) {
+        for (var s = 0; s < segParams.length; s++) {
+          extra.push(encodeURIComponent(segParams[s][0]) + '=' + encodeURIComponent(segParams[s][1]));
+        }
+      }
+      var qsAll = extra.concat(query ? [query] : []);
+      url = '/' + best + (qsAll.length ? '?' + qsAll.join('&') : '');
+    }
+  }
+  // A tab page refuses navigateTo, so it goes straight to switchTab; anything
+  // else tries navigateTo first and degrades twice.
+  var bare = url.split('?')[0];
+  var isTab = (table.__tabs || []).indexOf(bare.replace(/^\\//, '')) >= 0;
+  if (isTab && api.switchTab) {
+    api.switchTab({ url: url });
+    return;
+  }
+  api.navigateTo({
+    url: url,
+    fail: function () {
+      api.switchTab ? api.switchTab({ url: url, fail: function () {
+        if (api.reLaunch) api.reLaunch({ url: url, fail: function (e) {
+          console.warn('[rosezm] navigate failed after 3 steps:', url, e);
+          if (api.showToast) api.showToast({ title: '\u9875\u9762\u8df3\u8f6c\u5931\u8d25', icon: 'none' });
+        } }); else {
+          console.warn('[rosezm] navigate failed:', url);
+        }
+      } }) : (api.reLaunch && api.reLaunch({ url: url }));
+    },
+  });
+}
+
+/**
  * A web route from a wall's Location header -> the exported page that carries
  * it. The route table is the same one navigation uses; an unexported target
  * (a page the project never wrote) answers '' and the caller warns.
@@ -3884,5 +3883,5 @@ function rosePage(definitions, def) {
   return page;
 }
 
-module.exports = { rosePage, setApiBase, getApiBase, installFormData, roseThrow, __rosezmConfirm, __rosezmAlert, __rosezmPrompt, __rosezmOpen, __rosezmNative };
+module.exports = { rosePage, roseNavigate, setApiBase, getApiBase, installFormData, roseThrow, __rosezmConfirm, __rosezmAlert, __rosezmPrompt, __rosezmOpen, __rosezmNative };
 `;
