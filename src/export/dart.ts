@@ -2425,8 +2425,9 @@ function renderPage(
   const paramsField = page.params.length
     ? `  final Map<String, String> params;\n  const ${page.className}({super.key, this.params = const {}});\n`
     : `  const ${page.className}({super.key});\n`;
+  const needsCardHide = components.some((c) => c.name === 'Card');
   const imports = [
-    "import 'package:flutter/material.dart';",
+    `import 'package:flutter/material.dart'${needsCardHide ? ' hide Card' : ''};`,
     "import '../rosezm.dart';",
     "import '../vectors.dart';",
     "import '../styles.dart';",
@@ -3419,7 +3420,7 @@ function dartScalarCalls(code: string): string {
 
 /** R480: the Dart expression, with the reserved-word rename at the end. */
 function dartExpr(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
-  return dRename(dartExprRaw(code, stateNames, mapBinds, dataNames));
+  return dRename(dartExprRaw(code.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"'), stateNames, mapBinds, dataNames));
 }
 
 function dartExprRaw(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
@@ -3813,7 +3814,9 @@ const DART_EXPR: ExprDialect = {
 
 /** R480: a handler body goes through the same rename, strings untouched. */
 function translateBody(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {
-  return dRename(translateBodyRaw(body, file, warnings, mapBinds));
+  // A translation renders its key: this kit ships no dictionary.
+  const keyed = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
+  return dRename(translateBodyRaw(keyed, file, warnings, mapBinds));
 }
 
 function translateBodyRaw(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {
