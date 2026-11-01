@@ -668,7 +668,11 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
       skipped.push(info.routePath);
     }
   }
-  const keep = new Set(planned.map(({ file }) => file));
+  // A prerendered route also carries its own state as a sibling JSON file: the
+  // document's script tag is absent on a zero-JS route (there is no client to
+  // hydrate), and a native export still needs the values the build computed.
+  const stateFile = (file: string): string => path.join(path.dirname(file), 'rosezm-state.json');
+  const keep = new Set(planned.flatMap(({ file }) => [file, stateFile(file)]));
   const apiPrerender = (ssrModule.apiPrerender as Record<string, boolean>) ?? {};
   const apiPlanned = Object.entries(apiPrerender).filter(([, on]) => on).map(([routePath]) => routePath);
   for (const routePath of apiPlanned) keep.add(path.join(OUT_DIR, routePath.slice(1) + '.json'));
@@ -703,6 +707,21 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
       if (prev !== html) {
         await fs.promises.mkdir(path.dirname(file), { recursive: true });
         await fs.promises.writeFile(file, html);
+      }
+      // The state the export bakes: a device has no server to ask.
+      // shortcut: a zero-JS route carries no state (there is no client to
+      // hydrate), so it bakes nothing - upgrade by rendering the route once more
+      // with state collection forced, the day a native target needs it.
+      const statePath = stateFile(file);
+      const rawState = page.state;
+      const stateJson = typeof rawState === 'string' ? rawState : JSON.stringify(rawState ?? {});
+      const parsedState = (() => { try { return JSON.parse(stateJson); } catch { return null; } })();
+      if (parsedState && typeof parsedState === 'object' && Object.keys(parsedState).length) {
+        let prevState: string | null = null;
+        try { prevState = await fs.promises.readFile(statePath, 'utf-8'); } catch { /* new file */ }
+        if (prevState !== stateJson) await fs.promises.writeFile(statePath, stateJson);
+      } else {
+        await fs.promises.rm(statePath, { force: true });
       }
       console.log(`prerendered ${routePath} -> ${path.relative(process.cwd(), file)}`);
     });
@@ -2460,7 +2479,7 @@ async function exportCmd(): Promise<void> {
     }
     console.log('rosezm export targets:');
     for (const row of rows) console.log(`  ${row.status === 'ready' ? '✓' : '·'} ${row.name.padEnd(10)} ${row.family.padEnd(13)} ${row.summary}`);
-    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--json]');
+    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--watch] [--json]');
     return;
   }
   // `export surface` prints what a vendored consumer may key on: the module
@@ -2614,6 +2633,45 @@ async function exportCmd(): Promise<void> {
     for (const [key, count] of entries.slice(0, 8)) console.log(`    - ${key}${count > 1 ? ` (x${count})` : ''}`);
     if (entries.length > 8) console.log(`    ... and ${entries.length - 8} more kind(s); pass --json for the full list`);
   }
+  // --watch: a native target is a build artifact, so the loop is "edit a .rose,
+  // get a new tree". Same options every time, one export per settled burst, and
+  // a failed export keeps watching instead of exiting - a half-typed page must
+  // not stop the loop.
+  if (rest.includes('--watch')) {
+    const srcRoot = path.join(projectRoot, 'src');
+    if (!fs.existsSync(srcRoot)) {
+      console.error(`rosezm export --watch: no ${path.relative(process.cwd(), srcRoot)} to watch`);
+      process.exit(1);
+    }
+    console.log(`  watching ${path.relative(process.cwd(), srcRoot)} - Ctrl+C to stop`);
+    let timer: NodeJS.Timeout | null = null;
+    let busy = false;
+    const again = async (): Promise<void> => {
+      if (busy) { timer = setTimeout(again, 150); return; }
+      busy = true;
+      const at = Date.now();
+      try {
+        const next = await exportProject(target, projectRoot, {
+          apiBase,
+          outRoot: outRoot ? path.resolve(outRoot) : undefined,
+          cloud: cloudMode ? true : undefined,
+          cloudEnv: cloudEnvRaw,
+          globalCss: readGlobalCss(flag('--css')),
+        });
+        console.log(`↻ ${next.pages.length} page(s), ${next.components.length} component(s) in ${Date.now() - at}ms${next.warnings.length ? ` - ${next.warnings.length} warning(s)` : ''}`);
+      } catch (err) {
+        // The tree on disk is the last good one; the page that broke it is the
+        // user's next edit.
+        console.error(`rosezm export: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      busy = false;
+    };
+    fs.watch(srcRoot, { recursive: true }, (_ev, filename) => {
+      if (filename && !/\.(rose|json|css)$/.test(String(filename))) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void again(); }, 120);
+    });
+  }
 }
 
 const argv = process.argv.slice(2);
@@ -2649,4 +2707,4 @@ else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud] [--watch]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');

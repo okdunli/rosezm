@@ -131,6 +131,36 @@ assert(fs.existsSync(path.join(REPO, 'dist', 'chunks')), 'split mode emits route
 
 const usage = await run([], REPO);
 assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), 'the usage line documents the dir argument and its default');
+// A native target is a build artifact: the edit loop is "save a .rose, get a
+// new tree", so the export grew a watcher instead of one-shot-only.
+assert(usage.out.includes('--watch'), 'the usage line documents the export watcher');
+
+{
+  const watchRoot = path.join(tmp, 'watch-proj');
+  fs.mkdirSync(path.join(watchRoot, 'src', 'pages'), { recursive: true });
+  const watchPage = path.join(watchRoot, 'src', 'pages', 'index.rose');
+  fs.writeFileSync(watchPage, '<h1>watch</h1>\n');
+  const watchOut = path.join(tmp, 'watch-out');
+  let log = '';
+  const child = spawn(process.execPath, [...TSX, 'export', 'android', watchRoot, '--out', watchOut, '--watch'], { cwd: REPO, env: { ...process.env, NO_COLOR: '1' } });
+  child.stdout.on('data', (d) => { log += String(d); });
+  child.stderr.on('data', (d) => { log += String(d); });
+  const waitFor = async (needle, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (log.includes(needle)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return log.includes(needle);
+  };
+  const first = await waitFor('watching', 30_000);
+  assert(first, `the export watcher starts and says what it watches (${log.slice(-200)})`);
+  fs.writeFileSync(watchPage, '<h1>watch again</h1>\n');
+  const second = await waitFor('\u21bb', 30_000);
+  assert(second, `the watcher re-exports on a save (${log.slice(-200)})`);
+  assert(fs.readFileSync(path.join(watchOut, 'android', 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8').includes('watch again'), 'the re-export wrote the edited page');
+  child.kill();
+}
 // The export copy named the native targets "on the way" long after all 17
 // shipped - a first-time reader could conclude the exporter stops at mini
 // programs. The line now says what is real, and the old copy is dead.
