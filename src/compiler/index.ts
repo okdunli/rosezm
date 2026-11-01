@@ -5545,6 +5545,46 @@ for (const el of document.querySelectorAll('[data-rosezm]')) {
 const __writtenContent = new Map<string, string>();
 let __writtenFor: string | null = null;
 
+/** Every emitted JS file has to PARSE as JavaScript. A type annotation that
+ *  leaks through a source rewrite (the reported case: an assignment whose right
+ *  side is a bare parameter left `Record<string, string>>` in the bundle)
+ *  parses as TypeScript but not as JavaScript, and Node then fails at import
+ *  time - every route a 500, with the build having said it was fine. One parse
+ *  turns that into a build error naming the file and the first bad token. */
+export async function assertJsParseable(file: string): Promise<void> {
+  let code = '';
+  try { code = await fs.promises.readFile(file, 'utf8'); } catch { return; }
+  try {
+    await esbuild.transform(code, { loader: 'js', format: 'esm' });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message.split('\n').filter(Boolean).slice(0, 2).join(' ') : String(err);
+    throw new RoseError('E-BUILD-PARSE', `the emitted ${path.basename(file)} is not valid JavaScript: ${detail}`, {
+      hint: 'this is a compiler bug, not a page bug - please report the page that produced it',
+    });
+  }
+}
+
+/** The same parse gate over every JavaScript artifact a build emits: the server
+ *  bundle, the client bundle, the split-mode chunks, `mount.js` and
+ *  `prod.mjs`. A type that leaks into ANY of them is a 500 at import time, so
+ *  the check walks the output tree instead of naming two files. */
+export async function assertEmittedJsParseable(outDir: string, warnings: string[] = []): Promise<void> {
+  const walk = async (dir: string): Promise<string[]> => {
+    let entries: import('node:fs').Dirent[] = [];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return []; }
+    const files: string[] = [];
+    for (const e of entries) {
+      if (e.name === 'node_modules') continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) files.push(...(await walk(p)));
+      else if (/\.(?:js|mjs)$/.test(e.name)) files.push(p);
+    }
+    return files;
+  };
+  // Sorted so a failure names the same file on every machine.
+  for (const file of (await walk(outDir)).sort()) await assertJsParseable(file);
+}
+
 export async function buildProject(rootArg: string, outDirArg: string, opts: { minify?: boolean; incremental?: boolean } = {}): Promise<{ routes: RouteInfo[]; bundle: string; config: rosezmConfig }> {
   // R240: the scans below return paths joined onto `root`, and every import is
   // resolved with `path.resolve` (absolute). A RELATIVE root therefore produced

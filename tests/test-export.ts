@@ -1481,6 +1481,40 @@ try {
   const pySign = pread('pages/sign.py');
   assert(pySign.includes("'guests': (['Ada Lovelace', 'Grace Hopper']),"), 'Tk seeds the $store payload too');
 
+  // The build must refuse a bundle that is not JavaScript. The reported case: a
+  // type annotation survived a source rewrite, `Record<string, string>>` landed
+  // in dist/server.js, the build said OK, and every route 500'd at import time.
+  {
+    const { assertJsParseable } = await import('../src/compiler/index.js') as { assertJsParseable: (f: string) => Promise<void> };
+    const good = join(scratch, 'parse-ok.js');
+    writeFileSync(good, 'export const ok = 1;\n');
+    let threw: string | null = null;
+    try { await assertJsParseable(good); } catch (e) { threw = String(e); }
+    assert(threw === null, 'a valid bundle passes the parse gate');
+    const bad = join(scratch, 'parse-bad.js');
+    writeFileSync(bad, 'const seen = new Map<string, Set<string>>();\n');
+    threw = null;
+    try { await assertJsParseable(bad); } catch (e) { threw = String(e); }
+    assert(threw !== null && threw.includes('not valid JavaScript') && threw.includes('parse-bad.js'), 'a bundle carrying a TypeScript generic fails the build, naming the file');
+    // The gate walks the whole tree, so a split-mode chunk is covered too.
+    const tree = join(scratch, 'parse-tree');
+    mkdirSync(join(tree, 'chunks'), { recursive: true });
+    writeFileSync(join(tree, 'server.js'), 'export const ok = 1;\n');
+    writeFileSync(join(tree, 'chunks', 'home-abc123.js'), 'export const home = () => 1;\n');
+    writeFileSync(join(tree, 'prod.mjs'), 'import "./server.js";\n');
+    let treeThrew: string | null = null;
+    try { await (await import('../src/compiler/index.js') as { assertEmittedJsParseable: (d: string) => Promise<void> }).assertEmittedJsParseable(tree); } catch (e) { treeThrew = String(e); }
+    assert(treeThrew === null, 'a clean split-mode tree passes the parse gate');
+    writeFileSync(join(tree, 'chunks', 'about-def456.js'), 'const m = new Map<string, Set<string>>();\n');
+    treeThrew = null;
+    try { await (await import('../src/compiler/index.js') as { assertEmittedJsParseable: (d: string) => Promise<void> }).assertEmittedJsParseable(tree); } catch (e) { treeThrew = String(e); }
+    assert(treeThrew !== null && treeThrew.includes('about-def456.js'), 'a broken chunk fails the gate and names itself, not just the entry');
+    const missing = join(scratch, 'not-there.js');
+    threw = null;
+    try { await assertJsParseable(missing); } catch (e) { threw = String(e); }
+    assert(threw === null, 'a missing bundle is not an error here (the caller decides)');
+  }
+
   // A device has no server: without the build's own state every exported page
   // opened with its declared defaults (an empty list, a blank card). The export
   // now carries the per-route state `rosezm build` wrote into dist/, and a live
@@ -1521,6 +1555,20 @@ try {
       ['arkts', 'entry/src/main/ets/kit/RoseKit.ets', 'ROSE_BAKED'],
       ['cpp', 'src/rose.h', 'ROSE_BAKED'],
     ];
+    // Bytes, not characters: one CJK character costs three bytes in the emitted
+    // literal, so a character-counted split would still break MSVC's ceiling.
+    {
+      const so = await import('../src/export/state-ops.js') as Record<string, unknown>;
+      const chunk = so.chunkLiteral as ((t: string, n?: number) => string[]) | undefined;
+      assert(typeof chunk === 'function', 'state-ops exports chunkLiteral');
+      const cjk = '页面状态'.repeat(40) + '"quoted"' + String.fromCharCode(92) + '回车';
+      const parts = chunk!(cjk, 60);
+      assert(parts.join('') === cjk, 'chunking never loses or reorders a character');
+      const over = parts.filter((p) => Buffer.byteLength(p.replace(/"/g, '\\"').replace(/\\/g, '\\\\'), 'utf8') > 60);
+      assert(!over.length, `every chunk stays inside the byte budget (${parts.length} chunks)`);
+      assert(parts.every((p) => !/[^\\]\\$|^\\$/.test(p)), 'no chunk ends on a half-written escape');
+    }
+
     // A real app's state outgrows one literal (JVM pool 65,535 B, MSVC 16,380 B),
     // so the emitters split and rejoin. Forced small here so the split actually
     // happens on this fixture.

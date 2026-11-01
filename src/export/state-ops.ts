@@ -1483,24 +1483,51 @@ export function literalChunkSize(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 8000;
 }
 
-/** Split a string for emission as several literals. A split never lands between
- *  a backslash and its escapee, so each piece is independently valid. */
+/** Bytes one character costs inside an emitted literal: the escapes the targets
+ *  use, then UTF-8. Counting bytes (not characters) is what keeps a CJK-heavy
+ *  app under MSVC's 16,380 and the JVM pool's 65,535. */
+function emittedWidth(ch: string): number {
+  if (ch === '"' || ch === '\\' || ch === '$' || ch === '\n' || ch === '\r' || ch === '\t') return 2;
+  const code = ch.codePointAt(0) ?? 0;
+  if (code < 0x20) return 6;
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  if (code < 0x10000) return 3;
+  return 4;
+}
+
+/** Split a string for emission as several literals, by EMITTED BYTES. A split
+ *  never lands between a backslash and its escapee, so each piece is valid on
+ *  its own. */
 export function chunkLiteral(text: string, size = literalChunkSize()): string[] {
-  if (text.length <= size) return [text];
+  const chars = [...text];
   const out: string[] = [];
-  let from = 0;
-  while (from < text.length) {
-    let to = Math.min(from + size, text.length);
-    while (to > from + 1 && to < text.length) {
+  let piece = '';
+  let used = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    const width = emittedWidth(ch);
+    if (used + width > size && piece) {
+      // A piece may not end on a backslash: the next character is its escapee.
       let backslashes = 0;
-      for (let i = to - 1; i >= 0 && text[i] === '\\'; i--) backslashes++;
-      if (backslashes % 2 === 0) break;
-      to--;
+      for (let j = piece.length - 1; j >= 0 && piece[j] === '\\'; j--) backslashes++;
+      if (backslashes % 2) {
+        const last = piece.slice(-1);
+        piece = piece.slice(0, -1);
+        out.push(piece);
+        piece = last;
+        used = emittedWidth(last);
+      } else {
+        out.push(piece);
+        piece = '';
+        used = 0;
+      }
     }
-    out.push(text.slice(from, to));
-    from = to;
+    piece += ch;
+    used += width;
   }
-  return out;
+  if (piece) out.push(piece);
+  return out.length ? out : [text];
 }
 
 /** The per-route state the web build baked next to each prerendered page,

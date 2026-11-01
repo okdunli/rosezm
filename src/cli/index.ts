@@ -6,11 +6,12 @@ import * as zlib from 'zlib';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { spawnSync } from 'child_process';
+import * as esbuild from 'esbuild';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { promisify } from 'util';
 import { AsyncLocalStorage } from 'async_hooks';
 import { Worker } from 'worker_threads';
-import { buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
+import { assertEmittedJsParseable, buildProject, scanRoseFiles, scanComponentFiles, scriptOf, extractExports, loadConfig, RoseError, errorInfo, codeFrame, type RouteInfo } from '../compiler/index.js';
 import { prunePrerendered } from '../compiler/rm-fast.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode, setExtraCsp } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
@@ -343,6 +344,10 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
 async function build(): Promise<void> {
   const minify = !devMode && !argv.includes('--no-minify');
   const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
+  // Before anything serves it: every emitted JS file must be JavaScript, not
+  // TS that happens to look like it - the server bundle, the client bundle and
+  // every split-mode chunk alike.
+  await assertEmittedJsParseable(OUT_DIR);
   const brotliQuality = config.brotli?.quality ?? 11;
   // dist/server.js is ESM in a .js file. Node >= 22.7 detects the syntax, but
   // engines allow 22.0-22.6 (where it parses as CJS and fails on import), and
