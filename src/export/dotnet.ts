@@ -2527,6 +2527,10 @@ function renderCsproj(app: AppIdentity): string {
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- WPF targets Windows, and a Windows-targeted project builds on a
+         macOS or Linux host only when this is set: it lets CI prove the tree
+         compiles without a Windows runner. It changes nothing on Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>${NS}</RootNamespace>
@@ -4001,6 +4005,23 @@ function csRenameCalls(code: string, renamed: Map<string, string>): string {
 }
 
 function csExpr(code: string, ctx: NetCtx): string {
+  return csStateFields(csExprInner(code, ctx));
+}
+
+/** A field read on a state value ("{post.title}") does not compile in C#: the
+ *  state is object?, and no member hangs off it. Same rule the Java target
+ *  learned - the kit's Get is the only reader. */
+function csStateFields(out: string): string {
+  let o = out.replace(/app\.V\("([^"]+)"\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
+    (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
+  o = o.replace(/RoseTheme\.(?:Str|List)\(app\.V\("([^"]+)"\)\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
+    (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
+  // JS .length / a list read used as a count is the kit's Count, not a member.
+  o = o.replace(/app\.V\("([^"]+)"\)\.(?:length|Length|Count)\b/g, (_m, name: string) => `RoseKit.Count(app.V("${name}"))`);
+  return o;
+}
+
+function csExprInner(code: string, ctx: NetCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'RoseKit.RoseContentList', 'RoseKit.RoseContentGet', '""');
@@ -4448,7 +4469,9 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed);
+    // Handler bodies are statements: they never pass through csExpr, so the
+    // state-value coercions run here too (the same lesson the Java target taught).
+    const body = csStateFields(csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed));
     methods.push(`    private static void ${csName}(RoseApp app)\n    {\n${body}\n        app.Render();\n    }`);
   }
   return methods.join('\n\n');
