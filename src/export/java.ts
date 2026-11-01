@@ -1192,7 +1192,7 @@ ${rows || '        // no style rules'}
 
     public static void applyBox(JPanel panel, Style style) {
         int[] inset = style.insets();
-        if (style.alpha < 1) panel.setAlpha((float) style.alpha);
+        if (style.alpha < 1) setAlpha(panel, (float) style.alpha);
         if (style.gradientStops != null && style.gradientStops.length >= 2) {
             // A gradient fills the whole box: the panel paints it itself, the
             // way the WPF target's OnRender does. Swing's setBackground cannot
@@ -1425,7 +1425,7 @@ ${rows || '        // no style rules'}
             // R409: a live style:font-style binding keeps the weight it found.
             int style = widget.getFont().getStyle();
             widget.setFont(widget.getFont().deriveFont(v.contains("italic") || v.contains("oblique") ? (style | Font.ITALIC) : (style & ~Font.ITALIC)));
-        } else if (prop.equals("opacity")) widget.setAlpha((float) Math.max(0, Math.min(1, decimal(v.replaceAll("[^0-9.]", "")))));
+        } else if (prop.equals("opacity")) setAlpha(widget, (float) Math.max(0, Math.min(1, decimal(v.replaceAll("[^0-9.]", "")))));
         else if (prop.equals("display") || prop.equals("visibility")) widget.setVisible(!v.equals("none") && !v.equals("hidden"));
     }
 
@@ -1433,7 +1433,7 @@ ${rows || '        // no style rules'}
         widget.setForeground(color(style.color));
         int fontStyle = (style.bold ? Font.BOLD : Font.PLAIN) | (style.italic ? Font.ITALIC : Font.PLAIN);
         widget.setFont(new Font(style.fontName, fontStyle, style.fontSize));
-        if (style.alpha < 1) widget.setAlpha((float) style.alpha);
+        if (style.alpha < 1) setAlpha(widget, (float) style.alpha);
         // R257: line-height scales the font, the same way a label takes it.
         if (style.lineHeight != 1) {
             widget.setFont(widget.getFont().deriveFont((float) (widget.getFont().getSize2D() * style.lineHeight)));
@@ -1755,6 +1755,10 @@ ${rows || '        // no style rules'}
     }
     /** Swing renders HTML in a JLabel natively - {@html} content needs no
      *  translation, only the html wrapper the widget requires. */
+    public static JLabel htmlLabel(Object value) {
+        return htmlLabel(String.valueOf(value));
+    }
+
     public static JLabel htmlLabel(String html) {
         return htmlLabel(html, (Style) null);
     }
@@ -1795,7 +1799,7 @@ ${rows || '        // no style rules'}
                 if (s.italic) text = "<i>" + text + "</i>";
                 if (s.bold) text = "<b>" + text + "</b>";
                 if ("Monospaced".equals(s.fontName)) text = "<tt>" + text + "</tt>";
-                text = "<font color=\"" + s.color + "\">" + text + "</font>";
+                text = "<font color=\\"" + s.color + "\\">" + text + "</font>";
             }
             html.append(text);
         }
@@ -1959,6 +1963,27 @@ ${rows || '        // no style rules'}
         parent.add(combo);
         return combo;
     }
+    /** Swing paints no per-component alpha: the closest honest rendering of
+     *  CSS opacity on a box is a translucent background. */
+    /** A key event's character, the only part a rose handler reads. */
+    public static String keyOf(Object ev) {
+        if (ev instanceof java.awt.event.KeyEvent k) return String.valueOf(k.getKeyChar());
+        return "";
+    }
+
+    /** A state read used in arithmetic: the kit's numbers are Objects. */
+    public static double number(Object v) {
+        return v instanceof Number num ? num.doubleValue() : decimal(String.valueOf(v));
+    }
+
+    public static void setAlpha(javax.swing.JComponent c, float alpha) {
+        java.awt.Color bg = c.getBackground();
+        if (bg == null) return;
+        float a = Math.max(0f, Math.min(1f, alpha));
+        c.setOpaque(false);
+        c.setBackground(new java.awt.Color(bg.getRed(), bg.getGreen(), bg.getBlue(), Math.round(a * 255)));
+    }
+
     public static JTextField textField(JPanel parent, String placeholder, RoseApp app, String stateKey) {
         JTextField field = new JTextField(20);
         field.putClientProperty("JTextField.placeholderText", placeholder);
@@ -1985,9 +2010,30 @@ ${rows || '        // no style rules'}
     }
 
     public static JTextField passwordField(JPanel parent, String placeholder, RoseApp app, String stateKey, boolean enabled, int maxLength) {
-        JTextField field = textField(parent, placeholder, app, stateKey, enabled, maxLength);
+        // A JTextField has no setEchoChar - masking is JPasswordField's job.
+        JPasswordField field = new JPasswordField(20);
         field.setEchoChar('*');
+        field.putClientProperty("JTextField.placeholderText", placeholder);
+        field.setAlignmentX(Component.LEFT_ALIGNMENT);
+        field.setEnabled(enabled);
+        limitLength(field, maxLength);
+        bindText(field, app, stateKey);
+        parent.add(field);
         return field;
+    }
+
+    /** The one place a text field's edits reach the app - a masked field reads
+     *  the password array, a plain one getText(). */
+    private static void bindText(JTextField field, RoseApp app, String stateKey) {
+        field.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { RoseTheme.storeText(field, app, stateKey); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { RoseTheme.storeText(field, app, stateKey); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { RoseTheme.storeText(field, app, stateKey); }
+        });
+    }
+
+    private static void storeText(JTextField field, RoseApp app, String stateKey) {
+        app.set(stateKey, field instanceof JPasswordField pw ? new String(pw.getPassword()) : field.getText());
     }
 
     /** R430: a readonly field keeps its text selectable but refuses edits. */
@@ -2314,11 +2360,10 @@ ${rows || '        // no style rules'}
         parent.add(line);
         return line;
     }
-}
 
 /** R485: a panel that paints a CSS background picture under its children.
  *  cover fills and crops, contain fits inside, auto keeps the pixels. */
-public static final class RoseImagePanel extends JPanel {
+static final class RoseImagePanel extends JPanel {
     private java.awt.Image picture;
     private String fit = "cover";
 
@@ -2356,7 +2401,7 @@ public static final class RoseImagePanel extends JPanel {
 
 /** A vector image drawn from absolute M/L/C/Z path data (Swing's y axis, like
  *  SVG's, points down - no flip). */
-public final class RoseVector extends JComponent {
+static final class RoseVector extends JComponent {
     private final String[] fills;
     private final String[] data;
 
@@ -2377,7 +2422,7 @@ public final class RoseVector extends JComponent {
         }
     }
 }
-`;
+}`;
 }
 
 /**
@@ -2544,7 +2589,8 @@ ${branches}            default:
         java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
         for (int i = 0; i + 1 < pairs.length; i += 2) out.put(String.valueOf(pairs[i]), pairs[i + 1]);
         return out;
-    }`;
+    }
+}`;
 }
 
 function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = []): string {
@@ -2553,17 +2599,14 @@ function renderKit(apiBase: string, content: Record<string, Array<Record<string,
     /** The project's markdown collections, baked at export time. A page reads
      *  them through roseContentList / roseContentGet, the same shape the
      *  server-side bridge exposes. */
-    public static final String ROSE_CONTENT_JSON = ${JSON.stringify(JSON.stringify(content))};
+    /** The project's collections, baked as Java data - the kit has no JSON
+     *  dependency to parse, by design (stdlib only, no jar to download). */
+    public static final Map<String, Object> ROSE_CONTENT = ${javaDataLiteral(content)};
 
+    @SuppressWarnings("unchecked")
     public static List<Map<String, Object>> roseContentList(String coll) {
-        List<Map<String, Object>> out = new ArrayList<>();
-        try {
-            org.json.JSONObject root = new org.json.JSONObject(ROSE_CONTENT_JSON);
-            if (!root.has(coll)) return out;
-            org.json.JSONArray arr = root.getJSONArray(coll);
-            for (int i = 0; i < arr.length(); i++) out.add(jsonToMap(arr.getJSONObject(i)));
-        } catch (org.json.JSONException e) { return out; }
-        return out;
+        Object v = ROSE_CONTENT.get(coll);
+        return v == null ? new ArrayList<>() : new ArrayList<>((List<Map<String, Object>>) v);
     }
 
     public static Map<String, Object> roseContentGet(String coll, String slug) {
@@ -2571,13 +2614,6 @@ function renderKit(apiBase: string, content: Record<string, Array<Record<string,
             if (slug.equals(entry.get("slug"))) return entry;
         }
         return null;
-    }
-
-    private static Map<String, Object> jsonToMap(org.json.JSONObject o) throws org.json.JSONException {
-        Map<String, Object> m = new LinkedHashMap<>();
-        java.util.Iterator<String> keys = o.keys();
-        while (keys.hasNext()) { String k = keys.next(); m.put(k, o.get(k)); }
-        return m;
     }
 ` : '';
   return `package ${PKG};
@@ -2591,11 +2627,20 @@ import java.util.*;
 
 /** The data channel and the action protocol, with a stdlib-only JSON parser. */
 
-/** The {#await} reject branch: it always throws, so the catch arm renders. */
-public static Object roseThrow(Object message) {
-    throw new RuntimeException(String.valueOf(message));
-}
 public final class RoseKit {
+    /** The {#await} reject branch, and an action guard that threw: it always
+     *  throws, so the catch arm renders. */
+    public static Object roseThrow(Object message) {
+        throw new RuntimeException(String.valueOf(message));
+    }
+
+    /** ActionError(message, code, field?) - the status and field ride along,
+     *  unused locally: there is no HTTP response to fill in. */
+    public static Object roseThrow(Object message, Object... rest) {
+        StringBuilder why = new StringBuilder(String.valueOf(message));
+        for (Object r : rest) why.append(" (").append(String.valueOf(r)).append(")");
+        throw new RuntimeException(why.toString());
+    }
     /** The backend URL: ROSEZM_API overrides the value baked at export time, so dev/staging/prod switch without a re-export. */
     public static final String API_BASE = System.getenv("ROSEZM_API") != null ? System.getenv("ROSEZM_API") : ${JSON.stringify(apiBase)};
 
@@ -2896,6 +2941,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.util.*;
+import ${PKG}.pages.*;
 
 /** The frame, the shared state and the route table. */
 public final class RoseApp {
@@ -3099,6 +3145,12 @@ interface JavaCtx {
   stateTypes: Map<string, string>;
   mapBinds: Set<string>;
   components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage }>;
+  /** The page script's own top-level functions: every emitted one takes the
+   *  app, so a bare call in a template has to pass it. */
+  fnNames?: Set<string>;
+  /** Zero-argument arrow consts (const docs = () => EXPR): inlined at the call
+   *  site, because there is no method the emitter would otherwise produce. */
+  arrowFns?: Map<string, string>;
   lines: string[];
   depth: number;
   styles: Map<string, JavaStyle>;
@@ -3195,6 +3247,8 @@ function renderPage(
   const ctx: JavaCtx = {
     warnings,
     file: page.cls,
+    fnNames: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
+    arrowFns: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*([^;\n]+);?/gm)].map((m) => [m[1], m[2].trim()] as [string, string])),
     stateNames,
     awaits: [],
     deferred: [],
@@ -3223,12 +3277,12 @@ function renderPage(
     counter: { n: 0 },
   };
   emitNodes(page.nodes, ctx);
-  const layout = ctx.lines.join('\n');
+  const layout = javaLiteralPass(ctx.lines.join('\n'));
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries, or an
     // optional single entry, so `posts.get(0)` and `post != null` both compile.
-    if (b.init.startsWith('roseContentList(')) return `    static final List<Map<String, Object>> ${b.name} = ${b.init};`;
-    if (b.init.startsWith('roseContentGet(')) return `    static final Map<String, Object> ${b.name} = ${b.init};`;
+    if (b.init.startsWith('roseContentList(')) return `    static final List<Map<String, Object>> ${b.name} = ${javaDoubleQuotes(b.init)};`;
+    if (b.init.startsWith('roseContentGet(')) return `    static final Map<String, Object> ${b.name} = ${javaDoubleQuotes(b.init)};`;
     return `    static final Map<String, Object> ${b.name} = ${javaMapLiteral(b.init)};`;
   }).join('\n');
   const initialState = [
@@ -3254,7 +3308,10 @@ function renderPage(
 
 import ${PKG}.RoseApp;
 import ${PKG}.RoseTheme;
-${page.script.includes('useNative') ? `import ${PKG}.RoseKit;\n` : ''}import javax.swing.*;
+// The kit's static helpers (roseThrow, roseContentList, roseContentGet) are
+// called bare by the generated bodies, so the page imports them by name.
+import static ${PKG}.RoseKit.*;
+${components.length ? `import ${PKG}.components.*;\n` : ''}import javax.swing.*;
 import java.awt.*;
 import java.util.*;
 import java.util.List;
@@ -3314,12 +3371,79 @@ function javaLiteral(init: string): string {
   out = out.replace(/'((?:[^'\\\\]|\\\\.)*)'/g, '"$1"');
   out = rewriteMemberReads(out, (obj, key) => `RoseTheme.get(${obj}, "${key}")`);
   if (/^\{/.test(out)) return javaMapLiteral(out);
+  // A parenthesised literal is the same literal: (` + `["a"]`) reached the file
+  // as a JS array, because this check only saw a leading bracket.
+  if (/^\(\s*[[{]/.test(out) && matchParen(out, 0) === out.length - 1) return javaLiteral(out.slice(1, -1));
+  // A field of a state value ("{post.title}") arrives as app.v("post").title
+  // once the read is spelled, and Java has no such member on an Object.
+  out = out.replace(/app\.v\("([^"]+)"\)\.([A-Za-z_$][\w$]*)/g, (_m, name: string, key: string) => `RoseTheme.get(app.v("${name}"), "${key}")`);
+
   if (/^\[/.test(out)) {
     const inner = out.slice(1, -1).trim();
     if (!inner) return 'List.of()';
     return 'List.of(' + splitTopLevel(inner).map((x) => javaLiteral(x)).join(', ') + ')';
   }
   return out;
+}
+
+/**
+ * Statement-level JS literals the expression passes never reached: an array in
+ * an if-condition or a for-each source, a map returned from an action. Java has
+ * neither syntax, so each is spelled by javaLiteral in place. Brackets stay
+ * untouched where they are a real subscript, and braces only become a map right
+ * after `return` - everywhere else in Java a brace opens a block.
+ */
+/** Baked data as Java: a value tree, walked directly. javaLiteral runs code
+ *  rewrites (member reads become kit calls), which must never touch a string
+ *  that is content - the demo's own prose "dist/prod.mjs" became a call. */
+function javaDataLiteral(v: unknown): string {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.length ? `List.of(${v.map(javaDataLiteral).join(', ')})` : 'List.of()';
+  if (typeof v === 'object') {
+    const entries = Object.entries(v as Record<string, unknown>)
+      .map(([k, val]) => `Map.entry(${JSON.stringify(k)}, ${javaDataLiteral(val)})`);
+    return entries.length ? `RoseTheme.mapOf(${entries.join(', ')})` : 'RoseTheme.mapOf()';
+  }
+  return 'null';
+}
+
+/** This target ships no dictionary: a key renders as itself (loud, greppable). */
+function javaI18n(code: string): string {
+  return code.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
+}
+
+function javaLiteralPass(code: string): string {
+  let out = code;
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i];
+    if (ch === '"' || ch === "'") { i = javaSkipQuote(out, i); continue; }
+    if (ch !== '[' && ch !== '{') continue;
+    const before = out.slice(0, i).trimEnd();
+    const prev = before.slice(-1);
+    if (ch === '{' && !/\breturn$/.test(before)) continue;
+    // A literal only starts where an operand may begin.
+    if (prev && /[A-Za-z0-9_$)\]}."']/.test(prev) && !/\b(?:return|case)$/.test(before)) continue;
+    // An array type in a declaration or a cast is not a literal we own.
+    if (/\bnew\s+[\w.<>]+\s*$/.test(out.slice(Math.max(0, i - 40), i))) continue;
+    const close = matchParen(out, i);
+    if (close < 0) continue;
+    const lit = javaLiteral(out.slice(i, close + 1));
+    out = out.slice(0, i) + lit + out.slice(close + 1);
+    i += lit.length - 1;
+  }
+  // RoseTheme.list takes the ITEMS: a literal that reached it as one argument
+  // would be a list of lists.
+  out = out.replace(/RoseTheme\.list\(List\.of\(([^()]*)\)\)/g, 'RoseTheme.list($1)');
+  out = out.replace(/RoseTheme\.list\(List\.of\(\)\)/g, 'RoseTheme.list()');
+  return out;
+}
+
+/** Java strings are double-quoted: a JS 'posts' is a char literal there, and a
+ *  multi-letter one does not even lex. */
+function javaDoubleQuotes(s: string): string {
+  return s.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
 }
 
 function javaMapLiteral(src: string): string {
@@ -4157,6 +4281,9 @@ function javaRoseify(code: string): string {
     out += ch;
     i++;
   }
+  // A field of a state value ("{post.title}") arrives as app.v("post").title
+  // once the read is spelled, and an Object in Java has no such member.
+  out = out.replace(/app\.v\("([^"]+)"\)\.([A-Za-z_$][\w$]*)/g, (_m, name: string, key: string) => `RoseTheme.get(app.v("${name}"), "${key}")`);
   return out;
 }
 
@@ -4180,7 +4307,70 @@ function javaRenameCalls(code: string, renamed: Map<string, string>): string {
   return out;
 }
 
+/** A field of a state value ("{post.title}") arrives as app.v("post").title
+ *  once the read is spelled, and an Object in Java has no such member. */
+function javaStateFields(out: string): string {
+  let o = out;
+  // A METHOD call on a state read needs the receiver's own type: text methods
+  // read as text, list methods as a list, then the field pattern below never
+  // sees a "(" it would mishandle.
+  o = out.replace(/app\.v\("([^"]+)"\)\.(trim|toUpperCase|toLowerCase|startsWith|endsWith|split|replace|substring|charAt|indexOf)\s*\(/g, (_m, name: string, fn: string) => `RoseTheme.text(app.v("${name}")).${fn}(`);
+  o = out.replace(/app\.v\("([^"]+)"\)\.(size|length|join|includes|slice|at)\s*\(/g, (_m, name: string, fn: string) => `RoseTheme.list(app.v("${name}")).${fn}(`);
+  o = o.replace(/app\.v\("([^"]+)"\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g, (_m, name: string, key: string) => `RoseTheme.get(app.v("${name}"), "${key}")`);
+  // The same field read, already wrapped by the shared text/list spelling: a
+  // member still cannot hang off the wrapper.
+  o = o.replace(/RoseTheme\.(?:text|list)\(app\.v\("([^"]+)"\)\)\.([A-Za-z_$][\w$]*)/g, (_m, name: string, key: string) => `RoseTheme.get(app.v("${name}"), "${key}")`);
+  // A state read is an Object: Java refuses arithmetic, comparison and ! on one
+  // without the conversion the kit already provides for its own value model.
+  o = o.replace(/app\.v\("([^"]+)"\)\s*([-+*/%])\s*(-?\d+(?:\.\d+)?)/g, (_m, n: string, op: string, num: string) => `RoseTheme.number(app.v("${n}")) ${op} ${num}`);
+  o = o.replace(/(-?\d+(?:\.\d+)?)\s*([-+*/%])\s*app\.v\("([^"]+)"\)/g, (_m, num: string, op: string, n: string) => `${num} ${op} RoseTheme.number(app.v("${n}"))`);
+  o = o.replace(/app\.v\("([^"]+)"\)\s*(==|!=)\s*(-?\d+(?:\.\d+)?)/g, (_m, n: string, op: string, num: string) => `RoseTheme.integer(app.v("${n}")) ${op} ${num}`);
+  o = o.replace(/(-?\d+(?:\.\d+)?)\s*(==|!=)\s*app\.v\("([^"]+)"\)/g, (_m, num: string, op: string, n: string) => `${num} ${op} RoseTheme.integer(app.v("${n}"))`);
+  o = o.replace(/app\.v\("([^"]+)"\)\s*(==|!=)\s*("(?:[^"\\]|\\.)*")/g, (_m, n: string, op: string, lit: string) => `RoseTheme.text(app.v("${n}")) ${op} ${lit}`);
+  o = o.replace(/("(?:[^"\\]|\\.)*")\s*(==|!=)\s*app\.v\("([^"]+)"\)/g, (_m, lit: string, op: string, n: string) => `${lit} ${op} RoseTheme.text(app.v("${n}"))`);
+  o = o.replace(/!\s*app\.v\("([^"]+)"\)/g, (_m, n: string) => `!RoseTheme.bool(app.v("${n}"))`);
+  o = o.replace(/\+\s*app\.v\("([^"]+)"\)(?!\s*[.\w(])/g, (_m, n: string) => `+ RoseTheme.text(app.v("${n}"))`);
+  // "name.trim()" can also arrive already spelled as a field read by the
+  // earlier member pass: the call belongs on the typed receiver.
+  o = o.replace(/RoseTheme\.get\(app\.v\("([^"]+)"\), "(trim|toUpperCase|toLowerCase)"\)\(\)/g,
+    (_m, n: string, fn: string) => `RoseTheme.text(app.v("${n}")).${fn}()`);
+  o = o.replace(/(roseContentGet\([^()]*\))\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g, (_m, call: string, key: string) => `RoseTheme.get(${call}, "${key}")`);
+  o = o.replace(/RoseTheme\.get\(app\.v\("([^"]+)"\), "size"\)\(\)/g,
+    (_m, n: string) => `RoseTheme.list(app.v("${n}")).size()`);
+  // A null test is not a boolean test: the ternary pass writes "x != null" and
+  // the bool conversion must not have been applied to the operand first.
+  o = o.replace(/RoseTheme\.bool\((app\.v\("[^"]+"\))\)\s*!=\s*null/g, '$1 != null');
+  o = o.replace(/RoseTheme\.bool\((app\.v\("[^"]+"\))\)\s*==\s*null/g, '$1 == null');
+  // A list read used as a number ("m() + 5") is the number, not the list.
+  o = o.replace(/RoseTheme\.list\((app\.v\("[^"]+"\))\)(\s*[-+*/%]\s*-?\d)/g, 'RoseTheme.number($1)$2');
+  // A size as a condition is "more than nothing", not a boolean.
+  o = o.replace(/([A-Za-z_$][\w$.()\[\]]*\.size\(\))\s*\?/g, '($1 > 0) ?');
+  o = o.replace(/RoseTheme\.get\(app\.v\("([^"]+)"\), "size"\)\(\)/g,
+    (_m, n: string) => `RoseTheme.list(app.v("${n}")).size()`);
+  return o;
+}
+
 function javaExpr(code: string, ctx: JavaCtx): string {
+  let out = javaStateFields(javaExprInner(code, ctx));
+  if (ctx.arrowFns && ctx.arrowFns.size) {
+    for (const [fn, bodyText] of ctx.arrowFns) {
+      out = out.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), () => javaStateFields(javaExprInner(bodyText, ctx)));
+    }
+  }
+  // A page function is emitted as name(RoseApp) - a template calls it bare.
+  if (ctx.fnNames && ctx.fnNames.size) {
+    for (const fn of ctx.fnNames) {
+      out = out.replace(new RegExp(`\\b${fn}\\(\\)`, 'g'), `${fn}(${ctx.app})`);
+    }
+  }
+  return out;
+}
+
+function javaExprInner(code: string, ctx: JavaCtx): string {
+  // i18n: this target ships no dictionary, so a translation renders its key -
+  // the same spelling Android and ArkTS chose. Untranslated, it was a Java
+  // syntax error ($t is not an identifier the kit defines).
+  code = code.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', 'new ArrayList<>()');
@@ -4304,7 +4494,14 @@ function javaBoolTest(cond: string, ctx: JavaCtx): string {
   const expr = javaExpr(cond, ctx);
   const bare = cond.trim();
   if (ctx.stateTypes.get(bare) === 'boolean') return expr;
-  if (/^RoseTheme\.bool\(/.test(expr) || /^!/.test(expr) || /^(?:true|false)$/.test(expr)) return expr;
+  if (/^RoseTheme\.bool\(/.test(expr) || /^(?:true|false)$/.test(expr)) return expr;
+  // "!name" is not a boolean in Java unless the operand is one: the negation
+  // belongs OUTSIDE the conversion, not wrapped with it.
+  if (/^!/.test(expr)) {
+    const rest = expr.replace(/^!\s*/, '');
+    if (/^RoseTheme\.bool\(/.test(rest) || /\.isEmpty\(\)$/.test(rest) || /^(?:true|false)$/.test(rest)) return expr;
+    return `!RoseTheme.bool(${rest})`;
+  }
   return `RoseTheme.bool(${expr})`;
 }
 
@@ -4460,8 +4657,26 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = javaRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed);
-    methods.push(`    private static void ${javaName}(RoseApp app) {\n${body}\n        app.render();\n    }`);
+    // Handler bodies are statements: they never pass through javaExpr, so the
+    // Object-value coercions and the state field reads run here too.
+    let body = javaStateFields(javaLiteralPass(javaRenameCalls(javaI18n(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings)), renamed)));
+    // A JS handler's event parameter ("function noteKey(e)") has no Java
+    // counterpart unless the signature carries it: the body read e.key and the
+    // parameter had been dropped, so the file did not compile at all.
+    const params = m[2].split(',').map((x) => x.trim().split(/[:\s=]/)[0]).filter(Boolean);
+    const liveParams = params.filter((name) => new RegExp('\\b' + name + '\\b').test(body));
+    for (const name of liveParams) {
+      body = body.replace(new RegExp('\\b' + name + '\\.key\\b', 'g'), `RoseTheme.keyOf(${name})`);
+    }
+    const paramDecl = liveParams.map((name) => `, Object ${name}`).join('');
+    // "!name" on a local that holds a text value: Java has no truthiness, so
+    // the emptiness test is the honest spelling of the same question.
+    body = body.replace(/!([A-Za-z_$][\w$]*)(?!\s*[.(])/g, (whole: string, id: string) =>
+      new RegExp('(?:var|String)\\s+' + id + '\\s*=\\s*RoseTheme\\.text').test(body) ? `RoseTheme.text(${id}).isEmpty()` : whole);
+    // A handler that returns a value cannot be a void method: the demo's i18n
+    // helpers return the rendered string the template prints.
+    const returnsValue = /\breturn\s+[^;\s]/.test(body);
+    methods.push(`    private static ${returnsValue ? 'Object' : 'void'} ${javaName}(RoseApp app${paramDecl}) {\n${body}${returnsValue ? '' : '\n        app.render();'}\n    }`);
   }
   return methods.join('\n\n');
 }

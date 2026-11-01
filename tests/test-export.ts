@@ -2496,7 +2496,11 @@ try {
     ] as const) {
       const txt = kitAt(kit).replace(/\\"/g, '"');
       assert(txt.includes(needle), `${name} ships the content bridge in its kit`);
-      assert(txt.includes('"posts"') && txt.includes('"slug":"hello"'), `${name} bakes the real collection data`);
+      // Java bakes the collections as Java data (Map/List literals) instead of a
+      // JSON string it would have to parse: the kit carries no JSON dependency.
+      const baked = (txt.includes('"posts"') && txt.includes('"slug":"hello"'))
+        || (txt.includes('"posts"') && txt.includes('Map.entry("slug", "hello")'));
+      assert(baked, `${name} bakes the real collection data`);
     }
     // R170: the mini program had three separate places a rune could arrive - the
   // script body, an inline handler and a computed expression - and only the first
@@ -5928,7 +5932,7 @@ h2 { font-size: 40px; }
     writeFileSync(join(dproj4, 'src/pages/index.rose'), '<script>\n  function build() { return 1; }\n  function bump() { return build(); }\n</script>\n<div><button on:click={bump}>+</button></div>\n');
     const jv = await exportProject('java', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-java') });
     const jvs = readFileSync(join(jv.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
-    assert(jvs.includes('public static void build(RoseApp app, JPanel parent) {') && jvs.includes('private static void build_(RoseApp app) {'), 'java: the user function is renamed, the entry point is not');
+    assert(jvs.includes('public static void build(RoseApp app, JPanel parent) {') && jvs.includes('private static Object build_(RoseApp app) {'), 'java: the user function is renamed, the entry point is not');
     assert(jvs.includes('return build_();'), 'java: the call site follows the rename');
     const nsv = await exportProject('dotnet', dproj4, { apiBase: 'x', outRoot: join(scratch, 'desk-build-dotnet') });
     const nsvs = readFileSync(join(nsv.outDir, 'Pages', 'IndexPage.cs'), 'utf8');
