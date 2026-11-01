@@ -62,6 +62,7 @@ export async function emitZig(opts: EmitZigOptions): Promise<{ pages: string[]; 
   const files = walkFiles(frontend);
   await fs.promises.writeFile(path.join(out, 'assets.zig'), renderAssets(files), 'utf8');
   await fs.promises.writeFile(path.join(out, 'main.zig'), renderMain(), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'main_io.zig'), renderMainIo(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'build.zig'), renderBuild(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'build.zig.zon'), renderZon(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', files.length, docs, app), 'utf8');
@@ -102,18 +103,19 @@ ${rows}
 }
 
 /**
- * The version boundary, stated where the toolchain reads it: 0.16 replaced
- * std.net with std.Io, so a newer Zig refuses this tree with a sentence instead
+ * The version boundary, stated where the toolchain reads it: 0.15 is where
+ * `addExecutable` takes a module (`root_module`), which is the shape build.zig
+ * is written against - an older Zig refuses this tree with one sentence instead
  * of a hundred type errors.
  */
 function renderZon(app: AppIdentity): string {
   return `.{
     .name = .rosezm_zig,
     .version = "${app.version}",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.0",
     .fingerprint = 0xf47cdab58804df3,
     .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "main.zig", "assets.zig", "frontend", "README.md" },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig", "main_io.zig", "assets.zig", "frontend", "README.md" },
 }
 `;
 }
@@ -128,10 +130,14 @@ function renderBuild(app: AppIdentity): string {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Zig 0.17 removed std.net, so the same server is written twice and the
+    // toolchain picks the file its own std can compile: main.zig speaks
+    // std.net (0.15, 0.16), main_io.zig speaks std.Io (0.17+).
+    const source = if (@hasDecl(std, "net")) "main.zig" else "main_io.zig";
     const exe = b.addExecutable(.{
         .name = "${app.slug}",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("main.zig"),
+            .root_source_file = b.path(source),
             .target = target,
             .optimize = optimize,
         }),
@@ -145,26 +151,7 @@ pub fn build(b: *std.Build) void {
 `;
 }
 
-function renderMain(): string {
-  return `// rosezm - the exported static server.
-//
-// Serves the baked site from memory: every file is embedded at compile time, so
-// there is no working directory to get wrong and no dist/ to forget to copy.
-//
-// Deliberately small, and the omissions are named rather than hidden:
-//   - no gzip/brotli: the Go server precompresses; this one trades bytes for a
-//     single dependency-free file. Put a CDN in front if that matters.
-//   - no reverse proxy: a static server has nothing to proxy to. Export with
-//     --api when the pages need a live backend, and the bridge sends the
-//     dynamic half there.
-//
-// shortcut: written against the Zig 0.14 line (std.net). Zig 0.16 replaced
-// std.net with std.Io, so this file needs porting before 0.16 - build.zig.zon
-// carries the minimum_zig_version that says so.
-const std = @import("std");
-const assets = @import("assets.zig");
-
-const mime_index = [_]struct { ext: []const u8, kind: []const u8 }{
+const ZIG_SHARED = `const mime_index = [_]struct { ext: []const u8, kind: []const u8 }{
     .{ .ext = ".html", .kind = "text/html; charset=utf-8" },
     .{ .ext = ".js", .kind = "text/javascript; charset=utf-8" },
     .{ .ext = ".mjs", .kind = "text/javascript; charset=utf-8" },
@@ -262,6 +249,35 @@ fn resolve(path_buf: []u8, raw: []const u8) []const u8 {
     return "index.html";
 }
 
+/// The two path prefixes that belong to the server, not to the assets.
+fn isDynamicPath(raw: []const u8) bool {
+    var path = raw;
+    if (std.mem.indexOfScalar(u8, path, '?')) |q| path = path[0..q];
+    if (std.mem.eql(u8, path, "/api") or std.mem.startsWith(u8, path, "/api/")) return true;
+    return std.mem.startsWith(u8, path, "/__rosezm");
+}`;
+
+function renderMain(): string {
+  return `// rosezm - the exported static server.
+//
+// Serves the baked site from memory: every file is embedded at compile time, so
+// there is no working directory to get wrong and no dist/ to forget to copy.
+//
+// Deliberately small, and the omissions are named rather than hidden:
+//   - no gzip/brotli: the Go server precompresses; this one trades bytes for a
+//     single dependency-free file. Put a CDN in front if that matters.
+//   - no reverse proxy: a static server has nothing to proxy to. Export with
+//     --api when the pages need a live backend, and the bridge sends the
+//     dynamic half there.
+//
+// This is the std.net half (Zig 0.15, 0.16). Zig 0.17 removed std.net, so the
+// same server is also written against std.Io in main_io.zig and build.zig picks
+// whichever file the installed std can compile - one export, both eras.
+const std = @import("std");
+const assets = @import("assets.zig");
+
+${ZIG_SHARED}
+
 /// Read until the header block is complete, not just until the first read
 /// returns: a request with a long cookie header arrives in more than one packet,
 /// and a truncated header block is a mis-parsed method and path.
@@ -277,14 +293,6 @@ fn readRequest(stream: *std.net.Stream, buf: []u8) ![]u8 {
         if (std.mem.indexOf(u8, buf[0..used], &header_end) != null) break;
     }
     return buf[0..used];
-}
-
-/// The two path prefixes that belong to the server, not to the assets.
-fn isDynamicPath(raw: []const u8) bool {
-    var path = raw;
-    if (std.mem.indexOfScalar(u8, path, '?')) |q| path = path[0..q];
-    if (std.mem.eql(u8, path, "/api") or std.mem.startsWith(u8, path, "/api/")) return true;
-    return std.mem.startsWith(u8, path, "/__rosezm");
 }
 
 fn handle(stream: *std.net.Stream) !void {
@@ -361,9 +369,22 @@ fn reply(stream: *std.net.Stream, status: []const u8, kind: []const u8, body: []
     if (!head_only) try stream.writeAll(body);
 }
 
+/// One env lookup the whole file shares. Zig 0.17 moved the environment into
+/// the std.process.Init value a main receives, so getEnvVarOwned - the call
+/// 0.14 through 0.16 had - is gone. std.c.getenv reads the same table on every
+/// POSIX host and on Windows when libc is linked, which is where this static
+/// server runs; the comptime check keeps the owned-allocation call on a
+/// toolchain that still has it.
+fn envVar(key: []const u8, buf: [:0]const u8) ?[]const u8 {
+    if (comptime @hasDecl(std.process, "getEnvVarOwned")) {
+        return std.process.getEnvVarOwned(std.heap.page_allocator, key) catch null;
+    }
+    const p = std.c.getenv(buf.ptr) orelse return null;
+    return std.mem.span(p);
+}
+
 fn port() u16 {
-    const raw = std.process.getEnvVarOwned(std.heap.page_allocator, "PORT") catch return 8080;
-    defer std.heap.page_allocator.free(raw);
+    const raw = envVar("PORT", "PORT") orelse return 8080;
     return std.fmt.parseInt(u16, std.mem.trim(u8, raw, " \\t"), 10) catch 8080;
 }
 
@@ -371,15 +392,14 @@ pub fn main() !void {
     // The one runtime switch: ROSEZM_API replaces the API base baked into the
     // bridge, so the same binary serves whatever backend it lands in front of.
     // Absent or empty, the baked value stands.
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ROSEZM_API")) |raw| {
-        defer std.heap.page_allocator.free(raw);
+    if (envVar("ROSEZM_API", "ROSEZM_API")) |raw| {
         const api = std.mem.trim(u8, raw, " \\t");
         if (api.len > 0) {
             if (find("rosezm-shell.js")) |bridge| {
                 bridge_override = bridgeWithApi(std.heap.page_allocator, bridge.bytes, api);
             }
         }
-    } else |_| {}
+    }
 
     const address = try std.net.Address.parseIp("0.0.0.0", port());
     var server = try address.listen(.{ .reuse_address = true });
@@ -411,6 +431,175 @@ fn serveConnection(conn: std.net.Server.Connection) void {
     var stream = conn.stream;
     handle(&stream) catch |err| {
         // One broken request is one broken request: log it and keep serving.
+        std.debug.print("rosezm: request failed: {s}\\n", .{@errorName(err)});
+    };
+}
+`;
+}
+
+/**
+ * The same server on Zig 0.17+, where std.net is gone and every socket call
+ * goes through std.Io: the environment arrives on the std.process.Init value a
+ * main receives, a connection is an Io Reader/Writer over the stream, and the
+ * accept loop passes the Io handle to each thread it spawns. build.zig picks
+ * this file when std has no net declaration, so one export builds on both eras
+ * and both answer the same bytes.
+ */
+function renderMainIo(): string {
+  return `// rosezm - the exported static server (Zig 0.17+ / std.Io).
+//
+// Same contract as main.zig: the baked site, served from memory, one file per
+// request, ETag + 304. The difference is the I/O API the toolchain ships.
+const std = @import("std");
+const assets = @import("assets.zig");
+
+${ZIG_SHARED}
+
+/// Zig 0.17 moved the environment onto the Init value: there is no process-wide
+/// getEnvVarOwned any more.
+fn envVar(init: std.process.Init, key: []const u8) ?[]const u8 {
+    return init.environ_map.get(key);
+}
+
+fn port(init: std.process.Init) u16 {
+    const raw = envVar(init, "PORT") orelse return 8080;
+    return std.fmt.parseInt(u16, std.mem.trim(u8, raw, " \\t"), 10) catch 8080;
+}
+
+/// Read the header block one line at a time, until the blank line that ends it.
+/// readSliceShort fills the WHOLE buffer before returning (it blocks waiting for
+/// 8 KiB), so a request would never be answered; a delimiter read returns as
+/// soon as the line lands, which is what a request is.
+fn readRequest(reader: *std.Io.Reader, buf: []u8) ![]u8 {
+    var used: usize = 0;
+    while (used < buf.len) {
+        const line = reader.takeDelimiterInclusive('\\n') catch |err| switch (err) {
+            error.EndOfStream => return buf[0..used],
+            else => return err,
+        };
+        if (line.len > buf.len - used) return buf[0..used];
+        @memcpy(buf[used .. used + line.len], line);
+        used += line.len;
+        if (std.mem.eql(u8, line, "\\r\\n") or std.mem.eql(u8, line, "\\n")) return buf[0..used];
+    }
+    return buf[0..used];
+}
+
+fn reply(writer: *std.Io.Writer, status: []const u8, kind: []const u8, body: []const u8, tag: ?[]const u8, head_only: bool) !void {
+    var head_buf: [512]u8 = undefined;
+    const head = if (tag) |t|
+        try std.fmt.bufPrint(&head_buf,
+            "HTTP/1.1 {s}\\r\\nContent-Type: {s}\\r\\nContent-Length: {d}\\r\\nETag: {s}\\r\\nCache-Control: public, max-age=3600\\r\\nConnection: close\\r\\n\\r\\n",
+            .{ status, kind, body.len, t })
+    else
+        try std.fmt.bufPrint(&head_buf,
+            "HTTP/1.1 {s}\\r\\nContent-Type: {s}\\r\\nContent-Length: {d}\\r\\nConnection: close\\r\\n\\r\\n",
+            .{ status, kind, body.len });
+    try writer.writeAll(head);
+    if (!head_only) try writer.writeAll(body);
+}
+
+fn handle(io: std.Io, stream: std.Io.net.Stream) !void {
+    var read_buf: [8192]u8 = undefined;
+    var write_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var write_state = stream.writer(io, &write_buf);
+    const writer = &write_state.interface;
+
+    var req_buf: [8192]u8 = undefined;
+    const request = try readRequest(&reader.interface, &req_buf);
+    if (request.len == 0) return;
+
+    const line_end = std.mem.indexOf(u8, request, "\\r\\n") orelse request.len;
+    var parts = std.mem.tokenizeScalar(u8, request[0..line_end], ' ');
+    const method = parts.next() orelse "";
+    const raw = parts.next() orelse "/";
+    // A static server answers GET and HEAD. Anything else is the dynamic half.
+    if (!std.mem.eql(u8, method, "GET") and !std.mem.eql(u8, method, "HEAD")) {
+        try reply(writer, "405 Method Not Allowed", "text/plain; charset=utf-8",
+            "rosezm: this is the static half - server actions and /api need a live backend (export with --api, or run the Node or Go server)\\n", null, false);
+        try writer.flush();
+        return;
+    }
+    if (isDynamicPath(raw)) {
+        try reply(writer, "404 Not Found", "text/plain; charset=utf-8",
+            "rosezm: /api and /__rosezm are the dynamic half - this static server cannot answer them\\n", null, false);
+        try writer.flush();
+        return;
+    }
+
+    var path_buf: [2048]u8 = undefined;
+    const name = resolve(&path_buf, raw);
+    const entry = find(name) orelse {
+        try reply(writer, "404 Not Found", "text/plain; charset=utf-8", "not found\\n", null, false);
+        try writer.flush();
+        return;
+    };
+
+    // With ROSEZM_API set the bridge goes out rewritten, so its ETag covers the
+    // bytes actually sent; every other asset stays byte-for-byte baked.
+    const body = if (bridge_override) |b|
+        (if (std.mem.eql(u8, name, "rosezm-shell.js")) b else entry.bytes)
+    else
+        entry.bytes;
+
+    const tag = etagOf(body);
+    var tag_buf: [32]u8 = undefined;
+    const tag_text = try std.fmt.bufPrint(&tag_buf, "\\"{x}\\"", .{tag});
+
+    // If-None-Match: a repeat visit is a bodiless 304.
+    if (std.mem.indexOf(u8, request, "If-None-Match:")) |at| {
+        const rest = request[at + "If-None-Match:".len ..];
+        const end = std.mem.indexOf(u8, rest, "\\r\\n") orelse rest.len;
+        if (std.mem.indexOf(u8, rest[0..end], tag_text) != null) {
+            var head_buf: [256]u8 = undefined;
+            const head = try std.fmt.bufPrint(&head_buf,
+                "HTTP/1.1 304 Not Modified\\r\\nETag: {s}\\r\\nCache-Control: public, max-age=3600\\r\\nConnection: close\\r\\n\\r\\n",
+                .{tag_text});
+            try writer.writeAll(head);
+            try writer.flush();
+            return;
+        }
+    }
+
+    try reply(writer, "200 OK", mimeOf(name), body, tag_text, std.mem.eql(u8, method, "HEAD"));
+    try writer.flush();
+}
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    // The one runtime switch: ROSEZM_API replaces the API base baked into the
+    // bridge. Absent or empty, the baked value stands.
+    if (envVar(init, "ROSEZM_API")) |raw| {
+        const api = std.mem.trim(u8, raw, " \\t");
+        if (api.len > 0) {
+            if (find("rosezm-shell.js")) |bridge| {
+                bridge_override = bridgeWithApi(init.gpa, bridge.bytes, api);
+            }
+        }
+    }
+
+    var address = try std.Io.net.IpAddress.parseIp4("0.0.0.0", port(init));
+    var server = try address.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+
+    std.debug.print("rosezm zig server on http://127.0.0.1:{d} ({d} files embedded)\\n", .{ port(init), assets.all.len });
+
+    // One thread per connection: a browser opens six in parallel, and a single
+    // slow client would otherwise hold every other visitor behind it.
+    while (true) {
+        const stream = server.accept(io) catch continue;
+        const thread = std.Thread.spawn(.{}, serveConnection, .{ io, stream }) catch {
+            serveConnection(io, stream);
+            continue;
+        };
+        thread.detach();
+    }
+}
+
+fn serveConnection(io: std.Io, stream: std.Io.net.Stream) void {
+    defer stream.close(io);
+    handle(io, stream) catch |err| {
         std.debug.print("rosezm: request failed: {s}\\n", .{@errorName(err)});
     };
 }

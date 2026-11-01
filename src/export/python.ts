@@ -2232,23 +2232,38 @@ function pyLabelText(label: string, fallback: string): string {
 }
 
 function textOf(nodes: IrNode[], ctx: PyCtx): string {
-  // One Python f-string for a text run: {value} reads and literal prose merge.
-  const parts: string[] = [];
+  // One Python expression for a text run: {value} reads and literal prose merge.
+  const segs: Array<{ text: string } | { expr: string }> = [];
   for (const node of nodes) {
     if (node.kind === 'text') {
-      parts.push(node.preserve ? node.value : node.value.replace(/\s+/g, ' '));
+      segs.push({ text: (node.preserve ? node.value : node.value.replace(/\s+/g, ' ')).replace(/`/g, "'") });
     } else if (node.kind === 'expr') {
-      parts.push(`{rose_text(lambda: ${pyExpr(node.code, ctx)})}`);
+      segs.push({ expr: `rose_text(lambda: ${pyExpr(node.code, ctx)})` });
     }
   }
-  const joined = parts.join('').replace(/`/g, "'");
-  if (!joined.includes('{')) return JSON.stringify(joined);
-  // A double-quoted f-string: the expressions inside use single quotes.
-  // R274: an interpolation body may ITSELF be an f-string (a template literal
-  // translated to one). Nested same-quote f-strings are a 3.12-only spelling,
-  // so the inner one is quoted with single quotes and the outer run's escapes
-  // do not collide - the lambda body's f-string keeps its own quoting.
-  return 'f' + JSON.stringify(joined).replace(/f\\"/g, "f'").replace(/\\"/g, "'");
+  if (!segs.some((s) => 'expr' in s)) return JSON.stringify(segs.map((s) => ('text' in s ? s.text : '')).join(''));
+  const exprs = segs.flatMap((s) => ('expr' in s ? [s.expr] : []));
+  // Before Python 3.12 an f-string's own quote may not appear anywhere inside
+  // its braces - the scanner does not know about nesting, so the first match
+  // closes the string. Pick the quote no interpolation uses; when they use both
+  // (a template literal inside a nullish default does), concatenate instead.
+  // An exported app must run on whatever Python the user has, and that is still
+  // 3.9-3.11 on most machines.
+  const dq = exprs.some((e) => e.includes('"'));
+  const sq = exprs.some((e) => e.includes("'"));
+  const quote = dq ? (sq ? null : "'") : '"';
+  if (quote === null) {
+    return segs
+      .map((s) => ('text' in s ? JSON.stringify(s.text) : s.expr))
+      .filter((s) => s !== '""')
+      .join(' + ') || "''";
+  }
+  const body = segs
+    .map((s) => ('text' in s
+      ? s.text.replace(/\\/g, '\\\\').replace(quote === '"' ? /"/g : /'/g, `\\${quote}`).replace(/\{/g, '{{').replace(/\}/g, '}}')
+      : `{${s.expr}}`))
+    .join('');
+  return `f${quote}${body}${quote}`;
 }
 
 /** Inline formatting tags that may flow inside a text tag. */

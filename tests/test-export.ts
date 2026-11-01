@@ -34,6 +34,11 @@ import { icnsFromPng } from '../src/export/app-icon.js';
 import { translateExpr, type ExprDialect } from '../src/export/expr-ir.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// A machine has `python3` (macOS, most Linux) or `python` (Windows, some Linux):
+// the suite compiles the generated Python with whichever exists, so a green run
+// means the same thing on every device.
+const PY = spawnSync('python3', ['-c', 'pass'], { stdio: 'ignore' }).status === 0 ? 'python3' : 'python';
+
 /** Every file under a directory, recursively. */
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -1107,7 +1112,7 @@ try {
   // whatever the user has.
   assert(!/(^|[^A-Za-z0-9_])f'[^'\n]*\{[^{}]*'[^{}]*\}/.test(walk(pdir).map((f) => readFileSync(f, 'utf8')).join('\n')), 'no label f-string nests the same quote (Python < 3.12 compatible)');
   assert(pyAboutRow.includes('rose_link(') && pyAboutRow.includes("f\"{rose_text(lambda: link.get('label'))}\""), 'a link label with an interpolation is a double-quoted f-string, evaluated through the safe-text helper');
-  const compile = spawnSync('python', ['-m', 'py_compile', ...pyFiles], { encoding: 'utf8' });
+  const compile = spawnSync(PY, ['-m', 'py_compile', ...pyFiles], { encoding: 'utf8' });
   const hasPython = !compile.error;
   if (hasPython) {
     assert(compile.status === 0 && pyFiles.length >= 30, `every emitted .py file byte-compiles (${pyFiles.length} files)`);
@@ -1118,7 +1123,7 @@ try {
   // Execute the app against a stubbed Tkinter and drive a real handler.
   if (hasPython) {
     const smoke = join(process.cwd(), 'tests', 'fixtures', 'python-smoke.py');
-    const run = spawnSync('python', [smoke, pdir], { encoding: 'utf8', timeout: 60_000 });
+    const run = spawnSync(PY, [smoke, pdir], { encoding: 'utf8', timeout: 60_000 });
     let smokeResult: any = null;
     try { smokeResult = JSON.parse((run.stdout || '').trim().split('\n').pop() || 'null'); } catch { smokeResult = null; }
     assert(!!smokeResult && smokeResult.ok === true, `the exported Python app runs (${smokeResult?.error ?? run.stderr?.slice(-200) ?? 'no output'})`);
@@ -1833,7 +1838,7 @@ try {
     assert(dppSrc.includes("rose_date(__f1_0, 'day', st, app.render, '2020-01-01', '2030-12-31')"), 'python: a date input is the day spinner');
     const dppKit = readFileSync(join(dpp.outDir, 'rosezm.py'), 'utf8');
     assert(dppKit.includes('def rose_date(') && dppKit.includes('tk.Spinbox'), 'python: the kit builds the spin boxes');
-    const dppc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'date-python')], { encoding: 'utf8' });
+    const dppc = spawnSync(PY, ['-m', 'compileall', '-q', join(scratch, 'date-python')], { encoding: 'utf8' });
     assert(dppc.status === 0, `python: the date page compiles (${(dppc.stderr ?? '').slice(0, 120)})`);
   }
 
@@ -1877,7 +1882,7 @@ try {
     const detPSrc = readFileSync(join(detP.outDir, 'pages', 'index.py'), 'utf8');
     assert(detPSrc.includes('__OPENED = {}') && /rose_button\(__det\d+, "More", __toggle_det\d+\)/.test(detPSrc), 'python: the fold header toggles a body frame');
     assert(/if __OPENED\.get\('det\d+', True\):/.test(detPSrc), 'python: the open attribute starts the body packed');
-    const detPc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'details-python')], { encoding: 'utf8' });
+    const detPc = spawnSync(PY, ['-m', 'compileall', '-q', join(scratch, 'details-python')], { encoding: 'utf8' });
     assert(detPc.status === 0, `python: the details page compiles (${(detPc.stderr ?? '').slice(0, 120)})`);
   }
 
@@ -2045,7 +2050,7 @@ try {
   const dotnet = await exportProject('dotnet', example, { apiBase: 'https://api.example.com', outRoot: scratch });
   const ndir = dotnet.outDir;
   const nread = (rel: string) => readFileSync(join(ndir, rel), 'utf8');
-  const xmlOk = (rel: string) => spawnSync('python', ['-c', 'import xml.etree.ElementTree as ET,sys; ET.parse(sys.argv[1])', join(ndir, rel)], { encoding: 'utf8' }).status === 0;
+  const xmlOk = (rel: string) => spawnSync(PY, ['-c', 'import xml.etree.ElementTree as ET,sys; ET.parse(sys.argv[1])', join(ndir, rel)], { encoding: 'utf8' }).status === 0;
   assert(nread('rosezmApp.csproj').includes('net8.0-windows') && nread('rosezmApp.csproj').includes('<UseWPF>true</UseWPF>'), 'a WPF project targeting net8.0-windows');
   assert(xmlOk('rosezmApp.csproj') && xmlOk('App.xaml') && xmlOk('MainWindow.xaml'), 'the project and both XAML files are well-formed XML');
   assert(nread('App.xaml').includes('x:Class="rosezmApp.App"') && nread('MainWindow.xaml').includes('x:Class="rosezmApp.MainWindow"'), 'the XAML classes match their code-behind files');
@@ -2162,7 +2167,7 @@ try {
     assert(flDef.includes("roseText('${mirror}'") && swDef.includes('Text("\\(mirror)")'), 'flutter and swiftui read their own declared field');
     // JS `list.join(sep)` - only Dart and ArkTS have that method. Every other
     // target either had no join at all or puts the separator first.
-    assert(pyDef.includes(`'|'.join(st.get('selm'))`), 'python: a list join is the separator-first Python idiom, not a method on a list');
+    assert(pyDef.includes(`"|".join(st.get('selm'))`), 'python: a list join is the separator-first Python idiom, not a method on a list');
     assert(flDef.includes("${selm.join('|')}") && akDef.includes("this.selm.join('|')"), 'dart and ArkTS keep their native join');
     assert(jvDef.includes('RoseTheme.join(app.v("selm"), "|")') && ntDef.includes('RoseTheme.Join(app.V("selm"), "|")'), 'swing and WPF join through the theme helper (their state is untyped)');
     assert(cpDef.includes('rose_join(app.v("selm"), "|")') && andDef.includes('roseJoin(selm, "|")') && swDef.includes('roseJoin(selm, "|")'), 'qt, compose and swiftui get a kit join for a dynamically typed list');
@@ -3912,7 +3917,7 @@ try {
   assert(!spWarns.some((w) => /no runtime style resolution|has no native translation|is not a single class/.test(w)), 'nothing the shared engine carries is reported as dropped');
   {
     const pyFiles = walk(styleP.outDir).filter((f) => f.endsWith('.py'));
-    const compile = spawnSync('python', ['-m', 'py_compile', ...pyFiles], { encoding: 'utf8' });
+    const compile = spawnSync(PY, ['-m', 'py_compile', ...pyFiles], { encoding: 'utf8' });
     if (!compile.error) assert(compile.status === 0, `the styled Python export byte-compiles (${(compile.stderr ?? '').slice(0, 200)})`);
   }
 
@@ -4829,7 +4834,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(/__b\d+\.bind\('<Leave>', lambda e: rose_apply\(__b\d+, STYLES\['btn__h'\]\)\)/.test(page), 'the element binds <Leave> back to the base model');
     // The generated page must parse: a binding referencing an unknown import or
     // an unparsable lambda would fail the whole app at launch.
-    const py = spawnSync('python', ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
+    const py = spawnSync(PY, ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
     assert(py.status === 0, `the generated Tk page parses (${py.stderr.trim().slice(0, 80)})`);
   }
 
@@ -4888,7 +4893,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(page.includes(`"highlightcolor": '#e91e63'`), 'the focus border rides highlightcolor');
     assert(page.includes(`"highlightthickness": 1`), 'the base border width is adopted for the focused border');
     assert(page.includes(`rose_apply`), 'the page imports rose_apply for the focus apply');
-    const py = spawnSync('python', ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
+    const py = spawnSync(PY, ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
     assert(py.status === 0, `the generated Tk focus page parses (${py.stderr.trim().slice(0, 80)})`);
   }
 
@@ -5097,7 +5102,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(/__b\d+\.bind\('<ButtonPress-1>', lambda e: rose_apply\(__b\d+, \{"bg": '#e91e63', "fg": '#ffffff'\}\)\)/.test(page), 'the button binds <ButtonPress-1> to the active model');
     assert(/__b\d+\.bind\('<ButtonRelease-1>', lambda e: rose_apply\(__b\d+, \{"bg": '#eeeeee'/.test(page), 'the button binds <ButtonRelease-1> back to the base model');
     assert(page.includes('rose_apply'), 'the page imports rose_apply for the active apply');
-    const py = spawnSync('python', ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
+    const py = spawnSync(PY, ['-c', `import ast; ast.parse(open(${JSON.stringify(join(dir, 'python', 'pages/h.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
     assert(py.status === 0, `the generated Tk active page parses (${py.stderr.trim().slice(0, 80)})`);
   }
 
@@ -5611,6 +5616,29 @@ h2 { font-size: 40px; }
     assert(/:first-child|:nth-child/.test(p.warnings.join('\n')) && !/\.item:first-child.*bold/.test(p.warnings.join('\n')), 'the warning explains it would otherwise style every match');
     assert(parseStylesheet('.memo { color: red }') === parseStylesheet('.memo { color: red }'), 'a stylesheet is parsed once per exact text (export all reuses it)');
   }
+  // R-AF: the modern shorthands real stylesheets write. The engine had the
+  // longhands only, so `inset: 0` positioned nothing and said nothing.
+  {
+    const sheet = parseStylesheet([
+      '.sheet { position: absolute; inset: 10px 20px 30px 40px; }',
+      '.row { display: flex; flex-flow: row wrap; place-items: center; place-content: center space-between; }',
+      '.clamp { line-clamp: 1; }',
+      '.box { box-sizing: border-box; }',
+    ].join('\n'));
+    const pick = (classes: string[]) => cascadeFor(sheet, { tag: 'div', classes }, [], { viewport: 390 }).model;
+    const sheetModel = pick(['sheet']);
+    assert(sheetModel.insetTop === 10 && sheetModel.insetRight === 20 && sheetModel.insetBottom === 30 && sheetModel.insetLeft === 40, 'inset: the 1-4 value box shorthand fills all four offsets');
+    const rowModel = pick(['row']);
+    assert(rowModel.direction === 'row' && rowModel.wrap === true, 'flex-flow: direction and wrap arrive in one declaration');
+    assert(rowModel.align === 'center' && rowModel.justify === 'between', 'place-items / place-content land on align and justify');
+    const clampModel = pick(['clamp']);
+    assert(clampModel.nowrap === true && clampModel.ellipsis === true, 'line-clamp: 1 is nowrap plus ellipsis, which every target can draw');
+    assert(pick(['box']).width === undefined && !/box-sizing/.test(sheet.warnings.join('\n')), 'box-sizing: border-box is honoured by saying nothing - native layout already sizes the border box');
+    // The contract: a declaration the engine cannot hold is NAMED, never silent.
+    const foreign = parseStylesheet('.x { filter: blur(2px); outline: 1px solid red; inset: 0; }');
+    const named = foreign.warnings.find((w) => w.startsWith('these declarations have no native answer'));
+    assert(named !== undefined && /filter/.test(named) && /outline/.test(named) && !/inset/.test(named), 'unsupported declarations are named once per sheet, and a supported shorthand is not blamed');
+  }
   // R467: the dark half is kept and marked, so a target that follows the system
   // appearance can apply it while the light resolve never sees it.
   {
@@ -5867,7 +5895,7 @@ h2 { font-size: 40px; }
     assert(pypSrc.includes('def build(app, st, parent):'), 'python: the page entry point keeps its name');
     assert(pypSrc.includes('def build_():'), 'python: the user function is renamed');
     assert(pypSrc.includes('return build_()'), 'python: the call site follows the rename');
-    const pypc = spawnSync('python', ['-m', 'compileall', '-q', join(scratch, 'py-build-out')], { encoding: 'utf8' });
+    const pypc = spawnSync(PY, ['-m', 'compileall', '-q', join(scratch, 'py-build-out')], { encoding: 'utf8' });
     assert(pypc.status === 0, `python: the renamed page compiles (${(pypc.stderr ?? '').slice(0, 120)})`);
     assert((pyp.warnings ?? []).some((w: string) => /renamed to "build_"/.test(w)), 'python: the rename is named');
   }
@@ -6105,7 +6133,7 @@ h2 { font-size: 40px; }
     const { execFileSync } = await import('node:child_process');
     let parsed = true;
     try {
-      execFileSync('python', ['-c', `import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())`, join(pyDir, 'pages', 'h.py')], { stdio: 'pipe' });
+      execFileSync(PY, ['-c', `import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read())`, join(pyDir, 'pages', 'h.py')], { stdio: 'pipe' });
     } catch { parsed = false; }
     assert(parsed, 'python: the emitted page parses (no comprehension/no-clause damage)');
   }
@@ -6570,10 +6598,10 @@ h2 { font-size: 40px; }
       const cDir = join(scratch, 'pydialect-out');
       const r = await exportProject('python', cRoot, { apiBase: 'http://x', outRoot: cDir }) as { outDir: string };
       const pyPage = readFileSync(join(r.outDir, 'pages', 'h.py'), 'utf8');
-      assert(/f'Hi \{st\.get\('name'\)\}, you have \{st\.get\('n'\)\} items'/.test(pyPage), 'the Python page spells the template literal as a nested f-string');
-      assert(/\(st\.get\('user'\)\.get\('name'\)\) or \('guest'\)/.test(pyPage), 'the optional chain becomes .get() and the nullish default becomes or');
+      assert(/f"Hi \{st\.get\('name'\)\}, you have \{st\.get\('n'\)\} items"/.test(pyPage), 'the Python page spells the template literal as an f-string whose quote the keys never collide with');
+      assert(/\(st\.get\('user'\)\.get\('name'\)\) or \("guest"\)/.test(pyPage), 'the optional chain becomes .get() and the nullish default becomes or');
       assert(!/\$\{|\?\./.test(pyPage), 'no raw JS template or optional-chain syntax reaches the Python file');
-      const parsed = spawnSync('python', ['-c', `import ast; ast.parse(open(r'${join(r.outDir, 'pages', 'h.py')}', encoding='utf-8').read()); print('ok')`]);
+      const parsed = spawnSync(PY, ['-c', `import ast; ast.parse(open(r'${join(r.outDir, 'pages', 'h.py')}', encoding='utf-8').read()); print('ok')`]);
       assert(parsed.status === 0, 'the generated Python file parses (nested f-string quoting is valid)');
     }
     // R275: Kotlin and Swift consume the same four constructs with their own
@@ -7071,15 +7099,23 @@ h2 { font-size: 40px; }
   // rather than pretended.
   {
     const r = await exportProject('zig', example, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'zig') });
-    for (const f of ['build.zig', 'build.zig.zon', 'main.zig', 'assets.zig', 'README.md']) {
+    for (const f of ['build.zig', 'build.zig.zon', 'main.zig', 'main_io.zig', 'assets.zig', 'README.md']) {
       assert(existsSync(join(r.outDir, f)), `zig: ${f} is generated`);
     }
     const frontendFiles = walk(join(r.outDir, 'frontend')).length;
     const embedded = (readFileSync(join(r.outDir, 'assets.zig'), 'utf8').match(/@embedFile\(/g) ?? []).length;
     assert(embedded === frontendFiles, `zig: every frontend file is embedded exactly once (${embedded} entries, ${frontendFiles} files)`);
     assert(!readFileSync(join(r.outDir, 'assets.zig'), 'utf8').includes('server.js'), 'zig: the SSR bundle is not embedded - a static binary cannot run it, and it carries every API route');
-    assert(/\.minimum_zig_version = "0\.14\.0"/.test(readFileSync(join(r.outDir, 'build.zig.zon'), 'utf8')), 'zig: the version boundary is stated where the toolchain reads it (0.16 replaced std.net)');
-    assert(/std\.net\.Address\.parseIp/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the server listens through std.net, the 0.14 API the tree pins');
+    assert(/\.minimum_zig_version = "0\.15\.0"/.test(readFileSync(join(r.outDir, 'build.zig.zon'), 'utf8')), 'zig: the version floor is what the build.zig module API needs');
+    assert(/std\.net\.Address\.parseIp/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the std.net half listens through the API 0.15 and 0.16 still have');
+    // Zig 0.17 removed std.net. One export, two files, and the toolchain picks:
+    // the alternative was an exported server that no current Zig can build.
+    const buildZig = readFileSync(join(r.outDir, 'build.zig'), 'utf8');
+    assert(/@hasDecl\(std, "net"\)/.test(buildZig) && /main_io\.zig/.test(buildZig), 'zig: build.zig picks the server file by what the toolchain has, not by an edit the user must make');
+    const mainIo = readFileSync(join(r.outDir, 'main_io.zig'), 'utf8');
+    assert(/std\.Io\.net\.IpAddress\.parseIp4/.test(mainIo) && /init\.environ_map\.get/.test(mainIo), 'zig: the std.Io half listens and reads the environment the 0.17 way');
+    assert(/pub fn main\(init: std\.process\.Init\)/.test(mainIo), 'zig: the std.Io half receives the process Init the 0.17 start code passes');
+    assert(!/std\.net\./.test(mainIo), 'zig: the std.Io half carries no std.net call - it would not compile on 0.17');
     assert(existsSync(join(r.outDir, 'frontend', 'index.html')), 'zig: the landing route is baked - the binary serves documents, not a bundle');
     // A CI scaffold turns "an exported project opened in an IDE and stopped
     // there" into "push and it builds for every platform" - the same wiring the
@@ -7087,7 +7123,7 @@ h2 { font-size: 40px; }
     for (const f of [join('.github', 'workflows', 'zig.yml'), 'DEPLOY.md']) {
       assert(existsSync(join(r.outDir, f)), `zig: ${f} ships with the export`);
     }
-    assert(readFileSync(join(r.outDir, '.github/workflows/zig.yml'), 'utf8').includes('version: 0.14.1'), 'zig: the CI pins the version the tree was written against');
+    assert(readFileSync(join(r.outDir, '.github/workflows/zig.yml'), 'utf8').includes('version: 0.17.0'), 'zig: the CI pins the version the tree was written against');
     assert(/std\.Thread\.spawn\(\.\{\}, serveConnection/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: every connection gets its own thread - a single stalled client must not hold the server');
     assert(/fn readRequest\(/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the request is read until the header block is complete, not until the first packet returns');
     const main = readFileSync(join(r.outDir, 'main.zig'), 'utf8');
@@ -7128,7 +7164,7 @@ h2 { font-size: 40px; }
   // target for real. A syntax error in a generated page is a crash on the
   // user's machine, and the brace counter further down cannot see it.
   {
-    const cpython = spawnSync('python', ['-m', 'compileall', '-q', python.outDir], { encoding: 'utf8' });
+    const cpython = spawnSync(PY, ['-m', 'compileall', '-q', python.outDir], { encoding: 'utf8' });
     if (cpython.error) {
       console.log('ok - python: no CPython on PATH, so the emitted pages are not syntax-checked here');
     } else {

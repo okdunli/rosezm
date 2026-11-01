@@ -873,12 +873,8 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       model.wrap = /wrap/i.test(v);
       return true;
     case 'justify-content': {
-      if (/flex-start|^start$|^left$/i.test(v)) model.justify = 'start';
-      else if (/center/i.test(v)) model.justify = 'center';
-      else if (/flex-end|^end$|^right$/i.test(v)) model.justify = 'end';
-      else if (/space-between/i.test(v)) model.justify = 'between';
-      else if (/space-around/i.test(v)) model.justify = 'around';
-      else if (/space-evenly/i.test(v)) model.justify = 'evenly';
+      const j = justifyOf(v);
+      if (j) model.justify = j;
       return true;
     }
     case 'align-items':
@@ -925,6 +921,54 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
     case 'right': { const l = insetPx(v); if (l !== null) model.insetRight = l; return true; }
     case 'bottom': { const l = insetPx(v); if (l !== null) model.insetBottom = l; return true; }
     case 'left': { const l = insetPx(v); if (l !== null) model.insetLeft = l; return true; }
+    // R-AF: the modern shorthand real stylesheets write. CSS expands 1-4
+    // values to top/right/bottom/left; the engine already had the four
+    // longhands, so a stylesheet using `inset` silently positioned nothing.
+    case 'inset': {
+      const e = boxOf(v);
+      if (!e) return false;
+      [model.insetTop, model.insetRight, model.insetBottom, model.insetLeft] = e;
+      return true;
+    }
+    // Same story for flex-flow: direction + wrap in one declaration.
+    case 'flex-flow': {
+      const parts = splitValues(v);
+      for (const p of parts) {
+        if (/^row/i.test(p)) model.direction = 'row';
+        else if (/^column/i.test(p)) model.direction = 'column';
+        else if (/^wrap/i.test(p)) model.wrap = true;
+        else if (/^nowrap$/i.test(p)) model.wrap = false;
+      }
+      return true;
+    }
+    // place-* put align/justify in one declaration (place-content: align + justify).
+    case 'place-items': {
+      const a = alignOf(splitValues(v)[0] ?? '');
+      if (a) model.align = a;
+      return true;
+    }
+    case 'place-content': {
+      const parts = splitValues(v);
+      const j = justifyOf(parts.length > 1 ? parts[1] : parts[0] ?? '');
+      if (j) model.justify = j;
+      return true;
+    }
+    // `line-clamp: 1` is exactly nowrap + ellipsis, which every target can do.
+    // More than one line needs a maxLines field no emitter reads yet - named by
+    // the caller instead of half-applied.
+    case 'line-clamp':
+    case '-webkit-line-clamp': {
+      if (Number(v) === 1) {
+        model.nowrap = true;
+        model.ellipsis = true;
+        return true;
+      }
+      return false;
+    }
+    // Native layout sizes the border box already: honouring it is a no-op, and
+    // warning about it would train people to ignore warnings.
+    case 'box-sizing':
+      return /^border-box$/i.test(v);
     case 'z-index': { const n = Number(v); if (Number.isFinite(n)) model.zIndex = n; return true; }
     case 'cursor': model.cursor = v; return true;
     case 'visibility': return true;
@@ -966,6 +1010,24 @@ function alignOf(v: string): Align | undefined {
   if (/flex-end|^end$|^self-end$/i.test(v)) return 'end';
   if (/stretch/i.test(v)) return 'stretch';
   return undefined;
+}
+
+function justifyOf(v: string): Justify | undefined {
+  if (/flex-start|^start$|^left$/i.test(v)) return 'start';
+  if (/center/i.test(v)) return 'center';
+  if (/flex-end|^end$|^right$/i.test(v)) return 'end';
+  if (/space-between/i.test(v)) return 'between';
+  if (/space-around/i.test(v)) return 'around';
+  if (/space-evenly/i.test(v)) return 'evenly';
+  return undefined;
+}
+
+/** CSS's 1-4 value box shorthand -> top, right, bottom, left (px). */
+function boxOf(v: string): [number, number, number, number] | null {
+  const parts = splitValues(v).map(insetPx);
+  if (!parts.length || parts.some((p) => p === null)) return null;
+  const [a, b = a, c = a, d = b] = parts as number[];
+  return [a!, b!, c!, d!];
 }
 
 function parseGradient(value: string): Gradient | null {
@@ -1115,10 +1177,10 @@ function specificityOf(parts: Compound[]): number {
  * `rule.active`, which a pointer- or focus- or press-capable target can honour
  * and the rest report.
  */
-function modelOf(body: string, selectorHover = false, selectorFocus = false, selectorActive = false): { model: StyleModel; hover?: StyleModel; focus?: StyleModel; active?: StyleModel } {
-  if (selectorHover) return { model: {}, hover: parseDeclarations(body) };
-  if (selectorFocus) return { model: {}, focus: parseDeclarations(body) };
-  if (selectorActive) return { model: {}, active: parseDeclarations(body) };
+function modelOf(body: string, selectorHover = false, selectorFocus = false, selectorActive = false, unknown?: Set<string>): { model: StyleModel; hover?: StyleModel; focus?: StyleModel; active?: StyleModel } {
+  if (selectorHover) return { model: {}, hover: parseDeclarations(body, unknown) };
+  if (selectorFocus) return { model: {}, focus: parseDeclarations(body, unknown) };
+  if (selectorActive) return { model: {}, active: parseDeclarations(body, unknown) };
   const model: StyleModel = {};
   let hover: StyleModel | undefined;
   let focus: StyleModel | undefined;
@@ -1129,14 +1191,14 @@ function modelOf(body: string, selectorHover = false, selectorFocus = false, sel
     const isActive = /^:active\b/.test(d.prop);
     const prop = isHover ? d.prop.replace(/^:hover\s*/, '') : isFocus ? d.prop.replace(/^:focus\s*/, '') : isActive ? d.prop.replace(/^:active\s*/, '') : d.prop;
     const target = isHover ? (hover ??= {}) : isFocus ? (focus ??= {}) : isActive ? (active ??= {}) : model;
-    applyDeclaration(target, prop, d.value);
+    if (!applyDeclaration(target, prop, d.value)) unknown?.add(prop);
   }
   return { model, hover, focus, active };
 }
 
-function parseDeclarations(body: string): StyleModel {
+function parseDeclarations(body: string, unknown?: Set<string>): StyleModel {
   const model: StyleModel = {};
-  for (const d of declarationsOf(body)) applyDeclaration(model, d.prop, d.value);
+  for (const d of declarationsOf(body)) if (!applyDeclaration(model, d.prop, d.value)) unknown?.add(d.prop);
   return model;
 }
 
@@ -1166,6 +1228,10 @@ export function parseStylesheet(css: string): StyleSheet {
 
 function parseStylesheetUncached(css: string): StyleSheet {
   const warnings: string[] = [];
+  // Declarations the engine has no field for. Reported once per sheet, as one
+  // line: the contract is "nothing is dropped in silence", and a stylesheet
+  // that names twenty foreign properties must not push twenty lines.
+  const unknown = new Set<string>();
   const rules: StyleRule[] = [];
   // A page's own `<style>` carries its theme tokens too (`:root { --brand }`
   // then `var(--brand)`); a native emitter reads literals only, so the tokens
@@ -1206,7 +1272,7 @@ function parseStylesheetUncached(css: string): StyleSheet {
         warnings.push(`selector "${trimmed}" uses ${[...new Set(structural)].join(', ')} - a native tree cannot test it, so the rule is skipped (it would otherwise style every match)`);
         continue;
       }
-      const { model, hover, focus, active } = modelOf(body, last.unsupported.includes(':hover'), last.unsupported.includes(':focus'), last.unsupported.includes(':active'));
+      const { model, hover, focus, active } = modelOf(body, last.unsupported.includes(':hover'), last.unsupported.includes(':focus'), last.unsupported.includes(':active'), unknown);
       rules.push({
         selector: trimmed,
         parts: parsedSel.parts,
@@ -1284,6 +1350,9 @@ function parseStylesheetUncached(css: string): StyleSheet {
   if (cur.trim() && stack.length && !stack[stack.length - 1].sel.startsWith('@')) {
     // The selector is what is left; there is no body to apply.
     warnings.push(`selector "${cur.trim()}" has no block - the rule is skipped`);
+  }
+  if (unknown.size) {
+    warnings.push(`these declarations have no native answer - dropped: ${[...unknown].sort().join(', ')}`);
   }
   return { rules, warnings };
 }
