@@ -1474,6 +1474,35 @@ export function rewriteStoreGets(script: string): string {
   return out;
 }
 
+/** Byte budget for one emitted string literal. Every target has a ceiling - the
+ *  JVM's constant pool is 65,535 bytes, MSVC's single literal is 16,380 - and a
+ *  real app's baked state grows past both. ROSEZM_LITERAL_CHUNK overrides it so
+ *  a test can force the split on a small fixture. */
+export function literalChunkSize(): number {
+  const raw = Number(process.env.ROSEZM_LITERAL_CHUNK);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 8000;
+}
+
+/** Split a string for emission as several literals. A split never lands between
+ *  a backslash and its escapee, so each piece is independently valid. */
+export function chunkLiteral(text: string, size = literalChunkSize()): string[] {
+  if (text.length <= size) return [text];
+  const out: string[] = [];
+  let from = 0;
+  while (from < text.length) {
+    let to = Math.min(from + size, text.length);
+    while (to > from + 1 && to < text.length) {
+      let backslashes = 0;
+      for (let i = to - 1; i >= 0 && text[i] === '\\'; i--) backslashes++;
+      if (backslashes % 2 === 0) break;
+      to--;
+    }
+    out.push(text.slice(from, to));
+    from = to;
+  }
+  return out;
+}
+
 /** The per-route state the web build baked next to each prerendered page,
  *  keyed by route. Absent (or unreadable) dist means no bake - the app then
  *  starts from each page's declared defaults, exactly as before. */

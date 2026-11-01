@@ -28,7 +28,7 @@ import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlo
 import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, parseColor, parseLen, declarationsOf, splitValues, type ElementStyleBinding, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, type SvgOp, type SvgShape } from './svg-path.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
+import { bakeRouteStates, chunkLiteral, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, rewriteStringMethods } from './state-ops.js';
 import { translateExpr, rewriteToFixedCalls, matchArrow, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
@@ -2607,6 +2607,14 @@ ${branches}            default:
 }`;
 }
 
+/** One string as a Java literal: a single literal while it fits in the constant
+ *  pool (65,535 bytes), String.join over chunks past it. */
+function javaStringLiteral(text: string): string {
+  const parts = chunkLiteral(text);
+  if (parts.length === 1) return JSON.stringify(parts[0]);
+  return `String.join("", ${parts.map((part) => JSON.stringify(part)).join(', ')})`;
+}
+
 function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
   const contentBlock = content ? `
 
@@ -2658,7 +2666,7 @@ public final class RoseKit {
     /** The backend URL: ROSEZM_API overrides the value baked at export time, so dev/staging/prod switch without a re-export. */
     public static final String API_BASE = System.getenv("ROSEZM_API") != null ? System.getenv("ROSEZM_API") : ${JSON.stringify(apiBase)};
     /** The state each route rendered with at build time, as JSON. */
-    private static final String BAKED_JSON = ${JSON.stringify(JSON.stringify(baked))};
+    private static final String BAKED_JSON = ${javaStringLiteral(JSON.stringify(baked))};
 
     /** The session cookie the server last set: the raw Set-Cookie header value
      *  of the most recent response, relayed verbatim as the Cookie header on the

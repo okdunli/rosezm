@@ -1521,6 +1521,23 @@ try {
       ['arkts', 'entry/src/main/ets/kit/RoseKit.ets', 'ROSE_BAKED'],
       ['cpp', 'src/rose.h', 'ROSE_BAKED'],
     ];
+    // A real app's state outgrows one literal (JVM pool 65,535 B, MSVC 16,380 B),
+    // so the emitters split and rejoin. Forced small here so the split actually
+    // happens on this fixture.
+    const priorChunk = process.env.ROSEZM_LITERAL_CHUNK;
+    process.env.ROSEZM_LITERAL_CHUNK = '40';
+    try {
+      const chunkKt = readFileSync(join((await exportProject('android', bakeRoot, { apiBase: '', outRoot: join(scratch, 'chunk-kt') })).outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
+      assert(/ROSE_BAKED_JSON: String = listOf\(/.test(chunkKt) && chunkKt.includes('joinToString("")'), 'Kotlin splits a baked literal that outgrows the constant pool');
+      const chunkJava = readFileSync(join((await exportProject('java', bakeRoot, { apiBase: '', outRoot: join(scratch, 'chunk-java') })).outDir, 'src/main/java/dev/rosezm/app/RoseKit.java'), 'utf8');
+      assert(chunkJava.includes('BAKED_JSON = String.join("", "'), 'Java splits a baked literal that outgrows the constant pool');
+      const chunkCpp = readFileSync(join((await exportProject('cpp', bakeRoot, { apiBase: '', outRoot: join(scratch, 'chunk-cpp') })).outDir, 'src/rose.h'), 'utf8');
+      assert(/fromRaw\("[^;]*\n\s+"/.test(chunkCpp), 'C++ splits a baked literal into adjacent literals');
+    } finally {
+      if (priorChunk === undefined) delete process.env.ROSEZM_LITERAL_CHUNK;
+      else process.env.ROSEZM_LITERAL_CHUNK = priorChunk;
+    }
+
     for (const [target, rel, needle] of bakeTargets) {
       const r = await exportProject(target as 'flutter', bakeRoot, { apiBase: '', outRoot: join(scratch, 'bake-' + target) });
       const txt = readFileSync(join(r.outDir, rel), 'utf8');

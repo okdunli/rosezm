@@ -27,7 +27,7 @@ import { elementStyleBinding, warnLegacyDrops, parseStylesheet, cascadeFor, merg
 import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, qtFill, type SvgOp, type SvgShape } from './svg-path.js';
 import { literalOptions, nativeUsage, rewriteNativeCalls, type NativeCapability } from './native-api.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads } from './state-ops.js';
+import { bakeRouteStates, chunkLiteral, literalChunkSize, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteLength, rewriteJoinCalls, coerceStringConcat, rewriteOrFallback, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, callifyBareReads } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { rewriteMapperSets, rewriteDirectSetValue } from './state-ops.js';
 
@@ -519,12 +519,20 @@ function textCarry(m: StyleModel): StyleModel | null {
   return isEmptyModel(out) ? null : out;
 }
 
+/** One string as C++ literals: adjacent literals concatenate at compile time,
+ *  so a chunked form stays one value while each piece fits MSVC's 16,380-byte
+ *  single-literal ceiling. */
+function cppStringLiteral(text: string): string {
+  // 8000 keeps every piece well under MSVC's 16,380-byte single-literal limit.
+  return chunkLiteral(text, Math.min(literalChunkSize(), 8000)).map((part) => JSON.stringify(part)).join('\n    ');
+}
+
 function renderHeader(styles: Map<string, CppStyle>, apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], video = false, audio = false, baked: Record<string, unknown> = {}): string {
   // The state each route rendered with at build time: the first frame a desktop
   // binary can paint with no server behind it.
   const bakedBlock = Object.keys(baked).length
     ? `/// The state each route rendered with at build time (see rosezm build).
-inline const RoseValue ROSE_BAKED = RoseValue::fromRaw(${JSON.stringify(JSON.stringify(baked))});
+inline const RoseValue ROSE_BAKED = RoseValue::fromRaw(${cppStringLiteral(JSON.stringify(baked))});
 
 inline RoseValue rose_baked_for(const std::string& route) { return rose_get(ROSE_BAKED, route); }
 `

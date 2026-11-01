@@ -30,7 +30,7 @@ import { appIdentity, xmlEscape } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
+import { bakeRouteStates, chunkLiteral, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteDirectSetValue, rewriteSpreadWrites, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
 import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -1692,6 +1692,16 @@ ${branches}
 `;
 }
 
+/** One string as a Kotlin literal: the raw triple-quoted form while it fits in a
+ *  constant-pool entry (65,535 bytes), listOf(...).joinToString("") past it - a
+ *  real app's baked state outgrows the limit. */
+function kotlinLiteral(text: string): string {
+  const parts = chunkLiteral(text);
+  if (parts.length === 1) return '"""' + parts[0] + '"""';
+  const pieces = parts.map((part) => JSON.stringify(part).replace(/\$/g, '\\$'));
+  return `listOf(${pieces.join(', ')}).joinToString("")`;
+}
+
 function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], routes: string[] = [], appGlobal: string | null = null, scanState = false, baked: Record<string, unknown> = {}): string {
   // Only the routes this app actually carries, and never an empty document: a
   // triple-quoted Kotlin literal cannot hold `$` unescaped.
@@ -1748,7 +1758,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextDecoration
 ${bakedJson ? `
 /// The build's own state, one entry per prerendered route.
-private val ROSE_BAKED_JSON: String = """${bakedJson}"""
+private val ROSE_BAKED_JSON: String = ${kotlinLiteral(bakedJson)}
 private val ROSE_BAKED: Map<String, Map<String, Any?>> by lazy { roseBaked(ROSE_BAKED_JSON) }
 ` : 'private val ROSE_BAKED: Map<String, Map<String, Any?>> = emptyMap()'}
 ${appGlobalBlock}
