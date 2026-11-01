@@ -2440,8 +2440,20 @@ function renderPage(
     focusKeys,
     activeKeys,
   };
-  const body = emitChildren(page.nodes, ctx);
+  const body = emitChildren(page.nodes, ctx)
+    // A list length used as a ternary condition is "more than nothing" - Dart
+    // has no truthiness, and the interpolation path builds its own text.
+    .replace(/\.length\)\s*\?/g, '.length > 0) ?');
   const translated = translateScript(page.script, facts, page.fileName, page.route, warnings, formFields, mapBinds);
+  // A {@const} in the template is in scope for the page's handlers too: the name
+  // reads as its expression there, exactly as it does in the template.
+  if (ctx.constExprs && ctx.constExprs.size) {
+    for (const [name, expr] of ctx.constExprs) {
+      if (!/^[A-Za-z_$][\w$]*$/.test(name)) continue;
+      const pattern = '(?<![\\w$.])' + name.replace(/[$]/g, '\\$&') + '(?![\\w$(])';
+      translated.methods = translated.methods.replace(new RegExp(pattern, 'g'), `(${expr})`);
+    }
+  }
   // Inline arrow handlers: `on:click={() => $setState('n', n() + 1)}` and the
   // bare `on:click={taps.set(taps() + 1)}` both become a generated method
   // through the shared handler IR - one translation for every target.
@@ -2454,7 +2466,15 @@ function renderPage(
     const stmts = ir.stmts.map((s) => (/[};]\s*$/.test(s) ? s : s + ';')).join('\n');
     return `  void ${name}() {\n${stmts.split('\n').map((l) => '    ' + l).join('\n')}\n  }`;
   });
-  const methods = [translated.methods, ...inlineMethods].filter(Boolean).join('\n\n');
+  let methods = [translated.methods, ...inlineMethods].filter(Boolean).join('\n\n');
+  // Inline handlers are their own path: the same {@const} names are in scope.
+  if (ctx.constExprs && ctx.constExprs.size) {
+    for (const [name, expr] of ctx.constExprs) {
+      if (!/^[A-Za-z_$][\w$]*$/.test(name)) continue;
+      const pattern = '(?<![\\w$.])' + name.replace(/[$]/g, '\\$&') + '(?![\\w$(])';
+      methods = methods.replace(new RegExp(pattern, 'g'), `(${expr})`);
+    }
+  }
   const paramsField = page.params.length
     ? `  final Map<String, String> params;\n  const ${page.className}({super.key, this.params = const {}});\n`
     : `  const ${page.className}({super.key});\n`;
@@ -2484,6 +2504,12 @@ function renderPage(
     }
     return `  late dynamic ${dName(s.name)} = ${dartLiteral(init, mapBinds)};`;
   }).join('\n');
+  // A <input name="x"> with no $state of its own still has to CAPTURE what the
+  // user types: the form channel reads it back by name, and a key __set does not
+  // know is silently dropped. One field per form name closes both holes.
+  const knownState = new Set([...facts.state.map((x) => x.name), ...facts.data, ...binds.map((x) => x.name)]);
+  const formStateFields = formFields.filter((f) => /^[A-Za-z_$][\w$]*$/.test(f) && !knownState.has(f))
+    .map((f) => `  late dynamic ${dName(f)};`).join('\n');
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries, or an
     // optional single entry, so `posts[0]` and `post?['x']` both compile.
@@ -2506,6 +2532,7 @@ ${paramsField}  @override
 
 class _${page.className}State extends State<${page.className}> with WidgetsBindingObserver {
 ${stateFields}
+${formStateFields}
 ${dataAccessors}
 ${bindFields}
 ${derivedGetters}

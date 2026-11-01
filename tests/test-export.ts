@@ -39,6 +39,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // means the same thing on every device.
 const PY = spawnSync('python3', ['-c', 'pass'], { stdio: 'ignore' }).status === 0 ? 'python3' : 'python';
 
+
+/** Every file the exporter wrote, minus the SDK-generated platform runners. */
+function emittedFiles(dir: string): string[] {
+  return walk(dir).filter((f) => !/\/(android|ios|web|windows|macos|linux)[\/\\]/.test(f));
+}
+
 /** Every file under a directory, recursively. */
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -523,6 +529,20 @@ try {
       mkdirSync(outDir, { recursive: true });
       const jc = spawnSync('javac', ['-d', outDir, ...files], { encoding: 'utf8', timeout: 300_000 });
       assert(jc.status === 0, `java: the exported Swing tree compiles with javac (${files.length} files)${jc.status === 0 ? '' : ': ' + (jc.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`);
+    }
+  }
+  // R-AF: the exported Flutter tree must actually ANALYZE clean. Same rule as
+  // the Swing and WPF gates: a real toolchain when the machine has one.
+  {
+    const flutterOk = (() => {
+      try { return spawnSync('flutter', ['--version'], { encoding: 'utf8', timeout: 60_000 }).status === 0; } catch { return false; }
+    })();
+    if (flutterOk) {
+      const fr = await exportProject('flutter', example, { apiBase: 'x', outRoot: join(scratch, 'flutter-analyze') });
+      spawnSync('flutter', ['pub', 'get'], { cwd: fr.outDir, encoding: 'utf8', timeout: 600_000 });
+      const fa = spawnSync('flutter', ['analyze', '--no-fatal-infos', '--no-fatal-warnings'], { cwd: fr.outDir, encoding: 'utf8', timeout: 600_000 });
+      const errs = (fa.stdout ?? '').split('\n').filter((l) => l.includes('error •')).slice(0, 3).join(' / ');
+      assert(fa.status === 0, `flutter: the exported app analyzes clean${fa.status === 0 ? '' : ': ' + errs}`);
     }
   }
   // R-AF: the exported WPF tree must actually BUILD. Same rule as the Swing
@@ -3680,7 +3700,7 @@ try {
     ['alipay', 'pages/bare/bare.js', "__setState('taps', state.taps + 1)"],
     ['alipay', 'pages/const-demo/const-demo.js', "__setState('stamped', total)"],
     ['flutter', 'lib/pages/bare.dart', "__set('taps', taps + 1)"],
-    ['flutter', 'lib/pages/const_demo.dart', "__set('stamped', total)"],
+    ['flutter', 'lib/pages/const_demo.dart', "__set('stamped', (price"],
     ['python', 'pages/bare.py', "st['taps'] = st.get('taps') + 1"],
     ['python', 'pages/const_demo.py', "st['stamped'] = total"],
     ['arkts', 'entry/src/main/ets/pages/BarePage.ets', 'this.taps = this.taps + 1;'],
@@ -6844,7 +6864,9 @@ h2 { font-size: 40px; }
     };
     for (const [target, want] of Object.entries(expect)) {
       const i = await exportProject(target as never, iProj, { apiBase: 'x', outRoot: join(scratch, `ifdef-${target}`) });
-      const body = walk(i.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      // The generated platform runners are the SDK's own boilerplate (a CMake
+      // file literally says "NEVER"), so the scan reads what the exporter wrote.
+      const body = emittedFiles(i.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
       const has = (s: string) => body.includes(s);
       assert(has('WECHAT ONLY') === want.wechat, `${target}: {#ifdef weapp} keeps its branch only on WeChat`);
       assert(has('everywhere else') === want.other, `${target}: the {:else} branch is what the rest of the world gets`);
@@ -6896,7 +6918,7 @@ h2 { font-size: 40px; }
 `);
     for (const target of ['weapp', 'flutter', 'cpp'] as const) {
       const c = await exportProject(target, cProj, { apiBase: 'x', outRoot: join(scratch, `cmt-${target}`) });
-      const body = walk(c.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+      const body = emittedFiles(c.outDir).map((f) => { try { return readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
       const wechat = target === 'weapp';
       assert(body.includes('WECHAT_JS') === wechat, `${target}: // #ifdef MP-WEIXIN keeps its script only on WeChat (the uni-app alias resolves)`);
       assert(body.includes('OTHER_JS') === !wechat, `${target}: // #ifndef weapp is the complement`);
