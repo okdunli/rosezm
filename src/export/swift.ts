@@ -530,7 +530,9 @@ function swiftWeightOf(w: number): string {
   return w >= 100 ? '.thin' : '.regular';
 }
 
-const SWIFT_TEXT_ALIGN: Record<string, string> = { left: '.leading', center: '.center', right: '.trailing', justify: '.justified' };
+// SwiftUI's TextAlignment has three cases; CSS justify has no native spelling,
+// so it stays leading instead of failing to compile on a case that does not exist.
+const SWIFT_TEXT_ALIGN: Record<string, string> = { left: '.leading', center: '.center', right: '.trailing', justify: '.leading' };
 
 /** `[top, right, bottom, left]` -> the EdgeInsets literal (SwiftUI spells leading/trailing). */
 function edgeLiteral(e: [number, number, number, number]): string {
@@ -703,8 +705,12 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
 function renderTheme(styles: Map<string, StyleModel>, fontMap: Map<string, string>): string {
   const rows = [...styles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no style rules';
   const tagRows = [...tagStyles].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no element selector rules';
-  const darkRows = [...swiftDarkClasses].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no dark rules';
-  const darkTagRows = [...swiftDarkTags].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n') || '    // no dark element rules';
+  const darkRows = [...swiftDarkClasses].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n');
+  const darkTagRows = [...swiftDarkTags].map(([key, model]) => `    ${JSON.stringify(key)}: RoseStyle(${swiftStyleLiteral(model, fontMap)}),`).join('\n');
+  // An empty table is a dictionary literal, not an array: "= [ ]" does not
+  // compile as [String: RoseStyle], and the demo carries no dark rules.
+  const darkTable = darkRows ? `[\n${darkRows}\n]` : '[:]';
+  const darkTagTable = darkTagRows ? `[\n${darkTagRows}\n]` : '[:]';
 
 
   return `import SwiftUI
@@ -751,7 +757,7 @@ struct RoseStyle {
     var color: String? = nil
     var background: String? = nil
     var image: String? = nil
-    var imageFit: String = "cover"
+    var imageFit: String? = nil
     var gradient: [String]? = nil
     var fontSize: Double? = nil
     var weight: Int? = nil
@@ -846,13 +852,9 @@ var roseDark = false
 
 func roseSetDark(_ on: Bool) { roseDark = on }
 
-let roseDarkStyles: [String: RoseStyle] = [
-${darkRows}
-]
+let roseDarkStyles: [String: RoseStyle] = ${darkTable}
 
-let roseDarkTagStyles: [String: RoseStyle] = [
-${darkTagRows}
-]
+let roseDarkTagStyles: [String: RoseStyle] = ${darkTagTable}
 
 /// The cascade at runtime: the element's tag rule first, then every class
 /// merged in order, then props.
@@ -994,7 +996,7 @@ func roseAlignOf(_ a: String?) -> TextAlignment {
     switch a {
     case "center": return .center
     case "right": return .trailing
-    case "justify": return .justified
+    case "justify": return .leading
     default: return .leading
     }
 }
@@ -1313,10 +1315,15 @@ let roseApiBase = (Bundle.main.object(forInfoDictionaryKey: "RoseAPIBase") as? S
 private var rosezmCookie = ""
 ${contentBlock}
 ${nativeKit(native)}
-/// The await reject branch: it always throws, so the catch arm renders.
-/// (Swift has no throwing expression, so the value type is a white lie.)
+/// The await reject branch, and a handler that threw. Swift has no throw in
+/// EXPRESSION position - the previous spelling declared a non-throwing function
+/// that threw, which no Swift version has ever accepted (the exported app did
+/// not type-check at all). The message is logged and the handler returns: the
+/// honest limit of a target without exceptions in expression position.
+@discardableResult
 func roseThrow(_ message: Any) -> Any {
-    throw NSError(domain: "rosezm", code: 1, userInfo: [NSLocalizedDescriptionKey: "\\(message)"])
+    print("rosezm: " + String(describing: message))
+    return NSNull()
 }
 
 /// The routes this export carries a page for, written at export time. A wall's
@@ -1449,9 +1456,9 @@ func roseAction(_ route: String, _ name: String, _ fields: [String: Any]? = nil)
     let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? name
     var body = "__action=" + encodedName
     if let fields = fields {
-        for (key, value) in fields where value != nil {
+        for (key, value) in fields where !(value is NSNull) {
             let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
-            let encodedValue = String(describing: value!).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? String(describing: value!)
+            let encodedValue = String(describing: value).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? String(describing: value)
             body += "&" + encodedKey + "=" + encodedValue
         }
     }
@@ -1914,7 +1921,7 @@ function renderRoot(pages: Array<{ route: string; view: string; params: string[]
     if (p.params.length === 0) return `${head} route == ${JSON.stringify(p.route)} {\n            ${p.view}(route: route, onNavigate: navigate)`;
     const prefix = p.route.slice(0, p.route.indexOf(':'));
     const param = p.params[0];
-    return `${head} route.hasPrefix(${JSON.stringify(prefix)}) && route != ${JSON.stringify(prefix)} {\n            ${p.view}(route: route, params: [${JSON.stringify(param)}: String(route.dropFirst(${JSON.stringify(prefix)}.count))], onNavigate: navigate)`;
+    return `${head} route.hasPrefix(${JSON.stringify(prefix)}) && route != ${JSON.stringify(prefix)} {\n            ${p.view}(route: route, onNavigate: navigate, params: [${JSON.stringify(param)}: String(route.dropFirst(${JSON.stringify(prefix)}.count))])`;
   }).join('\n');
   return `import SwiftUI
 import AVKit
@@ -3204,8 +3211,15 @@ function emitElementStyled(
     if (type === 'checkbox') {
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
-      if (group) emit(`Toggle(isOn: Binding(get: { (${group} as? [Any])?.contains(where: { String(describing: $0) == String(describing: ${optionValue}) }) ?? false }, set: { on in var list = (${group} as? [Any]) ?? []; if on { list.append(${optionValue}) } else { list.removeAll { String(describing: $0) == String(describing: ${optionValue}) } }; ${group} = list })) { Text("") }`, ctx);
-      else if (checked) emit(`Toggle(isOn: Binding(get: { ${checked} }, set: { ${checked} = $0 })) { Text("") }`, ctx);
+      // A component's prop is Any? and immutable: writing it is a Swift error
+      // ("cannot assign to property: self is immutable"), and the value has to
+      // go back out through the onChange closure the component was handed.
+      const groupProp = group && ctx.componentProps.has(group) ? group : '';
+      const checkedProp = checked && ctx.componentProps.has(checked) ? checked : '';
+      if (group) emit(`Toggle(isOn: Binding(get: { (${group} as? [Any])?.contains(where: { String(describing: $0) == String(describing: ${optionValue}) }) ?? false }, set: { on in var list = (${group} as? [Any]) ?? []; if on { list.append(${optionValue}) } else { list.removeAll { String(describing: $0) == String(describing: ${optionValue}) } }; ${groupProp ? `${propChangeHandler(groupProp)}(list)` : `${group} = list`} })) { Text("") }`, ctx);
+      else if (checked) emit(checkedProp
+        ? `Toggle(isOn: Binding(get: { ${checked} as? Bool ?? false }, set: { v in ${propChangeHandler(checkedProp)}(v) })) { Text("") }`
+        : `Toggle(isOn: Binding(get: { ${checked} }, set: { ${checked} = $0 })) { Text("") }`, ctx);
       else emit('Toggle(isOn: .constant(false)) { Text("") }', ctx);
       return;
     }
@@ -3286,9 +3300,9 @@ function emitElementStyled(
       return;
     }
     if (propName) {
-      emit(`${fieldKind}(${hint}, text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+      emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else if (boundName) {
-      emit(`${fieldKind}(${hint}, text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+      emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else {
       // A named input inside a submitting form binds to its name, like the
       // desktop channel: the handler reads the same state key.
@@ -3296,14 +3310,14 @@ function emitElementStyled(
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       const formKey = field ? formFieldKey(ctx.forms, field) : null;
       if (formKey) {
-        emit(`${fieldKind}(${hint}, text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${formKey} }, set: { ${formKey} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
         return;
       }
       const valueProp = valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '';
       if (valueProp) {
-        emit(`${fieldKind}(${hint}, text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
       } else {
-        emit(`${fieldKind}(${hint}, text: .constant(""))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        emit(`${fieldKind}(String(describing: ${hint}), text: .constant(""))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
       }
     }
     return;

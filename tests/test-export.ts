@@ -508,6 +508,27 @@ try {
     assert(xApp.includes('struct RoseAlertView') && xApp.includes('UIAlertController') && xApp.includes('RoseKit.roseModalTitle'), 'xcode: the modal rides an alert cover wired to the kit options');
     assert(xApp.includes('fullScreenCover(isPresented: Binding(get: { RoseKit.roseScanRequested }') && xApp.includes('struct RoseScannerView') && xApp.includes('DataScannerViewController'), 'xcode: the app presents the DataScanner cover and the kit ships the scanner view');
     assert(xKit.includes('RoseKit.roseScanRequested = true'), 'xcode: the scan bridge flips the request flag the app observes');
+  // R-AF: the exported SwiftUI tree must actually type-check. `swiftc` on a
+  // Command Line Tools install cannot expand `@State` (the macro plugin ships
+  // with Xcode), so the lock here is the shapes that failed before: a throwing
+  // non-throwing function, a force-unwrapped non-optional, an array literal
+  // where a dictionary is declared, a TextAlignment case SwiftUI lacks, a prop
+  // written in place, and an initializer argument out of declaration order.
+  {
+    const sx = await exportProject('xcode', example, { apiBase: 'x', outRoot: join(scratch, 'swift-typecheck') });
+    const skit = readFileSync(join(sx.outDir, 'rosezmApp', 'Kit', 'RoseKit.swift'), 'utf8');
+    const theme = readFileSync(join(sx.outDir, 'rosezmApp', 'Kit', 'RoseTheme.swift'), 'utf8');
+    const root = readFileSync(join(sx.outDir, 'rosezmApp', 'RoseRootView.swift'), 'utf8');
+    assert(/@discardableResult\nfunc roseThrow\(_ message: Any\) -> Any \{\n    print\(/.test(skit) && !/throw NSError/.test(skit), 'xcode: roseThrow logs instead of throwing from a non-throwing function - no Swift release accepts that');
+    assert(/var imageFit: String\? = nil/.test(theme) && /if let v = o\.imageFit \{ m\.imageFit = v \}/.test(theme), 'xcode: imageFit is optional, so the merge can bind it');
+    assert(/let roseDarkStyles: \[String: RoseStyle\] = \[:\]/.test(theme) && /let roseDarkTagStyles: \[String: RoseStyle\] = \[:\]/.test(theme), 'xcode: an empty dark table is a dictionary literal - an empty array does not compile as [String: RoseStyle]');
+    assert(!/\.justified/.test(theme), 'xcode: no SwiftUI TextAlignment case is invented (justify stays leading)');
+    const field = readFileSync(join(sx.outDir, 'rosezmApp', 'Components', 'TextFieldView.swift'), 'utf8');
+    assert(/TextField\(String\(describing: /.test(field), 'xcode: a component prop label reaches TextField as a String, not Any?');
+    const check = readFileSync(join(sx.outDir, 'rosezmApp', 'Components', 'CheckFieldView.swift'), 'utf8');
+    assert(/onCheckedChange\(/.test(check) && !/checked = \$0/.test(check), 'xcode: a component prop checkbox writes through its change closure (a prop is immutable)');
+    assert(/onNavigate: navigate, params: /.test(root), 'xcode: a page view is called in declaration order (route, onNavigate, params) - Swift has no argument reordering');
+  }
     // The desktop shells answer scan-code through Chromium's BarcodeDetector:
     // camera stream + detect loop in the bridge/preload, no camera pipeline of
     // our own. Implemented, so the gap warning must NOT fire for it.
@@ -1344,7 +1365,7 @@ try {
   assert(rootSwift.includes('if route == "/"') && rootSwift.includes('route.hasPrefix("/blog/")') && rootSwift.includes('route.dropFirst("/blog/".count)'), 'the root view routes static and dynamic pages (parsing the segment)');
   // R214: the root view must hand every page a real onNavigate, else links resolve
   // to the default no-op ({ _ in }) and tapping any link does nothing on iOS.
-  assert(rootSwift.includes('AboutView(route: route, onNavigate: navigate)') && rootSwift.includes('BlogParamIdView(route: route, params:'), 'every SwiftUI page receives the real navigate callback, not the default no-op');
+  assert(rootSwift.includes('AboutView(route: route, onNavigate: navigate)') && rootSwift.includes('BlogParamIdView(route: route, onNavigate: navigate, params:'), 'every SwiftUI page receives the real navigate callback, not the default no-op');
   // R214: SwiftUI gets a back stack (history + back()) so navigation is reversible.
   assert(rootSwift.includes('@State private var history: [String]') && rootSwift.includes('private func back()') && rootSwift.includes('if let prev = history.popLast()'), 'SwiftUI keeps a navigation history with a back()');
   assert(xread('rosezmApp/Kit/RoseKit.swift').includes('func roseData(') && xread('rosezmApp/Kit/RoseKit.swift').includes('func roseAction('), 'the kit speaks the data channel and the action protocol over URLSession');
