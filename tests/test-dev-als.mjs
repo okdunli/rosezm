@@ -105,3 +105,7 @@ try {
 }
 
 console.log(`All dev-ALS checks passed - the request context survives a body-bearing POST - ${checks} assertions.`);
+// The spawned dev server's stdio pipes keep the loop alive after the assertions
+// are done: without this the suite prints "passed" and then hangs, which a CI
+// reads as a timeout (exit 124) instead of a pass.
+process.exit(0);
