@@ -1316,7 +1316,11 @@ export const ROSE_API_BASE: string = ${JSON.stringify(apiBase)}
 
 /// The state each route rendered with at build time: the first frame a device
 /// can paint with no server. A live data channel still wins when it answers.
-const ROSE_BAKED: Record<string, Record<string, Object>> = ${JSON.stringify(baked)};
+/// Parsed from JSON rather than written as an object literal: a literal would
+/// have to spell out the nulls the state carries, and ArkTS refuses those in a
+/// typed record.
+const ROSE_BAKED_JSON: string = ${JSON.stringify(JSON.stringify(baked))};
+const ROSE_BAKED: Record<string, Record<string, Object>> = JSON.parse(ROSE_BAKED_JSON) as Record<string, Record<string, Object>>;
 
 export function roseBakedFor(route: string): Record<string, Object> {
   return ROSE_BAKED[route] ?? {};
