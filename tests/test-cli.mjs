@@ -168,7 +168,7 @@ assert(usage.out.includes('--watch') && usage.out.includes('--build'), 'the usag
 // The export copy named the native targets "on the way" long after all 17
 // shipped - a first-time reader could conclude the exporter stops at mini
 // programs. The line now says what is real, and the old copy is dead.
-assert(usage.out.includes('17 targets, one source tree') && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
+assert(usage.out.includes('18 targets, one source tree') && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
 
 // An export ends with where to go next - the doc the tree actually ships, so
 // the pointer cannot go stale the way a hardcoded command would.
@@ -3218,7 +3218,7 @@ const matrix = await run(['export'], REPO);
 assert(matrix.code === 0 && matrix.out.includes('export targets') && matrix.out.includes('weapp') && matrix.out.includes('cpp'), 'rosezm export with no target lists the matrix instead of failing');
 const matrixJson = await run(['export', '--json'], REPO);
 const parsedMatrix = JSON.parse(matrixJson.out.trim().split('\n').pop());
-assert(parsedMatrix.ok === true && parsedMatrix.targets.length === 17 && parsedMatrix.targets.every((t) => t.status === 'ready'), 'the matrix is machine-readable (17 ready targets)');
+assert(parsedMatrix.ok === true && parsedMatrix.targets.length === 18 && parsedMatrix.targets.every((t) => t.status === 'ready'), 'the matrix is machine-readable (18 ready targets)');
 const oneJson = await run(['export', 'weapp', path.join(REPO, 'example'), '--json'], REPO);
 const parsedOne = JSON.parse(oneJson.out.trim().split('\n').pop());
 assert(parsedOne.ok === true && parsedOne.target === 'weapp' && parsedOne.pages.length >= 30 && Array.isArray(parsedOne.warnings), 'a single export reports its pages, components and warnings as JSON');
@@ -3227,10 +3227,10 @@ assert(groupedHuman.out.includes('server calls with no --api endpoint'), 'the gr
 assert(!groupedHuman.out.includes('+8 more'), 'the grouped output does not print the file list the --json output already carries');
 const allJson = await run(['export', 'all', path.join(REPO, 'example'), '--json'], REPO);
 const parsedAll = JSON.parse(allJson.out.trim().split('\n').pop());
-assert(parsedAll.ok === true && parsedAll.targets.length === 17 && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
+assert(parsedAll.ok === true && parsedAll.targets.length === 18 && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
 // `export all` writes the index a CI reads: one file saying where each tree is.
 const allManifest = JSON.parse(fs.readFileSync(path.join(REPO, 'example', '.rosezm-export', 'rosezm-export-all.json'), 'utf8'));
-assert(allManifest.targets.length === 17 && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
+assert(allManifest.targets.length === 18 && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
 const human = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(human.out.includes('warning(s) -') && human.out.includes('kind(s)'), 'the human exporter groups its warnings by kind instead of dumping 40 lines');
 
@@ -3242,7 +3242,7 @@ assert(surfHuman.code === 0 && surfHuman.out.includes('public surface') && surfH
 const surfJson = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
 assert(surfJson.ok === true && /^[0-9a-f]{64}$/.test(surfJson.hash), 'the surface hash is a sha256 over the canonical manifest');
 assert(surfJson.modules.runtime.includes('state') && surfJson.modules.export.includes('exportProject') && surfJson.modules.edge.includes('createEdgeHandler'), 'the manifest carries the real named exports of every entry point');
-assert(Object.keys(surfJson.targets).length === 17 && surfJson.targets.weapp.kit === 'utils/rosezm.js', 'every export target is in the manifest with the kit file it writes');
+assert(Object.keys(surfJson.targets).length === 18 && surfJson.targets.weapp.kit === 'utils/rosezm.js', 'every export target is in the manifest with the kit file it writes');
 const surfAgain = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
 assert(surfAgain.hash === surfJson.hash, 'the hash is canonical - two reads of an unchanged tree agree (no timestamps, no paths)');
 // The manifest cannot drift from the emitters: every kit path it names is a
@@ -3316,7 +3316,7 @@ fs.writeFileSync(path.join(badProj, 'src', 'pages', 'index.rose'), '<p>home</p>'
 fs.writeFileSync(path.join(badProj, 'rosezm.app.json'), JSON.stringify({ id: 'not a valid id!' }));
 const badAll = await run(['export', 'all', badProj, '--json'], REPO);
 const badParsed = JSON.parse(badAll.out.trim().split(String.fromCharCode(10)).pop());
-assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === 17, 'a batch reports every failed target and exits 1');
+assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === 18, 'a batch reports every failed target and exits 1');
 assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names the cause, not just the target');
 console.log(`\nAll CLI checks passed - the framework builds any project, not just its own demo - ${checks} assertions.`);
 process.exit(0);

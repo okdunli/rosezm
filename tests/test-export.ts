@@ -1542,6 +1542,31 @@ try {
     assert(threw === null, 'a missing bundle is not an error here (the caller decides)');
   }
 
+  // Capacitor: the third way to a store (after the native targets and the
+  // desktop shells) - the built site in a native WebView project. A WebView has
+  // no server, so the export ships the PRERENDERED documents, not a compiled
+  // bundle with nothing to paint.
+  {
+    const capRoot = join(scratch, 'cap-proj');
+    mkdirSync(join(capRoot, 'src/pages'), { recursive: true });
+    writeFileSync(join(capRoot, 'src/pages/index.rose'), '<h1>capacitor home</h1>\n');
+    writeFileSync(join(capRoot, 'src/pages/about.rose'), '<h1>about</h1>\n');
+    const capBuild = spawnSync(process.execPath, ['--import', new URL('../node_modules/tsx/dist/esm/index.mjs', import.meta.url).href, fileURLToPath(new URL('../src/cli/index.ts', import.meta.url)), 'build', '.'], { cwd: capRoot, encoding: 'utf8', timeout: 300_000 });
+    assert(capBuild.status === 0, 'the capacitor fixture builds its site');
+    const cap = await exportProject('capacitor', capRoot, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'cap-out') });
+    const capDir = cap.outDir;
+    const config = JSON.parse(readFileSync(join(capDir, 'capacitor.config.json'), 'utf8')) as { appId: string; webDir: string; appName: string };
+    assert(config.webDir === 'www' && config.appId.length > 0 && config.appName.length > 0, 'capacitor.config.json names the app and the web directory');
+    assert(existsSync(join(capDir, 'www', 'index.html')) && readFileSync(join(capDir, 'www', 'index.html'), 'utf8').includes('capacitor home'), 'the shell ships the prerendered documents a WebView can paint');
+    assert(existsSync(join(capDir, 'www', 'about', 'index.html')), 'every prerendered route rides along, not just the entry');
+    const capPkg = JSON.parse(readFileSync(join(capDir, 'package.json'), 'utf8')) as { scripts: Record<string, string>; dependencies: Record<string, string>; devDependencies: Record<string, string> };
+    assert(capPkg.devDependencies['@capacitor/cli'] && capPkg.dependencies['@capacitor/core'] && capPkg.devDependencies['@capacitor/android'] && capPkg.devDependencies['@capacitor/ios'], 'the package carries the Capacitor core, cli and both platforms');
+    assert(capPkg.scripts.sync === 'cap sync' && capPkg.scripts['add:android'] && capPkg.scripts['add:ios'], 'the package scripts say how to add and sync the native projects');
+    assert(existsSync(join(capDir, 'DEPLOY.md')) && readFileSync(join(capDir, 'DEPLOY.md'), 'utf8').includes('npx cap sync'), 'the deploy manual carries the sync step');
+    assert(readFileSync(join(capDir, '.gitignore'), 'utf8').includes('android/'), 'the generated native projects stay out of git');
+    assert(cap.pages.includes('/about'), 'the manifest lists the routes the shell carries');
+  }
+
   // A device has no server: without the build's own state every exported page
   // opened with its declared defaults (an empty list, a blank card). The export
   // now carries the per-route state `rosezm build` wrote into dist/, and a live

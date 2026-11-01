@@ -16,6 +16,9 @@ const MINI = ['miniprogram_npm/', 'project.private.config.json'];
 
 const BY_TARGET: Record<TargetName, string[]> = {
   weapp: MINI,
+  // The native projects `cap add` generates, plus the signing material a store
+  // build writes next to them.
+  capacitor: ['android/', 'ios/', '.capacitor/', '*.jks', '*.keystore', 'android/key.properties', 'ios/App/Pods/'],
   qq: MINI,
   alipay: MINI,
   baidu: MINI,

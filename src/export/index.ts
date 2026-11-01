@@ -16,6 +16,7 @@ import { emitArkTs } from './arkts.js';
 import { emitAndroid } from './android.js';
 import { emitSwift } from './swift.js';
 import { emitElectron } from './electron.js';
+import { emitCapacitor } from './capacitor.js';
 import { emitWails } from './wails.js';
 import { emitTauri } from './tauri.js';
 import { emitJava } from './java.js';
@@ -33,6 +34,7 @@ export type TargetName =
   | 'arkts'
   | 'xcode'
   | 'electron'
+  | 'capacitor'
   | 'wails'
   | 'tauri'
   | 'python'
@@ -62,6 +64,7 @@ export const TARGETS: Record<TargetName, TargetInfo> = {
   arkts: { name: 'arkts', family: 'native', dir: 'arkts', status: 'ready', summary: 'HarmonyOS project (ArkTS + ArkUI, DevEco Studio)' },
   xcode: { name: 'xcode', family: 'native', dir: 'xcode', status: 'ready', summary: 'Xcode project (SwiftUI, iOS/macOS)' },
   electron: { name: 'electron', family: 'desktop', dir: 'electron', status: 'ready', summary: 'Electron desktop shell around the built web app' },
+  capacitor: { name: 'capacitor', family: 'native', dir: 'capacitor', status: 'ready', summary: 'Capacitor shell (the built site in a store-ready iOS/Android WebView)' },
   wails: { name: 'wails', family: 'desktop', dir: 'wails', status: 'ready', summary: 'Wails v2 desktop app (Go, the built site embedded in one binary)' },
   tauri: { name: 'tauri', family: 'desktop', dir: 'tauri', status: 'ready', summary: 'Tauri v2 desktop app (Rust, a WebView window over the built site)' },
   python: { name: 'python', family: 'desktop', dir: 'python', status: 'ready', summary: 'Python desktop app (stdlib Tkinter, no pip install)' },
@@ -470,6 +473,14 @@ async function exportInner(target: TargetName, projectRoot: string, opts: Export
     // passing the sheet again would style the same page twice.
     const result = await emitElectron({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
     const dir = path.join(outRoot, 'electron');
+    const size = await treeSize(dir);
+    await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length, bytes: size.bytes, files: size.files }, null, 2) + '\n', 'utf8');
+    return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
+  }
+  if (target === 'capacitor') {
+    // Like electron: no globalCss, the web build already carries its own styles.
+    const result = await emitCapacitor({ projectRoot, outDir: outRoot, apiBase: opts.apiBase, warnings });
+    const dir = path.join(outRoot, 'capacitor');
     const size = await treeSize(dir);
     await fs.promises.writeFile(path.join(dir, 'rosezm-export.json'), JSON.stringify({ framework: 'rosezm', target, generatedBy: 'rosezm export', pages: result.pages, components: result.components, apiBase: opts.apiBase ?? '', warnings: warnings.length, bytes: size.bytes, files: size.files }, null, 2) + '\n', 'utf8');
     return { target, outDir: dir, pages: result.pages, components: result.components, warnings };
