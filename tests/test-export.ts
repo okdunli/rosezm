@@ -525,6 +525,19 @@ try {
       assert(jc.status === 0, `java: the exported Swing tree compiles with javac (${files.length} files)${jc.status === 0 ? '' : ': ' + (jc.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`);
     }
   }
+  // R-AF: the exported WPF tree must actually BUILD. Same rule as the Swing
+  // gate: a real toolchain when the machine has one, skipped when it does not.
+  {
+    const dotnetOk = (() => {
+      try { return spawnSync('dotnet', ['--version'], { encoding: 'utf8', timeout: 20_000 }).status === 0; } catch { return false; }
+    })();
+    if (dotnetOk) {
+      const dr = await exportProject('dotnet', example, { apiBase: 'x', outRoot: join(scratch, 'dotnet-build') });
+      const db = spawnSync('dotnet', ['build', '-p:EnableWindowsTargeting=true', '-v', 'q'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
+      const errs = (db.stdout ?? '').split('\n').filter((l) => l.includes('error')).slice(0, 3).join(' / ');
+      assert(db.status === 0, `dotnet: the exported WPF tree builds${db.status === 0 ? '' : ': ' + errs}`);
+    }
+  }
   // R-AF: the exported SwiftUI tree must actually type-check. `swiftc` on a
   // Command Line Tools install cannot expand `@State` (the macro plugin ships
   // with Xcode), so the lock here is the shapes that failed before: a throwing
@@ -2251,7 +2264,7 @@ try {
   assert(cNest.includes('rose_map(rose_list(app.v("groups")), [](const RoseValue& g) { return (rose_merge(g, RoseValue::object({{"on", !rose_bool(rose_get(g, "on"))}}))); })'), 'Qt maps through a lambda over the kit merge/object helpers');
   assert(!cNest.includes('=>'), 'no JS arrow survives into C++');
   const nNest = nread('Pages/NestDemoPage.cs');
-  assert(nNest.includes('RoseTheme.Map(RoseTheme.List(app.V("groups")), delegate(object g) { return (RoseTheme.Merge(g, RoseTheme.Obj(("on", !RoseTheme.Bool(RoseTheme.Get(g, "on")))))); })'), 'WPF maps through an anonymous method (a lambda would trip the arrow refusal)');
+  assert(nNest.includes('RoseTheme.Map(RoseTheme.List(app.V("groups")), delegate(object g) { return (RoseTheme.MergeMap(g, RoseTheme.Obj(("on", !RoseTheme.Bool(RoseTheme.Get(g, "on")))))); })'), 'WPF maps through an anonymous method (a lambda would trip the arrow refusal)');
   assert(!nNest.includes('.map(') && !nNest.includes('$setState') && !nNest.includes('...'), 'no JS construct survives into C#');
   const xNest = xread('rosezmApp/Pages/NestDemoView.swift');
   assert(xNest.includes('groups = roseMap(groups) { g in (roseMerge(g, ["on": !roseBool(((g) as? [String: Any])?["on"])])) };'), 'SwiftUI maps through a trailing closure with the cast member read');

@@ -1135,6 +1135,16 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (source.ZIndex != null) target.ZIndex = source.ZIndex;
     }
 
+    /// Merging two plain maps (a list item and a patch): an item in {#each} is
+    /// a dictionary, not a RoseStyle.
+    public static Dictionary<string, object?> MergeMap(object? baseMap, object? patch)
+    {
+        var merged = new Dictionary<string, object?>();
+        if (baseMap is Dictionary<string, object?> b) foreach (var kv in b) merged[kv.Key] = kv.Value;
+        if (patch is Dictionary<string, object?> p) foreach (var kv in p) merged[kv.Key] = kv.Value;
+        return merged;
+    }
+
     public static RoseStyle Merge(RoseStyle baseStyle, RoseStyle patch)
     {
         var next = new RoseStyle();
@@ -3310,6 +3320,7 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
       // expression the template path translates; no concat coercion is needed
       // here because C# `+` already turns into a string concat as soon as one
       // operand is a string, which is what JS does too.
+      const initializer = csExpr(node.code, ctx);
       const taken = new Set<string>([...(ctx.constNames?.values() ?? []), 'g', 'p', 'b', 'line', 'ev', 'app', 'parent']);
       let emitted = node.name;
       if (taken.has(emitted) || (ctx.constNames?.has(node.name) ?? false)) {
@@ -3317,7 +3328,7 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
         emitted = `${node.name}_${++ctx.constSeq.n}`;
       }
       (ctx.constNames ??= new Map()).set(node.name, emitted);
-      emit(`var ${emitted} = ${csExpr(node.code, ctx)};`, ctx);
+      emit(`var ${emitted} = ${initializer};`, ctx);
       return;
     }
     case 'render':
@@ -3328,9 +3339,11 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
     case 'if': {
       node.branches.forEach((branch, idx) => {
         emit(idx === 0 ? `if (${truthExpr(csExpr(branch.cond ?? 'false', ctx))}) {` : branch.cond === null ? '} else {' : `} else if (${truthExpr(csExpr(branch.cond, ctx))}) {`, ctx);
-        ctx.depth++;
-        emitNodes(branch.children, ctx);
-        ctx.depth--;
+        // A block gets its own const scope: a {@const} inside it must not rename
+        // reads after the block closes.
+        const branchCtx = { ...ctx, constNames: new Map(ctx.constNames) };
+        branchCtx.depth = ctx.depth + 1;
+        emitNodes(branch.children, branchCtx);
       });
       emit('}', ctx);
       return;
@@ -3342,9 +3355,16 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
       const eachSource = /^\[([\s\S]*)\]$/.test(listed)
         ? `RoseTheme.List(${splitTopLevel(listed.slice(1, -1)).map((x) => csLiteral(x.trim())).filter(Boolean).join(', ')})`
         : `RoseTheme.AsList(${listed})`;
-      emit(`foreach (var ${binding} in ${eachSource}) {`, ctx);
+      const scopedConsts = new Map(ctx.constNames);
+      let emittedBinding = binding;
+      if ((ctx.constNames?.has(binding) ?? false) || scopedConsts.has(binding)) {
+        ctx.constSeq ??= { n: 0 };
+        emittedBinding = `${binding}_${++ctx.constSeq.n}`;
+        scopedConsts.set(binding, emittedBinding);
+      }
+      emit(`foreach (var ${emittedBinding} in ${eachSource}) {`, ctx);
       ctx.depth++;
-      const scoped: NetCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]) };
+      const scoped: NetCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]), constNames: scopedConsts };
       emitNodes(node.children, scoped);
       ctx.depth--;
       emit('}', ctx);
@@ -4110,12 +4130,13 @@ function csRenameCalls(code: string, renamed: Map<string, string>): string {
 }
 
 function csExpr(code: string, ctx: NetCtx): string {
-  let out = csStateFields(csExprInner(code, ctx));
+  let source = code;
   if (ctx.constNames && ctx.constNames.size) {
     for (const [from, to] of ctx.constNames) {
-      if (from !== to) out = out.replace(new RegExp('\\b' + from + '\\b', 'g'), to);
+      if (from !== to) source = source.replace(new RegExp('\\b' + from + '\\b', 'g'), to);
     }
   }
+  let out = csStateFields(csExprInner(source, ctx));
   if (ctx.arrowFns && ctx.arrowFns.size) {
     for (const [fn, bodyText] of ctx.arrowFns) {
       out = out.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), () => csStateFields(csExprInner(bodyText, ctx)));
@@ -4128,6 +4149,8 @@ function csExpr(code: string, ctx: NetCtx): string {
       out = out.replace(new RegExp('\\b' + fn + '\\((?!\\)|app\\))', 'g'), `${fn}(app, `);
     }
   }
+  // "!fn(app)" only exists after the call received its app argument.
+  out = out.replace(/!([A-Za-z_$][\w$]*)\(app\)/g, (_m, fn) => `!RoseTheme.Truth(${fn}(app))`);
   return out;
 }
 
@@ -4673,7 +4696,7 @@ const NET_EXPR: ExprDialect = {
   get: (o, k) => `RoseTheme.Get(${o}, "${k}")`,
   count: (e) => `RoseKit.Count(${e})`,
   bool: (e) => `RoseTheme.Bool(${e})`,
-  merge: (b, p) => `RoseTheme.Merge(${b}, ${p})`,
+  merge: (b, p) => `RoseTheme.MergeMap(${b}, ${p})`,
   obj: (pairs) => `RoseTheme.Obj(${pairs.map(([k, v]) => `("${k}", ${v})`).join(', ')})`,
   // An anonymous method, not a lambda: the refusal list tests the JS arrow,
   // and a C# lambda would trip it on the target's own syntax.
