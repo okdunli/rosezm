@@ -43,12 +43,21 @@ let packOut = '';
 pack.stdout.on('data', (c) => { packOut += c; });
 const packedInfo = await new Promise((resolve) => pack.on('close', (code) => {
   try {
+    // The prepack script prints its own progress on stdout, so the JSON answer
+    // is the last array in the stream, not the whole of it.
+    const from = packOut.lastIndexOf('\n[');
+    const json = from >= 0 ? packOut.slice(from + 1) : packOut;
     // npm <= 11 answers an array; npm 12 answers an object keyed by package name.
-    const parsed = JSON.parse(packOut);
+    const parsed = JSON.parse(json);
     resolve(Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0]);
   } catch { resolve(null); }
 }));
 assert(packedInfo && packedInfo.filename, `npm pack produced a tarball (${packOut.trim().slice(0, 120)})`);
+// `npm pack` does NOT run prepublishOnly - only prepack. Without it the tarball
+// ships whatever dist-cli happened to hold, and a sync tool had renamed
+// rosezm.mjs to `rosezm [conflicted 3].mjs`: the published bin then pointed at a
+// file that did not exist and the installed CLI could not start at all.
+assert(JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).scripts.prepack, 'package.json runs the bundle step on pack, not only on publish');
 const tgz = packedInfo.filename;
 
 const packed = packedInfo.files.map((f) => f.path);
