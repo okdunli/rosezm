@@ -13,6 +13,7 @@
     "prepublishOnly": "npm run pack",
     "benchmark": "tsx tests/benchmark.ts",
     "test": "tsx src/cli/index.ts build example && tsx tests/test-client.ts",
+    "test:all": "node tests/test-all.mjs",
     "test:cli": "node tests/test-cli.mjs",
     "test:e2e": "tsx tests/test-e2e.ts",
     "test:als": "node tests/test-dev-als.mjs",

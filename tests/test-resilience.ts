@@ -19,7 +19,7 @@
  * Run: npm run test:resilience   (tsx only - no go toolchain, no build)
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { Agent, createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -99,7 +99,15 @@ const wireClone = (port: number, agent: Agent, pathname: string, tally: { attemp
 
 // The real test-go.mjs, sabotaged: empty temp cwd => its `go build` cannot
 // succeed, but only AFTER the probe plant (plant precedes go build in it).
-{
+// Without Go the suite skips before planting anything, so there is nothing to
+// leak and nothing to prove: say so instead of asserting on a run that never
+// happened.
+const hasGo = (() => {
+  try { return spawnSync('go', ['version'], { stdio: 'ignore', timeout: 20_000 }).status === 0; } catch { return false; }
+})();
+if (!hasGo) {
+  console.log('SKIPPED: the test:go leak probe - go is not on PATH');
+} else {
   const tmp = mkdtempSync(join(tmpdir(), 'rosezm-resilience-'));
   const script = resolve('tests/test-go.mjs');
   const child = spawn(process.execPath, [script], { cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'] });
