@@ -2463,6 +2463,26 @@ async function exportCmd(): Promise<void> {
     console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--json]');
     return;
   }
+  // `export surface` prints what a vendored consumer may key on: the module
+  // exports, the CLI verbs and every target's kit, plus one hash over the lot.
+  // A gate that pins THIS survives upstream churn (BUG.md AP) - the bytes of a
+  // live-synced tree move without the surface moving.
+  if (target === 'surface') {
+    const { publicSurface } = await import('../export/surface.js');
+    const surface = await publicSurface(version());
+    if (asJson) {
+      process.stdout.write(`${JSON.stringify({ ok: true, ...surface })}\n`);
+      return;
+    }
+    console.log(`rosezm ${surface.version} public surface - sha256 ${surface.hash}`);
+    for (const [name, names] of Object.entries(surface.modules)) console.log(`  ${name.padEnd(10)} ${names.length} exports`);
+    console.log(`  ${'cli'.padEnd(10)} ${surface.cli.join(' ')}`);
+    for (const [name, info] of Object.entries(surface.targets)) {
+      const kit = info.kit ? `${info.kit}${info.helper ? ` (${info.helper})` : ''}` : '(embeds the site)';
+      console.log(`  ${name.padEnd(10)} ${kit}${info.capabilities.length ? ` - ${info.capabilities.length} capabilities` : ''}`);
+    }
+    return;
+  }
   // `export all` compiles every ready target into one tree - the one command that
   // shows the whole matrix, and the one CI would call.
   if (target === 'all') {
@@ -2629,4 +2649,4 @@ else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud]` compiles the same pages to 5 mini programs, 4 native mobile targets and 8 desktop/server runtimes - 17 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');

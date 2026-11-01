@@ -3180,6 +3180,34 @@ assert(allManifest.targets.length === 17 && allManifest.targets.every((t) => typ
 const human = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(human.out.includes('warning(s) -') && human.out.includes('kind(s)'), 'the human exporter groups its warnings by kind instead of dumping 40 lines');
 
+// BUG.md AP: a vendored copy of this tree sits on a live sync, so a gate that
+// compares BYTES flaps. `rosezm export surface` is the thing a gate can pin
+// instead: the module exports, the CLI verbs, and every target's kit.
+const surfHuman = await run(['export', 'surface'], REPO);
+assert(surfHuman.code === 0 && surfHuman.out.includes('public surface') && surfHuman.out.includes('kit/RoseKit.kt'), 'export surface names every target kit in its human output');
+const surfJson = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
+assert(surfJson.ok === true && /^[0-9a-f]{64}$/.test(surfJson.hash), 'the surface hash is a sha256 over the canonical manifest');
+assert(surfJson.modules.runtime.includes('state') && surfJson.modules.export.includes('exportProject') && surfJson.modules.edge.includes('createEdgeHandler'), 'the manifest carries the real named exports of every entry point');
+assert(Object.keys(surfJson.targets).length === 17 && surfJson.targets.weapp.kit === 'utils/rosezm.js', 'every export target is in the manifest with the kit file it writes');
+const surfAgain = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
+assert(surfAgain.hash === surfJson.hash, 'the hash is canonical - two reads of an unchanged tree agree (no timestamps, no paths)');
+// The manifest cannot drift from the emitters: every kit path it names is a
+// path that target actually writes, and every verb it lists is dispatched.
+const EMITTER_OF = {
+  weapp: 'miniprogram', qq: 'miniprogram', alipay: 'miniprogram', baidu: 'miniprogram', toutiao: 'miniprogram',
+  flutter: 'dart', xcode: 'swift',
+};
+for (const [name, info] of Object.entries(surfJson.targets)) {
+  if (!info.kit) continue;
+  const emitter = fs.readFileSync(path.join(REPO, 'src', 'export', `${EMITTER_OF[name] || name}.ts`), 'utf8');
+  const leaf = info.kit.split('/').pop();
+  assert(emitter.includes(leaf), `the surface names ${info.kit} for ${name}, and that emitter writes it`);
+}
+const cliSource = fs.readFileSync(path.join(REPO, 'src', 'cli', 'index.ts'), 'utf8');
+for (const verb of surfJson.cli) {
+  assert(cliSource.includes(`cmd === '${verb}'`), `the surface lists the ${verb} verb and the dispatch answers it`);
+}
+
 await rmTreeStable(tmp);
 // R112 (BUG AK): source hygiene - a debug probe that landed in src/ once
 // shipped as a hard syntax error (a heredoc escape split a single-quoted
