@@ -307,6 +307,14 @@ include(":app")
 android.useAndroidX=true
 kotlin.code.style=official
 `, 'utf8');
+  // R8 needs the file to exist the moment it is named in proguardFiles; an
+  // empty one with a note is what a fresh Studio project ships too.
+  await fs.promises.writeFile(path.join(out, 'app', 'proguard-rules.pro'), [
+    '# Keep rules for the release build. R8 already keeps what the app calls;',
+    '# Compose, Coil and org.json ship their own consumer rules, so this file is',
+    '# empty until a project adds something it reaches by reflection.',
+    '',
+  ].join('\n'), 'utf8');
   await fs.promises.writeFile(path.join(out, 'app', 'build.gradle.kts'), `plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -347,6 +355,18 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    buildTypes {
+        release {
+            // A store build is not a debug build: R8 strips what the app does
+            // not call and the resources shrink with it. Compose, Coil and
+            // org.json ship their own consumer rules, so nothing extra is
+            // needed here - the file exists so a project can add its own.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
     }
 }
 

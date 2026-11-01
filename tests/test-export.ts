@@ -1333,6 +1333,10 @@ try {
   // build time (the exported base is the fallback), and the kit reads it -
   // ROSEZM_API=https://... ./gradlew assembleRelease re-points the app.
   assert(kread('app/build.gradle.kts').includes('buildConfigField("String", "ROSEZM_API"') && kread('app/build.gradle.kts').includes('System.getenv("ROSEZM_API")') && kread('app/build.gradle.kts').includes('buildConfig = true'), 'the gradle fills ROSEZM_API from the environment with the baked base as fallback');
+  // A store build is not a debug build. Without a release block R8 never ran
+  // and `assembleRelease` shipped a 17 MB unsigned-unshrunk APK.
+  assert(kread('app/build.gradle.kts').includes('isMinifyEnabled = true') && kread('app/build.gradle.kts').includes('isShrinkResources = true') && kread('app/build.gradle.kts').includes('proguard-android-optimize.txt'), 'the exported gradle ships a shrinking release build');
+  assert(existsSync(join(kdir, 'app', 'proguard-rules.pro')), 'the release build has the rules file R8 expects');
   assert(kread('app/src/main/java/dev/rosezm/app/kit/RoseKit.kt').includes('val ROSE_API_BASE: String = BuildConfig.ROSEZM_API'), 'the kit reads the base through BuildConfig');
   assert(kread('README.md').includes('ROSEZM_API=https://staging.example.com'), 'the Android README names the per-build override');
   assert(kread('app/src/main/res/values/themes.xml').includes('android:windowBackground') && !kread('app/src/main/res/values/themes.xml').includes('<style name="Theme.rosezm" parent="android:Theme.Material.Light.NoActionBar" />'), 'android: the launch window is painted the app colour, not a bare default');
