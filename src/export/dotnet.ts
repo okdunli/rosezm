@@ -2637,6 +2637,12 @@ function renderCsproj(app: AppIdentity): string {
     <AssemblyName>${app.slug}</AssemblyName>
     <Version>${app.version}</Version>
     <Product>${xmlEscape(app.name)}</Product>
+    <!-- Release is a shippable app, not a build folder: one self-contained
+         file next to the Assets, ready to copy or zip. Debug stays multi-file
+         for its incremental build speed. -->
+    <PublishSingleFile Condition="'\$(Configuration)' == 'Release'">true</PublishSingleFile>
+    <SelfContained Condition="'\$(Configuration)' == 'Release'">false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>

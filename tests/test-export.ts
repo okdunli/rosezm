@@ -556,6 +556,13 @@ try {
       const db = spawnSync('dotnet', ['build', '-p:EnableWindowsTargeting=true', '-v', 'q'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
       const errs = (db.stdout ?? '').split('\n').filter((l) => l.includes('error')).slice(0, 3).join(' / ');
       assert(db.status === 0, `dotnet: the exported WPF tree builds${db.status === 0 ? '' : ': ' + errs}`);
+      // A release profile that publishes one self-contained-ready file: the
+      // csproj carries it, and this dotnet (whatever platform) can prove the
+      // profile holds.
+      const csproj = readFileSync(join(dr.outDir, 'rosezmApp.csproj'), 'utf8');
+      assert(csproj.includes('PublishSingleFile') && csproj.includes("'$(Configuration)' == 'Release'"), 'dotnet: release publishes as a single file');
+      const pub = spawnSync('dotnet', ['publish', '-c', 'Release', '-r', 'osx-arm64', '-p:EnableWindowsTargeting=true', '-v', 'q', '--nologo'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
+      assert(pub.status === 0, `dotnet: the release profile publishes${pub.status === 0 ? '' : ': ' + (pub.stdout ?? '').split('\n').filter((l) => l.includes('error')).slice(0, 2).join(' / ')}`);
     }
   }
   // The exported Compose tree must actually BUILD - the Android target was the
