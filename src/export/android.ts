@@ -78,11 +78,21 @@ function ktName(name: string): string {
 /** Rename every renamed identifier in a translated expression. */
 function ktRename(code: string): string {
   if (!ktNames.size) return code;
-  let out = code;
-  for (const [from, to] of ktNames) {
-    out = out.replace(new RegExp(`(?<![.$\w])${from}(?![\w$])`, 'g'), to);
-  }
-  return out;
+  // Never inside a string literal: the page showing the word `open` is text,
+  // not a reference to the state that had to be renamed `open_`.
+  return code.split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/)
+    .map((part, i) => {
+      if (i % 2) return part;
+      let out = part;
+      for (const [from, to] of ktNames) {
+        // `\\w`, not `\w`: in a template literal a lone `\w` is just `w`, so
+        // the word boundaries silently stopped working and `dopen` became
+        // `dopen_`.
+        out = out.replace(new RegExp(`(?<![.$\\w])${from}(?![\\w$])`, 'g'), to);
+      }
+      return out;
+    })
+    .join('');
 }
 /** R474: the drawable name of every public image this export copied, by URL. */
 let androidMedia = new Map<string, string>();
@@ -345,6 +355,9 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     // Remote <img> support: Coil is the standard Compose image loader.
     implementation("io.coil-kt:coil-compose:2.7.0")
+    // The transport icons (Pause) live in the extended set; the core set only
+    // carries a handful. R8 keeps the used ones only.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 ${native.includes('scan-code') ? `    // The scan-code await bridge (AGENTS.md §312): CameraX for the viewfinder,
     // ML Kit for the decoding.
@@ -901,6 +914,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -1026,9 +1041,11 @@ data class RoseStyle(
                 letterSpacing != null || lineHeight != null || underline || strike || align != null ||
                 fontFamilyRes != null || fontFamilyGeneric != null
             if (!any) return null
+            // Compose 1.7's TextStyle takes non-null Color/TextUnit/TextAlign
+            // (the nullable overloads are gone); Unspecified means "inherit".
             return TextStyle(
-            color = color,
-            fontSize = fontSize?.sp,
+            color = color ?: Color.Unspecified,
+            fontSize = fontSize?.sp ?: TextUnit.Unspecified,
             fontWeight = weight,
             fontFamily = fontFamilyRes?.let { FontFamily(Font(it)) }
                 ?: when (fontFamilyGeneric) {
@@ -1038,8 +1055,8 @@ data class RoseStyle(
                     else -> null
                 },
                 fontStyle = if (italic) FontStyle.Italic else null,
-                letterSpacing = letterSpacing?.sp,
-                lineHeight = lineHeight?.sp,
+                letterSpacing = letterSpacing?.sp ?: TextUnit.Unspecified,
+                lineHeight = lineHeight?.sp ?: TextUnit.Unspecified,
                 textDecoration = when {
                     underline && strike -> TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough))
                     underline -> TextDecoration.Underline
@@ -1050,7 +1067,7 @@ data class RoseStyle(
                     "center" -> TextAlign.Center
                     "right" -> TextAlign.End
                     "justify" -> TextAlign.Justify
-                    else -> null
+                    else -> TextAlign.Unspecified
                 },
             )
         }
@@ -1710,13 +1727,17 @@ private fun JSONObject.toMap(): Map<String, Any?> = keys().asSequence().associat
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
+import ${PKG}.BuildConfig
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
-${appGlobalBlock}
 import androidx.compose.ui.text.style.TextDecoration
+${appGlobalBlock}
 ${contentBlock}
 ${scanState ? `
 // The scan-code await bridge (AGENTS.md §312, option 1): the page sets
@@ -1725,7 +1746,6 @@ ${scanState ? `
 var roseScanRequested = mutableStateOf(false)
 val roseScanResult = mutableStateOf<String?>(null)
 ` : ''}
-import androidx.compose.ui.graphics.Color
 ${nativeKit(native)}
 ${scanState ? `
 /// The scanner route the bridge overlays: CameraX feeds the preview, ML Kit
@@ -1896,7 +1916,24 @@ fun <T> roseKv(name: String, compute: () -> T, ttlSeconds: Int): T {
  * names. Without it every {@catch} arm that re-throws referenced a function
  * that did not exist, and the page would not compile at all.
  */
+/** JS truthiness, the one thing Kotlin has no operator for: null, false, 0,
+ *  "" and an empty collection are all falsy. A condition whose shape is not
+ *  already a Boolean goes through here. */
+fun roseTruth(value: Any?): Boolean = when (value) {
+    null -> false
+    is Boolean -> value
+    is Number -> value.toDouble() != 0.0
+    is String -> value.isNotEmpty()
+    is Collection<*> -> value.isNotEmpty()
+    is Map<*, *> -> value.isNotEmpty()
+    else -> true
+}
+
 fun roseThrow(message: Any?): Nothing = throw RuntimeException(message?.toString() ?: "error")
+
+/** An ActionError carries its own status; the local app has no response to
+ *  send, so the status rides the message the boundary renders. */
+fun roseThrow(message: Any?, code: Int): Nothing = throw RuntimeException("[\$code] " + (message?.toString() ?: "error"))
 
 
 /**
@@ -1978,7 +2015,23 @@ fun roseIndex(list: Any?, index: Int): Any? {
  *  null-safely (the field is null until the patch lands). */
 fun roseGet(container: Any?, key: String): Any? = (container as? Map<*, *>)?.get(key)
 
+/** A map literal merged into a value that arrived as Any?: the kit narrows the
+ *  base first, so the spread is the merge the browser does. */
+fun roseMergeMap(base: Any?, more: Map<String, Any?>): Map<String, Any?> =
+    ((base as? Map<*, *>) ?: emptyMap<Any?, Any?>()).mapKeys { it.key.toString() } + more
+
 /** JS Math.round/floor/ceil answer Int, the type pages declare. */
+/** A map read is Any?: roseGet(row, "p") * qty has no Kotlin operator. The
+ *  product stays whole when both sides are whole, so the string it becomes
+ *  reads "15" and not "15.0". */
+fun roseMul(a: Any?, b: Any?): Any {
+    val r = roseNum(a) * roseNum(b)
+    return if (r % 1.0 == 0.0 && r <= Int.MAX_VALUE && r >= Int.MIN_VALUE) r.toInt() else r
+}
+
+fun roseNum(value: Any?): Double = (value as? Number)?.toDouble()
+    ?: value?.toString()?.toDoubleOrNull() ?: 0.0
+
 fun roseRound(value: Any?): Int = kotlin.math.round((value as? Number)?.toDouble() ?: 0.0).toInt()
 fun roseFloor(value: Any?): Int = kotlin.math.floor((value as? Number)?.toDouble() ?: 0.0).toInt()
 fun roseCeil(value: Any?): Int = kotlin.math.ceil((value as? Number)?.toDouble() ?: 0.0).toInt()
@@ -2082,7 +2135,9 @@ private fun roseRequest(url: String, method: String, body: String?, route: Strin
 
 /** Trusted markup renders as markup: the inline HTML subset a content
  *  page uses becomes a styled AnnotatedString, never escaped text. */
-fun roseHtml(html: String): AnnotatedString = buildAnnotatedString {
+fun roseHtml(value: Any?): AnnotatedString = roseHtmlOf(value?.toString() ?: "")
+
+private fun roseHtmlOf(html: String): AnnotatedString = buildAnnotatedString {
     val entities = mapOf(
         "amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\\"", "nbsp" to " ",
     )
@@ -2270,13 +2325,13 @@ ${staticRoutes}
 ${dynamicRoutes}
         else -> IndexPage(onNavigate = navigate, route = route)
     }
-    // The scan-code await bridge (AGENTS.md 312, option 1): the overlay sits
+${scanState ? `    // The scan-code await bridge (AGENTS.md 312, option 1): the overlay sits
     // on top of whatever route is showing; a decoded value lands in
     // roseScanResult and the overlay retires itself.
     if (roseScanRequested.value) {
         RoseScannerRoute(onDone = { code -> roseScanResult.value = code; roseScanRequested.value = false })
     }
-}
+` : ''}}
 `;
 }
 
@@ -2305,8 +2360,15 @@ interface AndroidCtx {
   deferred: Array<{ name: string; hold: number }>;
   /** Script-level consts the {#await} heads may reference. */
   scriptConsts: Map<string, string>;
+  /** {@const} bindings live for the rest of their block, expanded at each read. */
+  constExprs: Map<string, string>;
+  /** {#each} item names: the item type is whatever the list held, so a member
+   *  read goes through the kit's Any?-taking roseGet instead of a map index. */
+  looseBinds: Set<string>;
   /** Inside a component: its declared props, whose edits ride the change callbacks. */
   componentProps: Set<string>;
+  /** A state field's Kotlin type, so a widget writes the value it can hold. */
+  stateTypes?: Map<string, string>;
   /** The forms this page declares and the page's exported action. */
   forms: FormInfo[];
   pageAction: string | null;
@@ -2363,15 +2425,22 @@ function renderPage(
   // A `const posts = ...list('posts')` is not a literal, so moduleBinds skips it;
   // the exporter knows what it expands to and emits it as a typed call.
   const contentBinds = content && serverGlobals.length ? contentBindNames(page.script ?? '') : [];
+  // An arrow-wrapped content read (`const docs = () => __rosezmContent.list()`
+  // ) is a call site, not a value: the shared scan only names direct reads.
+  const arrowBinds = content && serverGlobals.length
+    ? [...(page.script ?? '').matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*(globalThis\s*\.\s*__rosezmContent\s*\.\s*(?:list|get)\s*\([^)]*\))/g)]
+      .map((m) => ({ name: m[1], arrow: m[2] }))
+    : [];
   const binds = [
     ...moduleBinds(pageScript),
     ...contentBinds.map((name) => {
       const decl = new RegExp(`(?:const|let|var)\\s+${name}\\s*(?::[^=;\\n]*)?=`).exec(page.script ?? '');
       const init = decl ? page.script!.slice(decl.index + decl[0].length).split('\n')[0].trim().replace(/;\s*$/, '') : 'null';
-      const rewritten = rewriteContentReads(init, 'roseContentList', 'roseContentGet', '""');
-      const type = kotlinType(rewritten);
-      return { name, init: type === 'List<Any?>' ? rewritten : type === 'Map<String, Any?>' ? mapLiteral(rewritten) : rewritten };
+      // ktLiteral, not the raw rewrite: the content read keeps the page's own
+      // quotes (`list('posts')` is a Kotlin char literal, not a string).
+      return { name, init: ktLiteral(rewriteContentReads(init, 'roseContentList', 'roseContentGet', '""')) };
     }),
+    ...arrowBinds.map((b) => ({ name: b.name, init: `{ ${ktLiteral(rewriteContentReads(b.arrow, 'roseContentList', 'roseContentGet', '""'))} }`, arrow: true })),
   ];
   // The page's form inputs, by the `name` each input declares: a server action
   // reads them with form.get(), so they must ride in the action POST.
@@ -2427,6 +2496,9 @@ function renderPage(
     script: pageScript,
     awaits: [],
     deferred: [],
+    constExprs: new Map(),
+    looseBinds: new Set(),
+    stateTypes: new Map(facts.state.map((s) => [s.name, kotlinType(initialOf(pageScript, s.name))])),
     scriptConsts: scriptConstsFor(pageScript, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data])),
     componentProps: new Set(),
     forms: collectForms(page.nodes),
@@ -2445,9 +2517,18 @@ function renderPage(
   };
   emitNodes(page.nodes, ctx);
   const layout = ctx.lines.join('\n');
-  // A page that resolves a style at runtime (a class bound to state) imports
-  // exactly the kit functions it calls - the static path needs none of them.
-  const styleImports = [...new Set([...layout.matchAll(/\b(roseBox|roseTextStyle|roseResolve|roseInlineOf|roseRich|RoseRun|roseMerge|roseAssetUrl)\b/g)].map((m) => m[1]))]
+  // A page imports exactly the kit symbols its own body calls. The kit is
+  // almost the only thing in the app with a `rose`/`Rose` prefix (a project's
+  // own component may be called `RoseCard`), so the component names are
+  // excluded and one fixed regex list stopped going stale.
+  const local = new Set([
+    ...ctx.stateNames,
+    ...ctx.mapBinds,
+    ...(ctx.scriptConsts?.keys() ?? []),
+    ...components.flatMap((c) => [c.cls, compAlias(c.cls)]),
+  ]);
+  const styleImports = [...new Set([...layout.matchAll(/\b((?:rose|Rose)[A-Z]\w*)\b/g)].map((m) => m[1]))]
+    .filter((f) => !local.has(f) && f !== 'roseDarkState')
     .map((f) => `import ${PKG}.kit.${f}`).join('\n');
   // R416: Coil is imported only by a page that actually renders a remote image.
   const remoteImg = /\bAsyncImage\(/.test(layout);
@@ -2468,8 +2549,14 @@ function renderPage(
     // A module const's type comes from its literal shape: an array (a content
     // collection, say) must be a List or `posts[0]` will not compile. A baked
     // content read already carries its type in `init`.
-    const t = b.init.startsWith('roseContentList(') ? 'List<Any?>' : b.init.startsWith('roseContentGet(') ? 'Map<String, Any?>?' : kotlinType(b.init);
-    const value = t === 'List<Any?>' ? b.init : t === 'Map<String, Any?>' ? mapLiteral(b.init) : typedLiteral(b.init);
+    // A content read answers null for an unknown slug; the page then reads an
+    // empty map instead of every member access needing a `?.`.
+    const t = b.init.startsWith('roseContentList(') ? 'List<Any?>' : b.init.startsWith('roseContentGet(') ? 'Map<String, Any?>' : kotlinType(b.init);
+    const value = t === 'List<Any?>' ? b.init
+      : b.init.startsWith('roseContentGet(') ? `(${b.init} ?: emptyMap<String, Any?>())`
+      : typedLiteral(b.init);
+    // A lambda keeps its inferred type: `: Any? = { ... }` could not be called.
+    if ((b as { arrow?: boolean }).arrow) return `    val ${ktName(b.name)} = ${b.init}`;
     return `    val ${ktName(b.name)}: ${t} = ${value}`;
   }).join('\n');
   // SharedPreferences, read once per composition; only emitted when a page
@@ -2485,8 +2572,18 @@ function renderPage(
   // A kv field has no server to compute it here, so the page seeds it from its
   // own compute expression, memoized for the declared TTL.
   const kvDecls = kvDeclarations(pageScript ?? '').filter((k) => new Set([...facts.state.map((s) => s.name), ...facts.data]).has(k.name));
-  const kvSeedLines = kvDecls.map((k) => `    ${k.name} = roseKv(${JSON.stringify(k.name)}, { ${kvCallable(k.fn)} }, ${k.ttl})`).join('\n');
+  const kvSeedLines = kvDecls.map((k) => {
+    const call = kvCallable(k.fn)
+      .replace(/\(\s*\(\s*\)\s*=>\s*([\s\S]*?)\s*\)\s*\(\s*\)/g, '($1)')
+      .replace(/\bDate\s*\.\s*now\s*\(\s*\)/g, 'System.currentTimeMillis()');
+    return `    ${k.name} = roseKv(${JSON.stringify(k.name)}, { ${ktArrays(call)} }, ${k.ttl})`;
+  }).join('\n');
+  // A named input with no `$state` behind it still needs a field: the form
+  // channel reads it by that name, and Compose has nowhere else to keep it.
+  const declared = new Set([...facts.state.map((s) => s.name), ...facts.data, ...facts.derived.map((d) => d.name), ...knownBinds]);
+  const implicit = [...new Set(formFields)].filter((f) => !declared.has(f));
   const stateFields = [
+    ...implicit.map((f) => `    var ${ktName(f)} by remember { mutableStateOf<String>("") }`),
     ...facts.state.map((s) => {
       const init = initOf(s.name);
       const type = kotlinType(init);
@@ -2535,8 +2632,8 @@ function renderPage(
   // The route params arrive from rosezmApp's NavHost, which extracts them from
   // the path with a regex and passes them into the page (see renderApp). A page
   // must not re-seed them.
-  const compImports = [...new Set(components.map((c) => `import ${PKG}.components.${c.cls}`))].join('\n');
-  return `// R223: FlowRow (a wrapping flex row) is still experimental in the pinned
+  const compImports = [...new Set(components.map((c) => `import ${PKG}.components.${c.cls}${compAlias(c.cls) === c.cls ? '' : ` as ${compAlias(c.cls)}`}`))].join('\n');
+  return withKitImports(`// R223: FlowRow (a wrapping flex row) is still experimental in the pinned
 // Compose BOM; opting the file in is the documented way to use it.
 ${pull ? '@file:OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)' : '@file:OptIn(ExperimentalLayoutApi::class)'}
 
@@ -2571,12 +2668,13 @@ import ${PKG}.R
 ${remoteImg ? 'import coil.compose.AsyncImage\n' : ''}${remoteImg || useScale ? 'import androidx.compose.ui.layout.ContentScale\n' : ''}import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-${useAsyncPainter ? 'import coil.compose.rememberAsyncImagePainter\n' : ''}${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${useFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}import androidx.compose.ui.unit.dp
+${/FontStyle\./.test(layout) ? 'import androidx.compose.ui.text.font.FontStyle\n' : ''}${/KeyboardOptions\(/.test(layout) ? 'import androidx.compose.foundation.text.KeyboardOptions\nimport androidx.compose.ui.text.input.KeyboardType\n' : ''}${useAsyncPainter ? 'import coil.compose.rememberAsyncImagePainter\n' : ''}${useAudio ? 'import androidx.compose.material.icons.Icons\nimport androidx.compose.material.icons.filled.Pause\nimport androidx.compose.material.icons.filled.PlayArrow\n' : ''}${useFocusReq ? 'import androidx.compose.ui.focus.FocusRequester\nimport androidx.compose.ui.focus.focusRequester\n' : ''}${/\bAndroidView\(/.test(layout) ? 'import androidx.compose.ui.viewinterop.AndroidView\n' : ''}import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ${PKG}.kit.roseData
 import ${PKG}.kit.roseAction
+import ${PKG}.kit.roseDarkState
 ${styleImports ? styleImports + '\n' : ''}${nativeImport ? nativeImport + '\n' : ''}import kotlinx.coroutines.launch
-${compImports}
+${ctx.deferred.length ? 'import kotlinx.coroutines.delay\n' : ''}${compImports}
 
 @Composable
 fun ${page.cls}Page(onNavigate: (String) -> Unit, route: String = ${JSON.stringify('')}, params: Map<String, String> = emptyMap()) {
@@ -2587,6 +2685,9 @@ fun ${page.cls}Page(onNavigate: (String) -> Unit, route: String = ${JSON.stringi
     if (roseDarkState.value != __roseDark) roseDarkState.value = __roseDark
     var __loaded by remember { mutableStateOf(false) }
 ${ctx.deferred.map((d) => `    var ${d.name} by remember { mutableStateOf(false) }`).join('\n')}
+${ctx.awaits.map((a) => `    var ${a.value} by remember { mutableStateOf<Any?>(null) }
+    var ${a.done} by remember { mutableStateOf(false) }
+    var ${a.err} by remember { mutableStateOf<String?>(null) }`).join('\n')}
 ${hoverDecls}
 ${focusDecls}
 ${activeDecls}
@@ -2616,8 +2717,8 @@ ${ctx.awaits.map((a, i) => `
             ${a.done} = true
         }
     }`).join('')}
-${handlers}
 ${formFieldsHelper}
+${handlers}
 ${pull ? `
     val __pullRefresh: suspend () -> Unit = {
         val patch = roseAction(if (route.isEmpty()) ${JSON.stringify(page.route)} else route, "onPullDownRefresh")
@@ -2648,7 +2749,20 @@ ${layout}
     }
 ${pull ? '    }' : ''}
 }
-`;
+`, local);
+}
+
+/** Every `rose*`/`Rose*` the finished file names gets its kit import, except
+ *  the one the prologue already carries and any local of the same name. The
+ *  per-section scan missed the script half (a `roseContentList` seed had no
+ *  import), so the file itself is the source of truth. */
+function withKitImports(file: string, local: Set<string>): string {
+  const have = new Set([...file.matchAll(/^import [\w.]*\.kit\.(\w+)$/gm)].map((m) => m[1]));
+  const want = [...new Set([...file.matchAll(/\b((?:rose|Rose)[A-Z]\w*)\b/g)].map((m) => m[1]))]
+    .filter((n) => !have.has(n) && !local.has(n) && n !== 'roseDarkState');
+  if (!want.length) return file;
+  const lines = want.map((n) => `import ${PKG}.kit.${n}`).join('\n');
+  return file.replace(/\n(?=\n@Composable)/, `\n${lines}\n`);
 }
 
 /** A literal typed for the state's inferred Kotlin type (explicit generics). */
@@ -2732,9 +2846,76 @@ function mapLiteral(src: string): string {
   return `mapOf(${pairs.join(', ')})`;
 }
 
+/** A JS array literal in expression position is Kotlin's `listOf(...)`; a `[`
+ *  that follows a value is an index (`xs[0]`) and is left alone. Decided by the
+ *  one character before it, with the keywords whose tail is a letter (`return`,
+ *  `typeof`, ...) read as positions, not values. */
+function ktArrays(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === ch) { j++; break; }
+        j++;
+      }
+      out += src.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === '[') {
+      const tail = src.slice(0, i).slice(src.slice(0, i).lastIndexOf('\n') + 1).trimEnd();
+      const index = !/\b(?:return|typeof|new|await|yield|void|in|of|case|else|throw)\s*$/.test(tail) && /[\w$)\]}"'`]$/.test(tail);
+      const close = matchParen(src, i);
+      if (close > i && !index) {
+        const items = splitTopLevel(src.slice(i + 1, close)).filter((s) => s.trim());
+        out += items.length ? `listOf(${items.map((s) => ktArrays(s)).join(', ')})` : 'emptyList<Any?>()';
+        i = close + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/** `(X)`, parens around the whole value, is that same value. The shared
+ *  `$store` rewrite wraps its payload, and a wrapped seed used to read as
+ *  `Any?` and emit its raw JS brackets (`['a']`) into Kotlin. */
+function unparen(src: string): string {
+  let t = src.trim();
+  while (t.startsWith('(')) {
+    let depth = 0;
+    let quote = '';
+    let end = -1;
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (quote) {
+        if (ch === '\\') i++;
+        else if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    const inner = t.slice(1, -1).trim();
+    if (end !== t.length - 1 || !inner) break;
+    t = inner;
+  }
+  return t;
+}
+
 function ktLiteral(src: string): string {
   if (!src.trim()) return 'null';
-  let out = src.trim();
+  let out = unparen(src);
   out = out.replace(/\$(?:query|store|kv|cookies|actionError|actionPending|sessionCookie)\s*\([^)]*\)(?:\s*\.\s*[A-Za-z_$][\w$]*)?/g, 'null');
   out = out.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   // A module bind is a Map read: store.likes -> store["likes"]. The shared
@@ -2749,7 +2930,11 @@ function ktLiteral(src: string): string {
   out = out.replace(/\[\s*\]/g, 'emptyList<Any?>()');
   out = out.replace(/^\[\s*([\s\S]*?)\s*\]$/, (_m, inner: string) => `listOf(${splitTopLevel(inner).map((x) => ktLiteral(x)).join(', ')})`);
   if (/^\{/.test(out)) return typedMapLiteral(out);
-  return out;
+  // A seed can be an expression, not a literal: `params.q ?? ''` arrives as a
+  // ternary with JS quotes, which is not Kotlin in either half.
+  out = out.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
+  out = out.replace(/\(\s*\(\s*\)\s*=>\s*([\s\S]*?)\s*\)\s*\(\s*\)/g, (_m, expr: string) => `(${expr})`);
+  return ktArrays(ternaryToKotlin(out));
 }
 
 function splitTopLevel(src: string): string[] {
@@ -2777,7 +2962,7 @@ function splitTopLevel(src: string): string[] {
 }
 
 function kotlinType(init: string): string {
-  const t = init.trim();
+  const t = unparen(init);
   if (/^-?\d+$/.test(t)) return 'Int';
   if (/^-?\d*\.\d+$/.test(t)) return 'Double';
   if (/^(true|false)$/.test(t)) return 'Boolean';
@@ -2816,6 +3001,10 @@ function emitNodes(nodes: IrNode[], ctx: AndroidCtx): void {
     if (text) emit(`Text(${text})`, ctx);
     run.length = 0;
   };
+  // {@const} is scoped to its block: the parent's bindings are visible inside,
+  // and a name the block introduces is gone again when the block ends.
+  const outer = ctx.constExprs;
+  ctx.constExprs = new Map(outer);
   for (const node of nodes) {
     if (node.kind === 'text' || node.kind === 'expr') {
       run.push(node);
@@ -2825,6 +3014,7 @@ function emitNodes(nodes: IrNode[], ctx: AndroidCtx): void {
     emitNode(node, ctx);
   }
   flush();
+  ctx.constExprs = outer;
 }
 
 /** Inline formatting tags that may flow inside a text tag. */
@@ -2870,6 +3060,13 @@ function textOf(nodes: IrNode[], ctx: AndroidCtx, trim = true): string {
   }
   if (trim && !nodes.some((n) => n.kind === 'text' && n.preserve)) out = out.trim();
   if (!out) return '';
+  // One expression and nothing else: a template literal translates to a Kotlin
+  // string of its own, and `"${"Hi $n"}"` nests the quotes. Anything else keeps
+  // the interpolation, which is what turns a number into text.
+  if (nodes.length === 1 && nodes[0].kind === 'expr') {
+    const direct = ktExpr(nodes[0].code, ctx);
+    if (/^"/.test(direct)) return direct;
+  }
   return '"' + out + '"';
 }
 
@@ -2888,6 +3085,9 @@ function emitNode(node: IrNode, ctx: AndroidCtx): void {
       emit(`Text(roseHtml(${ktExpr(node.code, ctx)}))`, ctx);
       return;
     case 'const':
+      // {@const} binds for the rest of the block: the expression is expanded at
+      // each read (it used to be dropped, so every read was an undeclared name).
+      ctx.constExprs.set(node.name, ktExpr(node.code, ctx));
       return;
     case 'render':
       ctx.warnings.push(`android: {@render ${node.code}} is not expanded yet - renders nothing`);
@@ -2898,7 +3098,7 @@ function emitNode(node: IrNode, ctx: AndroidCtx): void {
       return;
     case 'if': {
       node.branches.forEach((branch, idx) => {
-        emit(idx === 0 ? `if (${ktExpr(branch.cond ?? 'false', ctx)}) {` : branch.cond === null ? '} else {' : `} else if (${ktExpr(branch.cond, ctx)}) {`, ctx);
+        emit(idx === 0 ? `if (${ktCond(ktExpr(branch.cond ?? 'false', ctx))}) {` : branch.cond === null ? '} else {' : `} else if (${ktCond(ktExpr(branch.cond, ctx))}) {`, ctx);
         ctx.depth++;
         emitNodes(branch.children, ctx);
         ctx.depth--;
@@ -2908,10 +3108,21 @@ function emitNode(node: IrNode, ctx: AndroidCtx): void {
     }
     case 'each': {
       const list = ktExpr(node.items, ctx);
-      emit(`${list}.forEach { ${node.binding} ->`, ctx);
+      // The list is whatever the field holds - Compose has no type for it, so
+      // the cast makes the loop legal and the item stays Any?.
+      emit(`((${list}) as? List<*>)?.forEach { ${node.binding} ->`, ctx);
       ctx.depth++;
-      const scoped: AndroidCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, node.binding]) };
-      emitNodes(node.children, scoped);
+      // The item shadows every outer name inside its body - including a
+      // {@const} of the same name, which must not expand to the outer value.
+      const scoped = new Map(ctx.constExprs);
+      scoped.delete(node.binding);
+      const scopedCtx: AndroidCtx = {
+        ...ctx,
+        mapBinds: new Set(ctx.mapBinds),
+        constExprs: scoped,
+        looseBinds: new Set([...ctx.looseBinds, node.binding]),
+      };
+      emitNodes(node.children, scopedCtx);
       ctx.depth--;
       emit('}', ctx);
       return;
@@ -2968,26 +3179,11 @@ function emitNode(node: IrNode, ctx: AndroidCtx): void {
         return;
       }
       if (node.name === 'boundary') {
-        // The web degrades a throwing section to the fallback text; a
-        // device build has no error boundary, so the subtree runs in a
-        // try and the catch arm renders the same honest text.
-        const start = ctx.lines.length;
-        const depth0 = ctx.depth;
-        ctx.depth = depth0 + 1;
+        // Compose forbids try/catch around composable invocations, so the
+        // section renders unguarded here; a throw is the platform's error
+        // screen, not the web's in-place fallback.
+        ctx.warnings.push(`android: {#boundary} cannot catch on Compose - the section renders unguarded`);
         emitNodes(node.children, ctx);
-        const body = ctx.lines.splice(start);
-        ctx.depth = depth0;
-        emit('try {', ctx);
-        ctx.lines.push(...body);
-        emit('} catch (e: Exception) {', ctx);
-        if (node.fallback) {
-          ctx.depth = depth0 + 1;
-          emitNodes(node.fallback, ctx);
-          ctx.depth = depth0;
-        } else {
-          emit(`Text("This section failed to render.")`, ctx);
-        }
-        emit('}', ctx);
         return;
       }
       emitNodes(node.children, ctx);
@@ -3058,14 +3254,24 @@ function emitElementStyled(
     // implicit change callback writing the parent's state back; the bind
     // replaces the prop's default entry (no duplicate named argument).
     const binds = callSiteBinds(node);
+    // The prop's default says its type; a passed value that is wider than that
+    // (an {#each} item, a $data field) is narrowed at the call site.
+    const coerceProp = (decl: { name: string; init: string }, expr: string): string => {
+      const t = kotlinType(decl.init);
+      if (t === 'String' && !/^"/.test(expr)) return `(${expr}).toString()`;
+      if (t === 'Boolean' && !/^(?:true|false)$/.test(expr)) return `((${expr}) as? Boolean) ?: false`;
+      if (t === 'Int' && !/^-?\d+$/.test(expr)) return `((${expr}) as? Number)?.toInt() ?: 0`;
+      return expr;
+    };
     const args = declared
       .filter((p) => !binds.has(p.name))
       .map((p) => {
         const attr = given.find((a) => a.name === p.name);
-        return `${p.name} = ${attr ? ktLiteral(attrOf(attr, ctx)) : ktLiteral(p.init)}`;
+        return `${p.name} = ${coerceProp(p, attr ? ktLiteral(attrOf(attr, ctx)) : ktLiteral(p.init))}`;
       }).join(', ');
+    const declOf = (name: string) => declared.find((d) => d.name === name) ?? { name, init: 'null' };
     const bindArgs = [...binds.entries()].map(([prop, state]) =>
-      `${prop} = ${ktExpr(state, ctx)}, ${propChangeHandler(prop)} = { v -> ${state} = v }`);
+      `${prop} = ${coerceProp(declOf(prop), ktExpr(state, ctx))}, ${propChangeHandler(prop)} = { v -> ${state} = v }`);
     // Slots (the web contract): the default children and every `slot="x"`
     // child become composable lambda arguments; a named slot's scoped props
     // arrive through the lambda's props map.
@@ -3086,11 +3292,11 @@ function emitElementStyled(
     const inner = '    '.repeat(ctx.depth + 1);
     if (!slotArgs.length) {
       const single = [args, ...bindArgs].filter(Boolean).join(', ');
-      emit(`${comp.cls}(${single})`, ctx);
+      emit(`${compAlias(comp.cls)}(${single})`, ctx);
       return;
     }
     const all = [args, ...slotArgs].filter(Boolean).join(',\n').split('\n').map((l) => inner + l).join('\n');
-    emit(`${comp.cls}(\n${all}\n${'    '.repeat(ctx.depth)})`, ctx);
+    emit(`${compAlias(comp.cls)}(\n${all}\n${'    '.repeat(ctx.depth)})`, ctx);
     return;
   }
   if (TEXT_TAGS.has(tag) && node.children.some((c) => c.kind === 'element' && ANDROID_INLINE.has(c.tag.toLowerCase()))) {
@@ -3262,19 +3468,22 @@ function emitElementStyled(
     const bindGroup = node.attrs.find((a) => a.name === 'bind:group');
     const bindValue = node.attrs.find((a) => a.name === 'bind:value');
     const stateOf = (attr: typeof bindValue): string => (attr && attr.value.kind === 'expr' && ctx.stateNames.has(attr.value.code.trim()) ? attr.value.code.trim() : '');
+    // A component's prop is a val: the write goes back through its change
+    // callback, not through an assignment.
+    const writeTo = (name: string, v: string): string => (ctx.componentProps.has(name) ? `${propChangeHandler(name)}(${v})` : `${name} = ${v}`);
     const valueAttr = node.attrs.find((a) => a.name === 'value');
     const optionValue = valueAttr ? (valueAttr.value.kind === 'text' ? JSON.stringify(valueAttr.value.text) : attrOf(valueAttr, ctx)) : '"true"';
     if (type === 'checkbox') {
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
-      if (group) emit(`Checkbox(checked = (${group} as? List<*>)?.contains(${optionValue}) == true, onCheckedChange = { on -> ${group} = (((${group} as? List<*>) ?: emptyList<Any?>()).toMutableList().also { if (on) it.add(${optionValue}) else it.remove(${optionValue}) }) })`, ctx);
-      else if (checked) emit(`Checkbox(checked = ${checked}, onCheckedChange = { ${checked} = it })`, ctx);
+      if (group) emit(`Checkbox(checked = (${group} as? List<*>)?.contains(${optionValue}) == true, onCheckedChange = { on -> ${writeTo(group, `((${group} as? List<*>) ?: emptyList<Any?>()).toMutableList().also { if (on) it.add(${optionValue}) else it.remove(${optionValue}) }`)} })`, ctx);
+      else if (checked) emit(`Checkbox(checked = (${checked} as? Boolean) ?: false, onCheckedChange = { ${writeTo(checked, 'it')} })`, ctx);
       else emit('Checkbox(checked = false, onCheckedChange = null)', ctx);
       return;
     }
     if (type === 'radio') {
       const group = stateOf(bindGroup);
-      if (group) emit(`RadioButton(selected = ${group} == ${optionValue}, onClick = { ${group} = ${optionValue} })`, ctx);
+      if (group) emit(`RadioButton(selected = ${group} == ${optionValue}, onClick = { ${writeTo(group, optionValue)} })`, ctx);
       else emit('RadioButton(selected = false, onClick = null)', ctx);
       return;
     }
@@ -3297,7 +3506,7 @@ function emitElementStyled(
     const clamp = (v: string): string => (maxLen ? `${v}.take(${maxLen})` : v);
     const onChange = propName
       ? `, onValueChange = { v -> ${propChangeHandler(propName)}(${clamp('v')}) }`
-      : (bound ? `, onValueChange = { ${bound} = ${clamp('it')} }` : '');
+      : (bound ? `, onValueChange = { ${bound} = ${clamp(ctx.stateTypes?.get(bound) === 'Int' ? 'it.toIntOrNull() ?: 0' : 'it')} }` : ', onValueChange = {}');
     // A styled input carries its colour/font/border through the same text +
     // box modifiers the link uses, so a class or input {} rule shows instead of
     // a bare system TextField.
@@ -3378,10 +3587,11 @@ function emitElementStyled(
   }
   if (tag === 'button') {
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
-    // Kotlin's lambda arrow is ->, never the JS => this emitter once produced.
-    let handler = click && click.value.kind === 'expr' ? `() -> ${handlerCall(click.value.code.trim(), ctx)}` : '{}';
+    // Kotlin has no `() -> body` lambda form - that is Java's arrow; a lambda
+    // with no parameters is `{ body }` (this emitter once produced invalid Kotlin).
+    let handler = click && click.value.kind === 'expr' ? `{ ${handlerCall(click.value.code.trim(), ctx)} }` : '{}';
     // A submit button in a form with no handler posts to the page's action.
-    if (!click && isSubmitButton(node) && ctx.pageAction) handler = `() -> ${ctx.pageAction}()`;
+    if (!click && isSubmitButton(node) && ctx.pageAction) handler = `{ ${ctx.pageAction}() }`;
     const label = textOf(node.children, ctx) || '""';
     // disabled - static or bound - greys the button and stops the click.
     const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
@@ -3555,7 +3765,8 @@ function registerInlineHandler(code: string, ctx: AndroidCtx): string {
     ctx.inlineBodies.push(`    val ${name}: () -> Unit = { /* rosezm: handler not translated (${ir.reason ?? 'empty'}) */ }`);
     return name;
   }
-  ctx.inlineBodies.push(`    val ${name}: () -> Unit = {\n${ir.stmts.map((s) => `        ${s}`).join('\n')}\n    }`);
+  const stmts = ir.stmts.map((st) => coerceTypedAssignments(st, ctx.stateTypes ?? new Map()));
+  ctx.inlineBodies.push(`    val ${name}: () -> Unit = {\n${stmts.map((st) => `        ${st}`).join('\n')}\n    }`);
   return name;
 }
 
@@ -3598,13 +3809,25 @@ function ktScalarCalls(code: string): string {
 /** A Rose expression in Kotlin/Compose: state reads are the local fields. */
 /** R477: the Kotlin expression, with the keyword rename applied once at the end. */
 function ktExpr(code: string, ctx: AndroidCtx): string {
-  return ktRename(ktExprRaw(code, ctx));
+  let out = ktExprRaw(code, ctx);
+  // One pass, never rescanning what it inserts: a const is already expanded
+  // when it is bound, and a second pass re-expanded it under a later shadow
+  // (`{@const qty = qty() * 1000}` multiplied the same read twice).
+  const consts = [...ctx.constExprs.keys()];
+  if (consts.length) {
+    const re = new RegExp(`(?<![.\\w$])(${consts.map(escapeRe).join('|')})\\b(?!\\s*\\()`, 'g');
+    out = out.replace(re, (m) => `(${ctx.constExprs.get(m) ?? m})`);
+  }
+  return ktArrays(ktRename(out));
 }
 
 function ktExprRaw(code: string, ctx: AndroidCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'roseContentList', 'roseContentGet', '""');
+  // `roseContentGet(slug).title` reads a member of a nullable map - Kotlin needs
+  // the fallback before the index.
+  out = out.replace(/roseContentGet\(([^()]*)\)\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, args: string, key: string) => `(roseContentGet(${args}) ?: emptyMap<String, Any?>())["${key}"]`);
   // `{post().title}` reads the JSON map the data channel delivers: the field is
   // an Any?, so the member chain becomes nested roseGet calls (null-safe) where
   // a raw `post.title` would not compile.
@@ -3619,6 +3842,11 @@ function ktExprRaw(code: string, ctx: AndroidCtx): string {
   // JS String(x), Math.* and toFixed share one pass, so a template and a
   // handler body can never disagree on the spelling.
   out = ktScalarCalls(out);
+  // `(() => EXPR)()` is an immediately-invoked arrow: in Kotlin the call is
+  // just EXPR.
+  out = out.replace(/\(\s*\(\s*\)\s*=>\s*([\s\S]*?)\s*\)\s*\(\s*\)/g, (_m, expr: string) => `(${expr})`);
+  // `Date.now()` has a JVM spelling; there is no Kotlin `Date` object.
+  out = out.replace(/\bDate\s*\.\s*now\s*\(\s*\)/g, 'System.currentTimeMillis()');
   // R275: the four R273 constructs translate BEFORE the `$`-name rewrite - a
   // template literal's `${name}` would be rewritten to `$rosezm_name` and the
   // interpolation would never fire (the probe showed raw backticks surviving
@@ -3634,7 +3862,9 @@ function ktExprRaw(code: string, ctx: AndroidCtx): string {
   // declaration for).
   if (/`/.test(out) || /\?\./.test(out) || /\?\?/.test(out) || /\[\s*(?:'[^']*'|[A-Za-z0-9_.]+)\s*\]/.test(out) || /\.(?:map|filter|reduce|find|some|every|concat|join|split|indexOf|startsWith|endsWith|toUpperCase|toLowerCase)\s*\(/.test(out)) {
     const translated = translateExpr(out, ANDROID_EXPR, new Set());
-    if (translated !== null) return translated;
+    // The IR's answer still needs the shared tail: without it a ternary or a
+    // `+` chain inside the translated text reached the file as raw JS.
+    if (translated !== null) return ktExprTail(translated);
   }
   // R191: a `$derived` read is its own expression, re-evaluated on every read.
   // This runs before the state-read rewrite below, which would otherwise turn
@@ -3656,6 +3886,8 @@ function ktExprRaw(code: string, ctx: AndroidCtx): string {
   // prefixing below, which would otherwise invent a `rosezm_query` that does
   // not exist.
   out = out.replace(/\$query\s*\(\s*\)/g, 'params');
+  // `params.id` is a launch parameter: the map read, not a Kotlin property.
+  out = out.replace(/\bparams\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, key: string) => `params["${key}"]`);
   out = out.replace(/\$([A-Za-z_$][\w$]*)/g, 'rosezm_$1');
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (whole, name: string) => (ctx.stateNames.has(name) ? name : whole));
   // `{name() || 'x'}` is JS truthiness; Kotlin has no truthy String. Rewrite it
@@ -3667,7 +3899,9 @@ function ktExprRaw(code: string, ctx: AndroidCtx): string {
   out = rewriteNullish(out, (left, right) => `${left} ?: ${right}`);
   // `x ? a : b` needs a boolean condition; Kotlin rejects a bare Any?.
   out = rewriteTernaryTruth(out, (operand) => `${operand} != null`, (name) => ctx.stateNames.has(name));
-  out = ctx.mapBinds.size ? rewriteMemberReads(out, (obj, key) => `${obj}["${key}"]`) : out;
+  out = ctx.mapBinds.size || ctx.looseBinds.size
+    ? rewriteMemberReads(out, (obj, key) => (ctx.looseBinds.has(obj) ? `roseGet(${obj}, "${key}")` : `${obj}["${key}"]`))
+    : out;
   out = out.replace(/\bundefined\b/g, 'null');
   // `arr.length` is Kotlin's `arr.size`; a map's ["length"] read is the same
   // idiom spelled as a key.
@@ -3694,15 +3928,137 @@ function ktExprRaw(code: string, ctx: AndroidCtx): string {
       ? call
       : `!${call}.isEmpty()`;
   });
-  out = ternaryToKotlin(out);
-  out = out.replace(/===/g, '==').replace(/!==/g, '!=');
+  return ktExprTail(out);
+}
+
+/** The tail every expression takes, whether or not the IR gate above claimed
+ *  it: coercion, the ternary, and the JS equality spellings. */
+function ktExprTail(out: string): string {
   // Kotlin has no `String + int`: coerce every string-bearing `+` chain so
   // `'Item ' + name + count` runs at runtime instead of failing to compile.
+  // This runs BEFORE the ternary becomes an `if` expression: the shared pass
+  // splits a `? :` chain per arm, but it cannot read `(if (c) a + b else d)` -
+  // it would split the arms on `+` and leave a dangling `else`.
+  // The elvis is masked while the shared pass runs: it reads every `?` as a
+  // ternary, so `a ?: b` came back as an `if` with an empty then-arm.
+  const ELVIS = '\u0001';
+  out = out.replace(/\?\s?:/g, ELVIS);
+  // An untyped operand has no arithmetic operator: a product or a difference
+  // goes through the kit's own number helpers.
+  out = out.replace(/(rose(?:Get|Index)\([^()]*\))\s*\*\s*([A-Za-z0-9_$.]+|\([^()]*\))/g, 'roseMul($1, $2)');
+  out = out.replace(/([A-Za-z0-9_$.]+|\([^()]*\))\s*\*\s*(rose(?:Get|Index)\([^()]*\))/g, 'roseMul($1, $2)');
+  // A list plus a scalar is JS's array concat: Kotlin needs the singleton as a
+  // one-item list, not a string that cannot be added to a List.
+  out = out.replace(/(\([\s\S]*?\bas\s+List<[^>]*>\))\s*\+\s*("[^"]*"|[A-Za-z_$][\w$.]*)/g, '$1 + listOf($2)');
   out = coerceStringConcat(out, (e) => `(${e}).toString()`);
-  return out;
+  out = ternaryToKotlin(out);
+  out = out.replace(new RegExp(ELVIS, 'g'), '?:');
+  return out.replace(/===/g, '==').replace(/!==/g, '!=');
+}
+
+/** The ternary conversion at every bracket level: a `? :` inside a trailing
+ *  lambda body is still a JS ternary, and the depth-0 scan cannot see it. */
+function ternaryDeep(src: string): string {
+  const pairs: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === ch) { j++; break; }
+        j++;
+      }
+      out += src.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (pairs[ch]) {
+      const end = matchParen(src, i);
+      if (end > i) {
+        out += ch + ternaryDeep(src.slice(i + 1, end)) + pairs[ch];
+        i = end + 1;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return ternaryToKotlin(out);
+}
+
+/** A typed state field refuses an Any? write: the value carries the field's own
+ *  conversion, the same one the patch applier uses. */
+function coerceTypedAssignments(text: string, stateTypes: Map<string, string>): string {
+  if (!stateTypes.size) return text;
+  return text.replace(/\b([A-Za-z_$][\w$]*)\s*=(?!=)\s*([^;\n]+)/g, (m, name: string, rhs: string) => {
+    const t = stateTypes.get(name);
+    if (!t) return m;
+    const r = rhs.trim();
+    if (!r) return m;
+    if (t === 'String') return `${name} = (${r}).toString()`;
+    // Only a spread/append goes through List<Any?>: a `.map { }` the page wrote
+    // already answers the field's element type.
+    if (t === 'List<String>' && /as List<Any\?>|listOf\(/.test(r)) return `${name} = (${r}).map { it.toString() }`;
+    if (t === 'List<Map<String, Any?>>') return `${name} = (${r}).mapNotNull { it as? Map<String, Any?> }`;
+    // Numbers and booleans are only narrowed when the value arrives untyped; a
+    // plain `count = count + 1` keeps the arithmetic the page wrote.
+    if (t === 'Int' && /\brose(?:Get|Index|Mul|Num)\(/.test(r)) return `${name} = ((roseNum(${r})).toInt())`;
+    if (t === 'Double' && /\brose(?:Get|Index|Mul|Num)\(/.test(r)) return `${name} = roseNum(${r})`;
+    return m;
+  });
+}
+
+/** A condition Kotlin accepts: anything that is not already a Boolean test is
+ *  JS truthiness, and goes through the kit's roseTruth. */
+function ktCond(cond: string): string {
+  const c = cond.trim();
+  if (!c) return 'false';
+  if (/^(?:true|false)$/.test(c)) return c;
+  const negated = /^!\s*([\s\S]+)$/.exec(c);
+  if (negated) {
+    const inner = negated[1].trim();
+    // `!value` is a negation of truthiness; `!x.isEmpty()` and `!!x` are already
+    // Boolean and Kotlin's own `!!` must survive untouched.
+    if (/^(?:[A-Za-z_$][\w$]*\s*\(|rose[A-Z])/.test(inner) && !/^!/.test(inner)) return `!roseTruth(${inner})`;
+    if (/^(?:true|false)$/.test(inner)) return c;
+    if (/[=<>].*\./.test(inner)) return c;
+    return `!roseTruth(${inner})`;
+  }
+  // Comparison operators only when spaced: `List<*>` is full of angle brackets.
+  if (/(?:===|!==|==|!=|<=|>=)/.test(c) || /\s[<>]=?\s/.test(c) || /&&|\|\|/.test(c)) return c;
+  if (/\.(?:isNotEmpty|isEmpty|contains|startsWith|endsWith|equals)\(/.test(c)) return c;
+  if (/^rose(?:Truth|HasPrefix|HasSuffix|Contains|Every|Any)\(/.test(c)) return c;
+  return `roseTruth(${c})`;
+}
+
+/** The last plain `=` (an assignment, not `==`/`!=`/`<=`/`>=`/`+=`) at bracket
+ *  depth 0 outside strings - the split between a statement and its value. */
+function topLevelAssign(src: string): number {
+  let depth = 0;
+  let quote = '';
+  let at = -1;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === '=' && depth === 0 && src[i + 1] !== '=' && !/[=!<>+\-*/%&|^]$/.test(src.slice(0, i))) at = i;
+  }
+  return at;
 }
 
 function ternaryToKotlin(expr: string): string {
+  // Parens around the whole value hide the `?` from the depth-0 scan.
+  const bare = unparen(expr);
+  if (bare !== expr.trim()) return `(${ternaryToKotlin(bare)})`;
   let q = -1;
   let depth = 0;
   let quote = '';
@@ -3716,10 +4072,25 @@ function ternaryToKotlin(expr: string): string {
     if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
     if (ch === '(' || ch === '[' || ch === '{') depth++;
     else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (ch === '?' && depth === 0) { q = i; break; }
+    // `?:` is Kotlin's own elvis, `?.` its safe call and `as?` its type test -
+    // none of them is a ternary.
+    else if (ch === '?' && depth === 0 && expr[i + 1] !== ':' && expr[i + 1] !== '.' && !/\bas\s*$/.test(expr.slice(0, i))) { q = i; break; }
   }
   if (q < 0) return expr;
-  const cond = expr.slice(0, q).trim();
+  // A statement prefix is not part of the condition: `return a ? b : c` and
+  // `theme = a ? b : c` both used to swallow the whole head into the test.
+  const head = expr.slice(0, q);
+  // A lambda's `->` ends the prefix the same way a statement's `return` does.
+  const arrow = head.lastIndexOf('->');
+  const assign = topLevelAssign(head);
+  if (arrow >= 0 && arrow > assign) return `${head.slice(0, arrow + 2)} ${ternaryToKotlin((head.slice(arrow + 2) + expr.slice(q)).trim())}`;
+  if (assign > 0) return `${expr.slice(0, assign + 1)} ${ternaryToKotlin(expr.slice(assign + 1).trim())}`;
+  const ret = /^(.*\b(?:return|throw)\s+)([\s\S]*)$/.exec(head);
+  if (ret) {
+    const body = head.slice(ret[1].length) + expr.slice(q);
+    return ret[1] + ternaryToKotlin(body.trim());
+  }
+  const cond = head.trim();
   const rest = expr.slice(q + 1);
   let colon = -1;
   depth = 0;
@@ -3735,14 +4106,17 @@ function ternaryToKotlin(expr: string): string {
     if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
     if (ch === '(' || ch === '[' || ch === '{') depth++;
     else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (depth === 0 && ch === '?') nested++;
+    else if (depth === 0 && ch === '?' && rest[i + 1] !== ':' && rest[i + 1] !== '.') nested++;
     else if (depth === 0 && ch === ':') {
       if (nested === 0) { colon = i; break; }
       nested--;
     }
   }
   if (colon < 0) return expr;
-  return `(if (${cond}) ${ternaryToKotlin(rest.slice(0, colon).trim())} else ${ternaryToKotlin(rest.slice(colon + 1).trim())})`;
+  // The arms lose the statement's `;`: inside `(if (c) a else b)` it is a
+  // parse error, not a statement end.
+  const arm = (s: string) => ternaryToKotlin(s.trim().replace(/;\s*$/, ''));
+  return `(if (${ktCond(cond)}) ${arm(rest.slice(0, colon))} else ${arm(rest.slice(colon + 1))})`;
 }
 
 interface StateFacts {
@@ -3865,6 +4239,7 @@ function matchParen(src: string, open: number): number {
 
 /** Script -> Kotlin locals + action lambdas + warned stubs. */
 function translateHandlers(script: string, facts: StateFacts, page: { route: string; cls: string }, knownBinds: Set<string>, warnings: string[], formFields: string[] = []): string {
+  const stateTypes = new Map(facts.state.map((s) => [s.name, kotlinType(initialOf(script, s.name))]));
   if (!script.trim()) return '';
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
   try {
@@ -3890,7 +4265,7 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     const apply = [...facts.state.map((s) => `                ${applyLine(s.name, kotlinType(initialOf(script, s.name)))}`), ...facts.data.map((d) => `                patch["${d}"]?.let { ${d} = it }`)].join('\n');
     lines.push(`    val ${action}: () -> Unit = {
         scope.launch {
-            val patch = roseAction(if (route.isEmpty()) ${JSON.stringify(page.route)} else route, ${JSON.stringify(action)}${formFields.length ? `, __rosezmFormFields(${JSON.stringify(formFields)})` : ''})
+            val patch = roseAction(if (route.isEmpty()) ${JSON.stringify(page.route)} else route, ${JSON.stringify(action)}${formFields.length ? `, __rosezmFormFields(listOf(${formFields.map((f) => JSON.stringify(f)).join(', ')}))` : ''})
             if (patch.isNotEmpty()) {
 ${apply}
             }
@@ -3906,8 +4281,12 @@ ${apply}
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.cls, stateNames, warnings, [...knownBinds]);
-    lines.push(`    val ${name}: () -> Unit = {${body}\n    }`);
+    const params = m[2].split(',').map((x) => x.trim().replace(/:\s\S*$/, '').trim()).filter(Boolean);
+    const body = translateBody(code.slice(open + 1, close), page.cls, stateNames, warnings, [...knownBinds], [...params, ...facts.data], stateTypes);
+    // The parameters ride the lambda: without them `plural(0)` called a
+    // zero-parameter function and every call site was a type error.
+    const sig = params.length ? `${params.map((x) => `${x}: Any?`).join(', ')} -> ` : '';
+    lines.push(`    val ${name} = {${sig}${body}\n    }`);
   }
   return lines.join('\n\n');
 }
@@ -3917,10 +4296,10 @@ ${apply}
 const FAMILY_METHODS = /\.(?:join|split|indexOf|every|startsWith|endsWith|toUpperCase|toLowerCase)\s*\(/;
 
 const ANDROID_EXPR: ExprDialect = {
-  get: (o, k) => `${o}["${k}"]`,
+  get: (o, k) => `roseGet(${o}, "${k}")`,
   count: (e) => `(${e} as List<*>).size`,
   bool: (e) => `${e} as? Boolean ?: false`,
-  merge: (b, p) => `${b} + ${p}`,
+  merge: (b, p) => `roseMergeMap(${b}, ${p})`,
   obj: (pairs) => `mapOf(${pairs.map(([k, v]) => `"${k}" to ${v}`).join(', ')})`,
   map: (l, ps, body) => ps.length > 1
     ? `roseMapIdx(${l}) { ${ps[0]}, ${ps[1]} -> ${body} }`
@@ -4028,11 +4407,11 @@ function rewriteFamilyWrites(body: string, stateNames: string[]): string {
 }
 
 /** R477: a handler body goes through the same keyword rename as an expression. */
-function translateBody(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = []): string {
-  return ktRename(translateBodyRaw(body, file, stateNames, warnings, bindNames));
+function translateBody(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = [], looseNames: string[] = [], stateTypes: Map<string, string> = new Map()): string {
+  return ktArrays(ktRename(translateBodyRaw(body, file, stateNames, warnings, bindNames, looseNames, stateTypes)));
 }
 
-function translateBodyRaw(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = []): string {
+function translateBodyRaw(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = [], looseNames: string[] = [], stateTypes: Map<string, string> = new Map()): string {
   // `throw new Error(x)` / `throw new ActionError(...)` become the kit's roseThrow
   // before the refusal, so a boundary widget (weather) is a real throw, not a stub.
   body = rewriteThrowNew(body);
@@ -4120,6 +4499,10 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], warn
       return setter.length > 3 && stateNames.includes(key) ? key : null;
     },
   );
+  // A translation key is a plain string, the same spelling a template gets:
+  // the kit has no dictionaries, so a `$t` read is the key itself (loud and
+  // greppable) rather than raw JS inside a Kotlin lambda.
+  body = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   const webOnly: Array<[RegExp, string]> = [
     [/\bFormData\(/, 'FormData'],
     [/\bdocument\.|\bwindow\./, 'the DOM'],
@@ -4150,6 +4533,13 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], warn
   out = out.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
   const known = new Set(stateNames);
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (_whole, name: string) => (known.has(name) ? name : _whole));
+  // A function parameter or a $data field is Any?: a member read on it goes
+  // through the kit's roseGet, which takes whatever the value turns out to be.
+  out = coerceTypedAssignments(out, stateTypes);
+  const loose = new Set(looseNames);
+  if (loose.size) {
+    out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g, (m, o: string, k: string) => (loose.has(o) ? `roseGet(${o}, "${k}")` : m));
+  }
   // `{name() || 'x'}` is JS truthiness; Kotlin has no truthy String. A bare
   // identifier qualifies only when it is a state field AND the fallback is a
   // string, so `flag || false` and `count || 0` survive untouched.
@@ -4164,7 +4554,7 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], warn
   out = out.replace(/\$formRead\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => name);
   out = out.replace(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g, 'var $1 =');
   out = rewriteStringTruth(out, (name) => `${name}.isNotEmpty()`);
-  out = ternaryToKotlin(out);
+  out = ternaryDeep(out);
   // R189: a handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it. `store.likes`
   // reached the file verbatim, which is not valid Kotlin: a module bind is a Map,
@@ -4176,7 +4566,17 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], warn
   // Strip a trailing `)` left by an outer call and split into statements.
   const statements = out.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!statements.length) return '\n        // rosezm: an empty handler.';
-  return statements.map((l) => '\n        ' + l).join('');
+  // A Kotlin lambda cannot `return` - the function is the last expression.
+  return statements.map((l) => '\n        ' + l.replace(/^return\s+/, '')).join('');
+}
+
+/** A component named after a Compose widget (a project's own `TextField.rose`)
+ *  is imported under an alias: the page's Compose widgets keep their name and
+ *  the component keeps its call site, instead of one shadowing the other. */
+const COMPOSE_WIDGETS = new Set(['Text', 'TextField', 'Button', 'Checkbox', 'RadioButton', 'Switch', 'Slider', 'Card', 'Icon', 'Image', 'Row', 'Column', 'Box', 'Divider', 'Scaffold', 'Surface', 'Badge', 'Chip', 'Spacer', 'DropdownMenu']);
+
+function compAlias(cls: string): string {
+  return COMPOSE_WIDGETS.has(cls) ? 'Rose' + cls : cls;
 }
 
 /** The component's declared props and their default literals. */
@@ -4203,6 +4603,8 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
     awaits: [],
     deferred: [],
     scriptConsts: new Map(),
+    constExprs: new Map(),
+    looseBinds: new Set(),
     componentProps: new Set(props),
     forms: [],
     pageAction: null,
@@ -4221,14 +4623,18 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   };
   emitNodes(comp.nodes, ctx);
   const defaults = new Map(declared.map((p) => [p.name, ktLiteral(p.init)]));
-  const paramList = props.map((p) => `${p}: Any? = ${defaults.get(p) ?? 'null'}`);
+  // A prop's default says its type, the same way a state seed does: `= false`
+  // is a Boolean and `= ''` a String, so `Text(placeholder)` and
+  // `Checkbox(checked = checked)` type-check instead of meeting an Any?.
+  const types = new Map(declared.map((p) => [p.name, kotlinType(p.init)]));
+  const paramList = props.map((p) => `${p}: ${types.get(p) ?? 'Any?'} = ${defaults.get(p) ?? 'null'}`);
   // Slots: the default slot is a composable lambda; a named slot takes the
   // scoped props map. Both default to empty.
   if (comp.slots.hasDefault) paramList.push('slotDefault: @Composable () -> Unit = {}');
   for (const s of comp.slots.named) paramList.push(`slot${s.name.charAt(0).toUpperCase()}${s.name.slice(1)}: @Composable (Map<String, Any?>) -> Unit = {}`);
   // Two-way props: the inputs that render a prop get an implicit change callback.
   const twoWay = inputBoundProps(comp.nodes, props);
-  for (const p of twoWay) paramList.push(`${propChangeHandler(p)}: (Any?) -> Unit = {}`);
+  for (const p of twoWay) paramList.push(`${propChangeHandler(p)}: (${types.get(p) ?? 'Any?'}) -> Unit = {}`);
   const params = paramList.join(', ');
   const inlineDefs = ctx.inlineBodies.length ? '\n\n' + ctx.inlineBodies.join('\n\n') : '';
   const compBody = ctx.lines.join('\n');

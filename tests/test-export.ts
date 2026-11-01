@@ -558,6 +558,33 @@ try {
       assert(db.status === 0, `dotnet: the exported WPF tree builds${db.status === 0 ? '' : ': ' + errs}`);
     }
   }
+  // The exported Compose tree must actually BUILD - the Android target was the
+  // last one whose output was only read, never compiled, and a whole class of
+  // errors (a Java arrow in a Kotlin lambda, an import inside the file body)
+  // lived there for exactly that reason. A real Gradle plus an Android SDK when
+  // the machine has one; skipped otherwise, like every other toolchain gate.
+  {
+    const gradle = process.env.ROSEZM_GRADLE || 'gradle';
+    const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || '';
+    const sh = process.platform === 'win32';
+    const gradleOk = (() => {
+      try { return spawnSync(gradle, ['--version'], { encoding: 'utf8', timeout: 120_000, shell: sh }).status === 0; } catch { return false; }
+    })();
+    if (gradleOk && sdk) {
+      const ar = await exportProject('android', example, { apiBase: 'x', outRoot: join(scratch, 'android-build') });
+      const args = ['assembleDebug', '--no-daemon', '--console=plain'];
+      if (process.env.ROSEZM_GRADLE_INIT) args.push('--init-script', process.env.ROSEZM_GRADLE_INIT);
+      const g = spawnSync(gradle, args, {
+        cwd: ar.outDir,
+        encoding: 'utf8',
+        timeout: 900_000,
+        shell: sh,
+        env: { ...process.env, ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk },
+      });
+      const errs = `${g.stdout ?? ''}${g.stderr ?? ''}`.split('\n').filter((l) => l.startsWith('e: ')).slice(0, 3).join(' / ');
+      assert(g.status === 0, `android: the exported Compose tree builds with gradle${g.status === 0 ? '' : ': ' + errs}`);
+    }
+  }
   // R-AF: the exported SwiftUI tree must actually type-check. `swiftc` on a
   // Command Line Tools install cannot expand `@State` (the macro plugin ships
   // with Xcode), so the lock here is the shapes that failed before: a throwing
@@ -1318,24 +1345,31 @@ try {
   const kIndex = kread('app/src/main/java/dev/rosezm/app/pages/IndexPage.kt');
   assert(kIndex.includes('@Composable') && kIndex.includes('fun IndexPage(onNavigate: (String) -> Unit, route: String'), 'a page is a @Composable with navigation and route parameters');
   assert(kIndex.includes('var count by remember { mutableStateOf<Int>(0) }') && kIndex.includes('var name by remember { mutableStateOf<String>("rosezm") }'), '$state becomes typed remember/mutableStateOf');
-  assert(kIndex.includes('val increment: () -> Unit = {') && kIndex.includes('count = count + 1;'), 'a handler is a lambda that writes the state');
-  assert(/stamp = roseKv\("stamp", \{ \(\(\) => Date\.now\(\)\)\(\) \}, 60\)/.test(kread('app/src/main/java/dev/rosezm/app/pages/KvdemoPage.kt')), 'a Compose $kv field is seeded from its compute expression at load');
+  // The type is inferred, not spelled `() -> Unit`: a function whose body ends
+  // in an expression renders that value (`{greeting()}`), and a Kotlin lambda
+  // cannot hold a `return`.
+  assert(kIndex.includes('val increment = {') && kIndex.includes('count = count + 1;'), 'a handler is a lambda that writes the state');
+  // The compute expression runs at load in Kotlin's own spelling: no arrow, and
+  // `Date.now()` becomes the JVM clock call.
+  assert(/stamp = roseKv\("stamp", \{ \(System\.currentTimeMillis\(\)\) \}, 60\)/.test(kread('app/src/main/java/dev/rosezm/app/pages/KvdemoPage.kt')), 'a Compose $kv field is seeded from its compute expression at load');
   assert(kIndex.includes('val like: () -> Unit = {') && kIndex.includes('roseAction(') && kIndex.includes('roseData('), 'the data channel and a server action are wired');
   // R158: the action POST carries the page's form inputs, so the server action's
   // form.get() reads real values instead of empty strings.
-  assert(/roseAction\(.*, "like", __rosezmFormFields\(\["name"\]\)\)/.test(kIndex), 'a Compose action posts the form fields');
-  assert(kIndex.includes('.forEach { link ->') && kIndex.includes('link["label"]'), 'each becomes forEach over a map-typed item');
+  assert(/roseAction\(.*, "like", __rosezmFormFields\(listOf\("name"\)\)\)/.test(kIndex), 'a Compose action posts the form fields');
+  // The item type is whatever the list held, so Compose reads a member through
+  // the kit's Any?-taking roseGet instead of a map index.
+  assert(kIndex.includes('.forEach { link ->') && kIndex.includes('roseGet(link, "label")'), 'each becomes forEach over a map-typed item');
   assert(kIndex.includes('fontSize = 20.sp'), 'a <style> rule becomes Compose text parameters');
   assert(existsSync(join(kdir, 'app/src/main/res/drawable/rose.png')) && kIndex.includes('painterResource(id = R.drawable.rose)'), 'Compose copies the image into res/drawable and renders it');
   const bindKotlin = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/BindDemoPage.kt'), 'utf8');
-  assert(bindKotlin.includes('Checkbox(checked = subscribed, onCheckedChange = { subscribed = it })') && bindKotlin.includes('RadioButton(selected = plan == "free", onClick = { plan = "free" })') && bindKotlin.includes('FilterChip(selected = plan =='), 'Compose wires checkbox, radio group and select two-way');
+  assert(bindKotlin.includes('Checkbox(checked = (subscribed as? Boolean) ?: false, onCheckedChange = { subscribed = it })') && bindKotlin.includes('RadioButton(selected = plan == "free", onClick = { plan = "free" })') && bindKotlin.includes('FilterChip(selected = plan =='), 'Compose wires checkbox, radio group and select two-way');
   // R140: a <select multiple> on Compose is a row of toggling checkboxes (the
   // checkbox-group idiom), so the array state survives - not radio-like chips.
   const deftestKt = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/DeftestPage.kt'), 'utf8');
   assert(deftestKt.includes('Checkbox(checked = (selm as? List<*>)?.contains("x") == true, onCheckedChange = { on -> selm = (((selm as? List<*>) ?: emptyList<Any?>()).toMutableList().also { if (on) it.add("x") else it.remove("x") }) }'), 'a <select multiple> becomes toggling checkboxes on Compose, keeping the array shape');
   assert(!/FilterChip\(selected = selm ==/.test(deftestKt), 'a <select multiple> is not degraded to radio-like FilterChips on Compose');
-  assert(readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/AboutPage.kt'), 'utf8').includes('FactCard(fact = fact)') && readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/components/FactCard.kt'), 'utf8').includes('fact: Any? = "a fact about rosezm"'), 'Kotlin passes the prop and keeps its default');
-  assert(kIndex.includes('onNavigate(link["href"].toString())'), 'a link becomes a navigation callback');
+  assert(readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/AboutPage.kt'), 'utf8').includes('FactCard(fact = (fact).toString())') && readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/components/FactCard.kt'), 'utf8').includes('fact: String = "a fact about rosezm"'), 'Kotlin passes the prop and keeps its default');
+  assert(kIndex.includes('onNavigate(roseGet(link, "href").toString())'), 'a link becomes a navigation callback');
   assert(!/\{#|\{\/|\{@|\$state\(|on:click/.test(kpages.map((f) => readFileSync(f, 'utf8')).join('\n')), 'no Rose syntax survives into Kotlin');
   const kBlog = kread('app/src/main/java/dev/rosezm/app/pages/BlogParamIdPage.kt');
   assert(kBlog.includes('params["id"] ?: "1"') && kBlog.includes('roseData(if (route.isEmpty())'), 'a dynamic page seeds its param state and loads the live route');
@@ -2307,15 +2341,17 @@ try {
   assert(pyNest.includes("st['groups'] = [({**g, **{'on': not g['on']}}) for g in st.get('groups')]"), 'Tk maps through a comprehension with native dict merge');
   assert(pyNest.includes("if (i == 0) else (g) for i, g in enumerate(st.get('groups'))"), 'Tk spells the conditional expression the Python way');
   const kNest = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/NestDemoPage.kt'), 'utf8');
-  assert(kNest.includes('groups = groups.map { g -> (g + mapOf("on" to !(g["on"] as? Boolean ?: false))) };'), 'Compose maps through the native map with the coerced negation');
+  // The base arrives as Any?, so the spread merge and the key read both go
+  // through the kit; the negation stays a Boolean.
+  assert(kNest.includes('groups = (groups.map { g -> (roseMergeMap(g, mapOf("on" to !(roseGet(g, "on") as? Boolean ?: false)))) })'), 'Compose maps through the native map with the coerced negation');
   assert(kNest.includes('roseMapIdx(groups) { g, i ->'), 'Compose binds the index parameter through the kit helper');
-  assert(kNest.includes('(g["items"] as List<Any?>) + "a"'), 'Compose casts the untyped list before appending');
+  assert(kNest.includes('(roseGet(g, "items") as List<Any?>) + "a"'), 'Compose casts the untyped list before appending');
   assert(!/\.map\(/.test(kNest), 'no JS map call survives into Kotlin');
 
   // 13d-2. R122: a single-item array spread in a state write is a real append on
   // Compose - `[...items(), x]` used to be refused as "spread" and the Add Item
   // button was a no-op stub. It now compiles to the Kotlin list append.
-  assert(kIndex.includes('items = (items as List<Any?>) + listOf("Item " + items.size + 1);'), 'Compose turns [...items(), x] into a real list append');
+  assert(kIndex.includes('items = ((items as List<Any?>) + listOf("Item " + items.size + 1)).map { it.toString() };'), 'Compose turns [...items(), x] into a real list append');
   assert(!/val addItem: \(\) -> Unit = \{\s*\n\s*\/\/ rosezm: handler body not translated \(uses spread\)/.test(kIndex), 'the Add Item handler is no longer a spread stub on Compose');
   const androidSpreadWarnings = (android.warnings ?? []).filter((w) => /Index.*spread/.test(w));
   assert(androidSpreadWarnings.length === 0, `no Compose handler on the index page stubs on spread (${androidSpreadWarnings.length})`);
@@ -2326,7 +2362,7 @@ try {
   // R129: the guestbook submit handler used to stub on FormData. The shared
   // rewriteFormReads turns it into the (typed) bound state read and strips the web
   // event bookkeeping, so it compiles - with Compose's isNotEmpty emptiness test.
-  assert(kIndex.includes('var guest = (name).trim();') && kIndex.includes('if (guest.isNotEmpty()) guests = listOf(guest) + (guests as List<Any?>);'), 'Compose runs the guestbook submit handler through the form channel');
+  assert(kIndex.includes('var guest = (name).trim();') && kIndex.includes('if (guest.isNotEmpty()) guests = (listOf(guest) + (guests as List<Any?>)).map { it.toString() };'), 'Compose runs the guestbook submit handler through the form channel');
   assert(!(android.warnings ?? []).some((w) => /Index.*FormData/.test(w)), 'the guestbook handler is no longer a FormData stub on Compose');
 
   // 13e. R106: the Sign page end to end on a desktop build. A form with no
@@ -2369,29 +2405,35 @@ try {
   assert(!sSign.includes('$actionError'), 'no $actionError call survives into Swift');
   const kSign = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/SignPage.kt'), 'utf8');
   assert(kSign.includes('onValueChange = { name = it }'), 'Compose binds a named form input to its state key');
-  assert(kSign.includes('Button(onClick = () -> action()'), 'a Compose submit button calls the page action');
+  assert(kSign.includes('Button(onClick = { action() }'), 'a Compose submit button calls the page action');
   assert(!kSign.includes('$actionError'), 'no $actionError call survives into Kotlin');
   // The Kotlin lambda arrow: this emitter once produced the JS `() =>`, which
   // does not compile - every on:click button in every Android export was wrong.
   assert(!/\(\) =>/.test(kSign), 'no JS arrow survives into Kotlin');
+  // `() -> body` is Java's arrow, not Kotlin's: a no-parameter lambda is `{ body }`.
+  assert(!/onClick = \(\) ->/.test(kSign), 'no Java arrow becomes a Kotlin click handler');
   // The shell's own button rule now reaches the element (a tag rule is part of
   // the cascade), so the handler arrow rides with the shell's box: padding and
   // margin, exactly as the web build paints it.
-  assert(kIndex.includes('Button(onClick = () -> increment(), colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent), modifier = Modifier.padding(start = 0.dp, top = 0.dp, end = 8.dp, bottom = 0.dp).padding(horizontal = 16.dp, vertical = 8.dp))'), 'a Kotlin button handler uses the language lambda arrow');
+  assert(kIndex.includes('Button(onClick = { increment() }, colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent), modifier = Modifier.padding(start = 0.dp, top = 0.dp, end = 8.dp, bottom = 0.dp).padding(horizontal = 16.dp, vertical = 8.dp))'), 'a Kotlin button handler uses the language lambda arrow');
 
   // 13g. R111: {#boundary} degrades like the web - the subtree runs and a
   // throw renders the fallback text instead of killing the page. The seven
   // statement-shaped targets get a real try/catch; Flutter (a widget expression
   // tree) wraps its builder in the roseBoundary helper - see R138.
   const BOUNDARY_TEXT = 'This section failed to render.';
-  for (const [name, body] of [['Java', jIndex], ['C++', cread('src/pages/IndexPage.cpp')], ['C#', nread('Pages/IndexPage.cs')], ['Tk', pread('pages/index.py')], ['Swift', xread('rosezmApp/Pages/IndexView.swift')], ['Compose', kIndex], ['ArkTS', aread('entry/src/main/ets/pages/IndexPage.ets')]] as Array<[string, string]>) {
+  for (const [name, body] of [['Java', jIndex], ['C++', cread('src/pages/IndexPage.cpp')], ['C#', nread('Pages/IndexPage.cs')], ['Tk', pread('pages/index.py')], ['Swift', xread('rosezmApp/Pages/IndexView.swift')], ['ArkTS', aread('entry/src/main/ets/pages/IndexPage.ets')]] as Array<[string, string]>) {
     assert(body.includes(BOUNDARY_TEXT), `${name} renders the boundary fallback text`);
     assert(!new RegExp(name === 'Tk' ? 'boundary\} fallback is content only' : 'boundary\} fallback is content only').test(body), `${name} no longer warns the boundary is content-only`);
   }
+  // Compose is the exception: Kotlin forbids try/catch around composable
+  // invocations, so the section renders unguarded and the build says so.
+  assert(!kIndex.includes(BOUNDARY_TEXT), 'Compose does not pretend to catch a throwing section');
+  assert((android.warnings ?? []).some((w) => /boundary.*cannot catch/.test(w)), 'the Compose build warns that {#boundary} renders unguarded');
   assert(jIndex.includes('} catch (Exception __roseBoundary) {'), 'Java wraps the boundary subtree in a try/catch');
   assert(pyIndex.includes('    except Exception:' + String.fromCharCode(10) + '        tk.Label('), 'Tk wraps the boundary subtree in a try/except with an indented arm');
   assert(xIndex.includes('do {') && xIndex.includes('} catch {'), 'Swift wraps the boundary subtree in a do/catch');
-  assert(kIndex.includes('try {') && /catch \(e: Exception\)/.test(kIndex), 'Compose wraps the boundary subtree in a try/catch');
+  assert(!/catch \(e: Exception\)/.test(kIndex), 'no try/catch survives around a composable call');
   // R138: Flutter's boundary is a real one too - the builder runs inside the
   // roseBoundary helper's try, so a throwing widget degrades to the fallback.
   assert(indexDart.includes(BOUNDARY_TEXT) && /\.\.\.roseBoundary\(\(\) => \[/.test(indexDart), 'Flutter renders the boundary fallback through the roseBoundary helper');
@@ -2469,7 +2511,7 @@ try {
   assert(fDocs.includes('roseHtml('), 'Flutter renders trusted markup as rich spans');
   assert(fKit.includes('String roseDecodeEntities(') && fKit.includes('quot'), 'the Flutter kit decodes the HTML entities a content page uses');
   assert(!(flutter.warnings ?? []).some((w) => /flutter: \{@html/.test(w)), 'Flutter no longer warns that html degrades to text');
-  assert(kKit.includes('fun roseHtml(html: String): AnnotatedString = buildAnnotatedString {') && kKit.includes('withStyle(style()) { append(buffer.toString()) }'), 'the Compose kit parses trusted markup into a styled AnnotatedString');
+  assert(kKit.includes('fun roseHtml(value: Any?): AnnotatedString = roseHtmlOf(value?.toString() ?: "")') && kKit.includes('private fun roseHtmlOf(html: String): AnnotatedString = buildAnnotatedString {') && kKit.includes('withStyle(style()) { append(buffer.toString()) }'), 'the Compose kit parses trusted markup into a styled AnnotatedString');
   assert(kDocs.includes('Text(roseHtml('), 'Compose renders trusted markup as styled spans');
   assert(!(android.warnings ?? []).some((w) => /android: \{@html/.test(w)), 'Compose no longer warns that html degrades to text');
   assert(aKit.includes('export function roseHtmlSpans(html: string): rosezmSpan[]') && aKit.includes('export interface rosezmSpan'), 'the ArkTS kit parses trusted markup into styled spans');
@@ -2729,7 +2771,7 @@ try {
     assert(consts.get('broken') === "$query().broken === '1'", 'a query-reading const keeps its live initializer');
     assert(consts.get('n') === '3', 'a plain literal const is still folded');
     for (const [name, dir, rel, needle] of [
-      ['android', android.outDir, 'app/src/main/java/dev/rosezm/app/pages/AwaitDemoPage.kt', 'params.broken == "1"'],
+      ['android', android.outDir, 'app/src/main/java/dev/rosezm/app/pages/AwaitDemoPage.kt', 'params["broken"] == "1"'],
       ['java', java.outDir, 'src/main/java/dev/rosezm/app/pages/AwaitDemoPage.java', 'app.param("broken") == "1"'],
       ['dotnet', dotnet.outDir, 'Pages/AwaitDemoPage.cs', 'app.Param("broken") == "1"'],
       ['cpp', cpp.outDir, 'src/pages/AwaitDemoPage.cpp', 'app.param("broken")'],
@@ -2822,7 +2864,7 @@ try {
 <p>{nc()} {orv()} {cmp()} {plain()}</p>
 `);
     const INIT_SPECS: Array<[string, string, string]> = [
-      ['android', 'app/src/main/java/dev/rosezm/app/pages/IPage.kt', "(s != null ? s : 'nc')"],
+      ['android', 'app/src/main/java/dev/rosezm/app/pages/IPage.kt', '(if (s != null) s else "nc")'],
       ['java', 'src/main/java/dev/rosezm/app/pages/IPage.java', '(s != null ? s : "nc")'],
       ['cpp', 'src/pages/IPage.cpp', 'rose_is_null(s)'],
       ['arkts', 'entry/src/main/ets/pages/IPage.ets', "!== null ?"],
@@ -2852,7 +2894,7 @@ try {
       assert(rmr!('store.likes', mapRead) === 'store["likes"]', 'a real map read is still rewritten');
       assert(rmr!('Math.max(1, n)', mapRead) === 'Math.max(1, n)', 'a namespaced call is not mistaken for a map read');
       for (const [t2, rel2, needle2] of [
-        ['android', 'app/src/main/java/dev/rosezm/app/pages/IPage.kt', "s.toString().isNotEmpty() ? s : 'fallback'"],
+        ['android', 'app/src/main/java/dev/rosezm/app/pages/IPage.kt', '(if (s.toString().isNotEmpty()) s else "fallback")'],
         ['java', 'src/main/java/dev/rosezm/app/pages/IPage.java', '!RoseTheme.text(s).isEmpty() ? s : "fallback"'],
       ] as const) {
         const txt2 = readFileSync(join(scratch, 'init-' + t2, t2, rel2), 'utf8');
@@ -3613,7 +3655,7 @@ try {
   // R174: the head must keep its query read live. The old assertion pinned
   // `(false ? roseThrow(` - the constant-folded ternary that made `?broken=1`
   // unreachable - so it is corrected to assert the live condition instead.
-  assert(kAwait.includes('params.broken == "1" ? roseThrow(') && kAwait.includes('LaunchedEffect(Unit) {') && kAwait.includes('if (__await0Done) {'), 'Compose evaluates the live promise head in a LaunchedEffect and renders the settle state');
+  assert(kAwait.includes('(if (params["broken"] == "1") roseThrow(') && kAwait.includes('LaunchedEffect(Unit) {') && kAwait.includes('if (__await0Done) {'), 'Compose evaluates the live promise head in a LaunchedEffect and renders the settle state');
   assert(!kAwait.includes('rosezm_query'), 'Compose spells $query() as the route params, not an invented helper');
   const sAwait = readFileSync(join(xcode.outDir, 'rosezmApp', 'Pages', 'AwaitDemoView.swift'), 'utf8');
   assert(sAwait.includes('.task { await loadData(); await __runAwait0() }') && sAwait.includes('if __await0Done {') && sAwait.includes('roseThrow('), 'SwiftUI runs the promise in the .task modifier and renders the settle state');
@@ -3642,7 +3684,7 @@ try {
   assert(twDBind.includes('onValueChange: (v) => __set(\'name\', v)'), 'Flutter writes the parent state from the change callback');
   const twKt = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/components/TextField.kt'), 'utf8');
   const twKBind = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/BindDemoPage.kt'), 'utf8');
-  assert(twKt.includes('onValueChange: (Any?) -> Unit = {}') && twKt.includes('onValueChange = { v -> onValueChange(v) }'), 'Compose declares the implicit change callback and wires the input to it');
+  assert(twKt.includes('onValueChange: (String) -> Unit = {}') && twKt.includes('onValueChange = { v -> onValueChange(v) }'), 'Compose declares the implicit change callback and wires the input to it');
   assert(twKBind.includes('onValueChange = { v -> name = v }'), 'Compose writes the parent state from the change callback');
   const twSwift = readFileSync(join(xcode.outDir, 'rosezmApp', 'Components', 'TextFieldView.swift'), 'utf8');
   const twSBind = readFileSync(join(xcode.outDir, 'rosezmApp', 'Pages', 'BindDemoView.swift'), 'utf8');
@@ -3706,7 +3748,7 @@ try {
     ['arkts', 'entry/src/main/ets/pages/BarePage.ets', 'this.taps = this.taps + 1;'],
     ['arkts', 'entry/src/main/ets/pages/ConstDemoPage.ets', 'this.stamped = total;'],
     ['android', 'app/src/main/java/dev/rosezm/app/pages/BarePage.kt', 'taps = taps + 1'],
-    ['android', 'app/src/main/java/dev/rosezm/app/pages/ConstDemoPage.kt', 'stamped = total'],
+    ['android', 'app/src/main/java/dev/rosezm/app/pages/ConstDemoPage.kt', 'stamped = ((price'],
     ['xcode', 'rosezmApp/Pages/BareView.swift', 'taps = taps + 1'],
     ['xcode', 'rosezmApp/Pages/ConstDemoView.swift', 'stamped = total'],
     ['java', 'src/main/java/dev/rosezm/app/pages/BarePage.java', 'app.set("taps", RoseTheme.integer(app.v("taps")) + 1)'],
@@ -3881,7 +3923,7 @@ try {
   assert(saIndex.includes('Text("Hello Rose", color = Color(0xFFFFFFFF), fontSize = 32.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)'), 'the descendant selector reaches Compose: specificity picks the title colour, and the text half is Compose parameters');
   assert(saIndex.includes('.clip(RoundedCornerShape(8.dp))') && saIndex.includes('.background(Color(0xFF123456))'), 'the styled container emits a Modifier chain');
   assert(saIndex.includes('verticalArrangement = Arrangement.SpaceBetween') && saIndex.includes('horizontalAlignment = Alignment.CenterHorizontally'), 'the container lays out by its style, not by the tag name - and the cross-axis constants are the legal ones for a Column');
-  assert(/Button\(onClick = \(\) -> inc\(\), colors = ButtonDefaults\.buttonColors\(containerColor = Color\.Transparent\)/.test(saIndex), 'a styled button keeps its class: its fill comes from the style, not the theme');
+  assert(/Button\(onClick = \{ inc\(\) \}, colors = ButtonDefaults\.buttonColors\(containerColor = Color\.Transparent\)/.test(saIndex), 'a styled button keeps its class: its fill comes from the style, not the theme');
   assert(/roseResolve\("p", listOf\(tone\), "Index", props = mapOf\("color" to accent\)\)/.test(saIndex), 'the bound class and style:prop become a runtime resolve with a property override, and the tag is carried so element rules apply');
   assert(saIndex.includes('roseTextStyle(') && saIndex.includes('Modifier.roseBox('), 'the resolved style drives both the text half and the box half');
   assert(/Text\("inline", modifier = Modifier\.graphicsLayer \{ alpha = 0\.4f \}\.padding\(start = 6\.dp, top = 3\.dp, end = 4\.dp, bottom = 5\.dp\)\)/.test(saIndex), 'a literal style="" reaches Text as a Modifier, padding axes in order');
@@ -4642,7 +4684,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
 `);
     const concatOut = await exportProject('android', concatProj, { apiBase: 'x', outRoot: join(scratch, 'concat-kt') });
     const kt = readFileSync(join(concatOut.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(/Text\("\$\{"Row " \+ \(n\)\.toString\(\) \+ \(1\)\.toString\(\)\}"\)/.test(kt), 'Compose coerces a string+number chain instead of interpolating it verbatim');
+    assert(/Text\("Row " \+ \(n\)\.toString\(\) \+ \(1\)\.toString\(\)\)/.test(kt), 'Compose coerces a string+number chain instead of interpolating it verbatim');
     assert(/Text\("\$\{\(n\)\.toString\(\) \+ \(1\)\.toString\(\) \+ " items"\}"\)/.test(kt), 'Compose coerces the number-first form too');
     const concatK = await exportProject('arkts', concatProj, { apiBase: 'x', outRoot: join(scratch, 'concat-ets') });
     const ets = readFileSync(join(concatK.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
@@ -6230,7 +6272,7 @@ h2 { font-size: 40px; }
 <button on:click={pre}>p</button>
 `);
     const needles: Array<[string, string, string[]]> = [
-      ['android', 'app/src/main/java/dev/rosezm/app/pages/HPage.kt', ['items = (items as List<Any?>) + listOf("new");', 'items = listOf("top") + (items as List<Any?>);']],
+      ['android', 'app/src/main/java/dev/rosezm/app/pages/HPage.kt', ['items = ((items as List<Any?>) + listOf("new")).map { it.toString() };', 'items = (listOf("top") + (items as List<Any?>)).map { it.toString() };']],
       ['cpp', 'src/pages/HPage.cpp', ['rose_append(app.v("items"), "new")', 'rose_prepend(app.v("items"), "top")']],
       ['java', 'src/main/java/dev/rosezm/app/pages/HPage.java', ['RoseTheme.append(', 'RoseTheme.prepend(']],
       ['dotnet', 'Pages/HPage.cs', ['RoseTheme.Append(app.V("items"), "new")', 'RoseTheme.Prepend(app.V("items"), "top")']],
