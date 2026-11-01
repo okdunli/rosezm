@@ -28,6 +28,19 @@ import { createHash } from 'node:crypto';
 import { brotliCompressSync } from 'node:zlib';
 import { JSDOM } from 'jsdom';
 
+// The suite compiles dist/ into a Go binary and runs it. A machine without Go
+// cannot prove anything here, and crashing with a spawn ENOENT reads like a
+// failure - say it is skipped, the way the toolchain gates in test-export do.
+{
+  const hasGo = (() => {
+    try { return execSync('go version', { stdio: 'ignore', timeout: 20_000 }); } catch { return null; }
+  })();
+  if (!hasGo) {
+    console.log('SKIPPED: go is not on PATH - the single-binary suite did not run (install Go and re-run for the full proof)');
+    process.exit(0);
+  }
+}
+
 const freePort = async (from, to) => {
   const { createServer } = await import('node:net');
   for (let p = from; p <= to; p++) {
