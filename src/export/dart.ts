@@ -32,7 +32,7 @@ import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/i
 import { SHELL_STYLES } from '../cli/shell.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, hasTagDeep, type Node as IrNode, type Attr, type SlotUsage , pageTitle} from './ir.js';
 import { rewritePromiseExprs, rewriteMapperSets, rewriteDirectSetValue, rewriteThrowNew, renderWarningSection, rewriteFormReads, rewriteStringTruth, rewriteStringMethods, coerceStringConcat, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, type StringMethodSpell, type FormInfo } from './state-ops.js';
-import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
+import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, splitTopLevel, type ExprDialect } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { appIdentity, type AppIdentity } from './app-identity.js';
 import { nativeDependencies, nativeUsage, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
@@ -718,7 +718,7 @@ function styleArgsOf(model: StyleModel): string[] {
   if (model.wrap) args.push('wrap: true');
   if (model.justify) args.push(`justify: '${model.justify}'`);
   if (model.align) args.push(`items: '${model.align}'`);
-  if (model.alignSelf) args.push(`selfAlign: '${model.alignSelf}'`);
+  if (model.alignSelf) args.push(`alignSelf: '${model.alignSelf}'`);
   if (model.grow !== undefined) args.push(`grow: ${n(model.grow)}`);
   if (model.aspectRatio !== undefined) args.push(`aspectRatio: ${n(model.aspectRatio)}`);
   if (model.shrink !== undefined) args.push(`shrink: ${n(model.shrink)}`);
@@ -797,7 +797,7 @@ class RoseStyle {
     this.border,
     this.radius, this.shadow, this.opacity,
     this.translateX, this.translateY, this.rotate, this.scale,
-    this.direction, this.wrap, this.justify, this.items, this.selfAlign,
+    this.direction, this.wrap, this.justify, this.items, this.alignSelf,
     this.grow, this.shrink,
     this.width, this.height, this.minWidth, this.maxWidth, this.minHeight, this.maxHeight,
     this.hidden,
@@ -983,14 +983,14 @@ Text roseRich(RoseStyle? base, List<RoseRun> runs, {bool nowrap = false, bool el
   );
 }
 
-const Map<String, RoseStyle> roseStyles = {
+final Map<String, RoseStyle> roseStyles = {
 ${rows.join('\n') || '  // no style rules'}
 };
 
 /// Element/tag rules (button {}, a {}, nav a {}) applied by tag, since a native
 /// tree has no selector engine. A class on the element wins over its tag style -
 /// that is the same precedence a browser keeps.
-const Map<String, RoseStyle> roseTagStyles = {
+final Map<String, RoseStyle> roseTagStyles = {
 ${tagRows.join('\n') || '  // no element selector rules'}
 };
 
@@ -999,11 +999,11 @@ ${tagRows.join('\n') || '  // no element selector rules'}
 /// the light rows only then - a light device never sees them.
 bool roseDark = false;
 
-const Map<String, RoseStyle> roseDarkStyles = {
+final Map<String, RoseStyle> roseDarkStyles = {
 ${darkRows.join('\n') || '  // no dark rules'}
 };
 
-const Map<String, RoseStyle> roseDarkTagStyles = {
+final Map<String, RoseStyle> roseDarkTagStyles = {
 ${darkTagRows.join('\n') || '  // no dark element rules'}
 };
 
@@ -1111,7 +1111,7 @@ Widget roseBox(RoseStyle? s, Widget child) {
   // inside a Stack - so the Stack is emitted here with it. A self-contained
   // Stack keeps the parent's own layout (a Column, a flex) untouched, which is
   // what CSS absolute does relative to its containing block.
-  if (s.absolute) {
+  if (s.absolute ?? false) {
     return Stack(children: [
       Positioned(
         left: s.insetLeft,
@@ -1125,7 +1125,7 @@ Widget roseBox(RoseStyle? s, Widget child) {
   // R228: an overflow:auto box scrolls its own content. The box keeps its own
   // constraints (the max-height is what makes it scrollable) and the scroller
   // sits inside it, so the page keeps its own layout.
-  if (s.scrolls) {
+  if (s.scrolls ?? false) {
     return Container(
       padding: s.padding,
       margin: s.margin,
@@ -1209,8 +1209,8 @@ Widget roseInputField(RoseStyle? s, String hint, void Function(String)? onChange
         hintText: hint,
         // A limit must not add Flutter's character counter under the field.
         counterText: maxLength == null ? null : '',
-        filled: deco != null && deco.color != null,
-        fillColor: deco?.color,
+        filled: deco is BoxDecoration && deco.color != null,
+        fillColor: deco is BoxDecoration ? deco.color : null,
         border: border,
         contentPadding: pad == null ? null : pad,
       ),
@@ -1649,7 +1649,8 @@ ${native.includes('camera') ? `      case 'camera':
 }
 ` : '';
 
-  return `import 'dart:convert';
+  return `import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 ${native.length || video || audio ? "import 'package:flutter/material.dart';\n" : ''}${externalLinks ? "import 'package:url_launcher/url_launcher.dart';\n" : ''}${video || audio ? "import 'package:video_player/video_player.dart';\n" : ''}${nativeImports}
 ${externalLinks ? `/// An <a href="https://..."> in a page: the system browser (or mail app),
@@ -1726,8 +1727,7 @@ Widget roseHtml(String html) {
   }
   flush();
   return Text.rich(TextSpan(children: spans));
-}import 'dart:convert';
-import 'dart:io';
+}
 
 /// Base URL of the deployed rosezm server (rosezm export --api).
 /// Base URL of the deployed rosezm server. A --dart-define re-points the app
@@ -1811,18 +1811,19 @@ List<dynamic> roseMapIdx(dynamic value, dynamic Function(dynamic, int) fn) {
 List<dynamic> roseFilter(dynamic value, bool Function(dynamic) pred) =>
     roseListOf(value).where(pred).toList();
 
-/// xs.reduce((acc, x) => body[, seed]).
-dynamic roseReduce(dynamic value, dynamic Function(dynamic, dynamic) fn) {
+/// xs.reduce((acc, x) => body[, seed]). Dart has no overloading, so the seed
+/// is optional rather than a second function.
+dynamic roseReduce(dynamic value, dynamic Function(dynamic, dynamic) fn, [dynamic seed]) {
   final items = roseListOf(value);
-  if (items.isEmpty) return null;
-  return items.skip(1).fold(items[0], fn);
+  if (seed == null) {
+    if (items.isEmpty) return null;
+    return items.skip(1).fold(items[0], fn);
+  }
+  return items.fold(seed, fn);
 }
 
-dynamic roseReduce(dynamic value, dynamic seed, dynamic Function(dynamic, dynamic) fn) =>
-    roseListOf(value).fold(seed, fn);
-
 /// The JS object spread {...base, k: v} - a copy with overrides.
-Map<String, dynamic> roseMerge(dynamic base, dynamic patch) {
+Map<String, dynamic> roseMergeMap(dynamic base, dynamic patch) {
   final next = <String, dynamic>{};
   if (base is Map) next.addAll(base.map((k, v) => MapEntry(k.toString(), v)));
   if (patch is Map) next.addAll(patch.map((k, v) => MapEntry(k.toString(), v)));
@@ -1830,6 +1831,25 @@ Map<String, dynamic> roseMerge(dynamic base, dynamic patch) {
 }
 
 /// R276: xs[i] over an untyped list - a bounds-safe index read.
+/// JS truthiness, the one place it is spelled.
+bool roseTruth(dynamic value) {
+  if (value == null || value == false) return false;
+  if (value is String) return value.isNotEmpty;
+  if (value is num) return value != 0;
+  if (value is Iterable) return value.isNotEmpty;
+  if (value is Map) return value.isNotEmpty;
+  return true;
+}
+
+/// The JS "a || b" - b when a is falsy. Dart has no truthiness operator.
+/// JS timers: setInterval/clearInterval in Dart's spelling.
+Timer roseEvery(int ms, void Function() fn) => Timer.periodic(Duration(milliseconds: ms), (_) => fn());
+void roseCancel(dynamic timer) {
+  if (timer is Timer) timer.cancel();
+}
+
+dynamic roseOr(dynamic a, dynamic b) => roseTruth(a) ? a : b;
+
 dynamic roseIndex(dynamic value, dynamic index) {
   final items = roseListOf(value);
   final i = index is int ? index : int.tryParse(index.toString());
@@ -1995,7 +2015,7 @@ Future<Map<String, dynamic>> rosezmAction(String route, String name, [Map<String
     final req = await client.postUrl(uri);
     req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
     if (rosezmCookie.isNotEmpty) req.headers.set(HttpHeaders.cookieHeader, rosezmCookie);
-    const __body = StringBuffer('__action=\${Uri.encodeComponent(name)}');
+    final __body = StringBuffer('__action=\${Uri.encodeComponent(name)}');
     if (fields != null) fields.forEach((k, v) { if (v != null) __body.write('&\${Uri.encodeComponent(k)}=\${Uri.encodeComponent('\$v')}'); });
     req.write(__body.toString());
     final res = await req.close();
@@ -2426,8 +2446,9 @@ function renderPage(
     ? `  final Map<String, String> params;\n  const ${page.className}({super.key, this.params = const {}});\n`
     : `  const ${page.className}({super.key});\n`;
   const needsCardHide = components.some((c) => c.name === 'Card');
+  const needsFieldHide = components.some((c) => c.name === 'TextField');
   const imports = [
-    `import 'package:flutter/material.dart'${needsCardHide ? ' hide Card' : ''};`,
+    `import 'package:flutter/material.dart'${needsCardHide || needsFieldHide ? ' hide ' + [needsCardHide ? 'Card' : '', needsFieldHide ? 'TextField' : ''].filter(Boolean).join(', ') : ''};`,
     "import '../rosezm.dart';",
     "import '../vectors.dart';",
     "import '../styles.dart';",
@@ -2439,16 +2460,16 @@ function renderPage(
     const init = s.init || 'null';
     // A $persist field starts from the on-disk store when it has been written
     // before - that is what makes it survive a restart.
-    if (persist.has(s.name)) return `  dynamic ${dName(s.name)} = rosezmLoad(${JSON.stringify('rosezm:' + s.name)}) ?? ${dartLiteral(init, mapBinds)};`;
+    if (persist.has(s.name)) return `  late dynamic ${dName(s.name)} = rosezmLoad(${JSON.stringify('rosezm:' + s.name)}) ?? ${dartLiteral(init, mapBinds)};`;
     // A member chain whose ROOT is an emitted module bind is reachable: the
     // bind is a top-level Dart map, and dartExpr spells the read as a subscript.
     // A chain rooted in anything else is module state this widget cannot see.
     const memberRoot = /^[A-Za-z_$][\w$]*/.exec(init)?.[0] ?? '';
     if (/^[A-Za-z_$][\w$]*(\.[\w$]+)*$/.test(init) && !/^(true|false|null|this)$/.test(init) && !mapBinds.has(memberRoot)) {
       warnings.push(`flutter: ${page.fileName}: the initial value of "${s.name}" reads module-level state (${init}) - it has no widget scope, so it starts null and the data channel/server state is the source`);
-      return `  dynamic ${dName(s.name)} = null;`;
+      return `  late dynamic ${dName(s.name)} = null;`;
     }
-    return `  dynamic ${dName(s.name)} = ${dartLiteral(init, mapBinds)};`;
+    return `  late dynamic ${dName(s.name)} = ${dartLiteral(init, mapBinds)};`;
   }).join('\n');
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries, or an
@@ -2762,7 +2783,8 @@ function emitWidgetList(nodes: IrNode[], ctx: EmitCtx): string[] {
       const cond = dartExpr(withConsts(first.cond ?? 'false', ctx), ctx.stateNames, ctx.mapBinds, ctx.dataNames);
       const thenWidget = emitChildren(first.children, ctx);
       const elseWidget = elseNode ? emitChildren(elseNode.children, ctx) : 'const SizedBox.shrink()';
-      out.push(`(${cond}) ? ${thenWidget} : ${elseWidget}`);
+      // Dart conditions are bool: roseTruth is the JS truthiness rule.
+      out.push(`(roseTruth(${cond})) ? ${thenWidget} : ${elseWidget}`);
       continue;
     }
     if (node.kind === 'each') {
@@ -3136,16 +3158,20 @@ function emitElementStyled(
     const stateOf = (attr: typeof bindValue): string => (attr && attr.value.kind === 'expr' && ctx.stateNames.has(attr.value.code.trim()) ? attr.value.code.trim() : '');
     const valueAttr = node.attrs.find((a) => a.name === 'value');
     const optionValue = valueAttr ? (valueAttr.value.kind === 'text' ? JSON.stringify(valueAttr.value.text) : attrExpr(valueAttr, ctx)) : 'true';
+    // A component's prop has no __set: the write goes back through the callback
+    // the parent passed, exactly as the text field already did.
+    const writeBack = (name: string, value: string): string =>
+      ctx.componentProps.has(name) ? `${propChangeHandler(name)}?.call(${value})` : `__set('${name}', ${value})`;
     if (type === 'checkbox') {
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
-      if (group) return `Checkbox(value: ((${group} as List).contains(${optionValue})), onChanged: (checked) { final list = List.of(${group} as List); if (checked) { list.add(${optionValue}); } else { list.remove(${optionValue}); } __set('${group}', list); })`;
-      if (checked) return `Checkbox(value: ${checked} == true, onChanged: (value) => __set('${checked}', value ?? false))`;
+      if (group) return `Checkbox(value: ((${group} as List).contains(${optionValue})), onChanged: (checked) { final list = List.of(${group} as List); if (checked) { list.add(${optionValue}); } else { list.remove(${optionValue}); } ${writeBack(group, 'list')}; })`;
+      if (checked) return `Checkbox(value: ${checked} == true, onChanged: (value) => ${writeBack(checked, 'value ?? false')})`;
       return 'Checkbox(value: false, onChanged: null)';
     }
     if (type === 'radio') {
       const group = stateOf(bindGroup);
-      if (group) return `Radio<dynamic>(value: ${optionValue}, groupValue: ${group}, onChanged: (value) => __set('${group}', value))`;
+      if (group) return `Radio<dynamic>(value: ${optionValue}, groupValue: ${group}, onChanged: (value) => ${writeBack(group, 'value')})`;
       return 'const SizedBox.shrink()';
     }
     const propWrite = (name: string): string | null =>
@@ -3419,8 +3445,38 @@ function dartScalarCalls(code: string): string {
 }
 
 /** R480: the Dart expression, with the reserved-word rename at the end. */
+
+/** JS timers, spelled with the kit's helpers so a route can cancel them. */
+function dartTimers(code: string): string {
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const at = code.indexOf('setInterval(', i);
+    if (at < 0) { out += code.slice(i); break; }
+    const before = code.slice(0, at);
+    if (/[\w$.]$/.test(before)) { out += code.slice(i, at + 12); i = at + 12; continue; }
+    let depth = 0;
+    let close = -1;
+    for (let j = at + 'setInterval'.length; j < code.length; j++) {
+      if (code[j] === '(') depth++;
+      else if (code[j] === ')') { depth--; if (depth === 0) { close = j; break; } }
+    }
+    if (close < 0) { out += code.slice(i); break; }
+    const args = splitTopLevel(code.slice(at + 'setInterval('.length, close));
+    out += code.slice(i, at) + `roseEvery((${(args[1] ?? '0').trim()}).toInt(), ${(args[0] ?? '').trim()})`;
+    i = close + 1;
+  }
+  return out.replace(/\bclearInterval\s*\(\s*([^)]*)\)/g, (_m, handle: string) => `roseCancel(${handle})`);
+}
+
+/** "a || b" is roseOr(a, b): a boolean operator cannot express the fallback. */
+function dartOrFallback(code: string): string {
+  return code.replace(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\([^()]*\)|\[[^\]]*\])*)\s*\|\|\s*("[^"]*"|'[^']*'|[A-Za-z_$][\w$.()]*)/g,
+    (_m, left: string, right: string) => `roseOr(${left}, ${right})`);
+}
+
 function dartExpr(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
-  return dRename(dartExprRaw(code.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"'), stateNames, mapBinds, dataNames));
+  return dRename(dartExprRaw(dartOrFallback(code.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"')), stateNames, mapBinds, dataNames));
 }
 
 function dartExprRaw(code: string, stateNames: Set<string> = new Set(), mapBinds: Set<string> = new Set(), dataNames: Set<string> = new Set()): string {
@@ -3768,7 +3824,7 @@ const DART_EXPR: ExprDialect = {
   bool: (e) => `${e} == true`,
   // The refusal list tests the JS spread, so merge/append/concat go
   // through kit helpers even though Dart spreads natively.
-  merge: (b, p) => `roseMerge(${b}, ${p})`,
+  merge: (b, p) => `roseMergeMap(${b}, ${p})`,
   obj: (pairs) => `{${pairs.map(([k, v]) => `'${k}': ${v}`).join(', ')}}`,
   map: (l, ps, body) => ps.length > 1
     ? `roseMapIdx(${l}, (${ps[0]}, ${ps[1]}) => ${body})`
@@ -3816,7 +3872,9 @@ const DART_EXPR: ExprDialect = {
 function translateBody(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {
   // A translation renders its key: this kit ships no dictionary.
   const keyed = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
-  return dRename(translateBodyRaw(keyed, file, warnings, mapBinds));
+  // AFTER the shared rewrites: FormData reads are recognised on the JS shape,
+  // and roseOr would hide it.
+  return dRename(dartTimers(dartOrFallback(translateBodyRaw(keyed, file, warnings, mapBinds))));
 }
 
 function translateBodyRaw(body: string, file: string, warnings: string[], mapBinds: Set<string> = new Set()): string {

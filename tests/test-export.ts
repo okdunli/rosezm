@@ -2281,7 +2281,7 @@ try {
   // shared pass accepts both spellings; Python spells the conditional the
   // other way round; Compose casts the untyped reads before + and !.
   const fNest = fread('lib/pages/nest_demo.dart');
-  assert(fNest.includes("__set('groups', groups.map((g) => (roseMerge(g, {'on': !(g['on'])}))).toList());"), 'Flutter maps through the native map with the kit merge');
+  assert(fNest.includes("__set('groups', groups.map((g) => (roseMergeMap(g, {'on': !(g['on'])}))).toList());"), 'Flutter maps through the native map with the kit merge');
   assert(!fNest.includes('...'), 'no JS spread survives into Dart');
   const pyNest = pread('pages/nest_demo.py');
   assert(pyNest.includes("st['groups'] = [({**g, **{'on': not g['on']}}) for g in st.get('groups')]"), 'Tk maps through a comprehension with native dict merge');
@@ -2488,7 +2488,7 @@ try {
   assert(jread('src/main/java/dev/rosezm/app/pages/BindDemoPage.java').includes('RoseTheme.text(!RoseTheme.text(RoseTheme.text(app.v("name"))).isEmpty() ? RoseTheme.text(app.v("name")) : "stranger")'), 'Java renders a JS || fallback as an emptiness test');
   assert(nread('Pages/BindDemoPage.cs').includes('RoseTheme.Str(!string.IsNullOrEmpty(RoseTheme.Str(RoseTheme.Str(app.V("name")))) ? RoseTheme.Str(app.V("name")) : "stranger")'), 'C# renders a JS || fallback as an emptiness test');
   assert(cread('src/pages/BindDemoPage.cpp').includes('rose_str((rose_bool(!rose_str(app.v("name")).empty()) ? app.v("name") : "stranger"))'), 'C++ renders a JS || fallback as an emptiness test');
-  assert(fread('lib/pages/bind_demo.dart').includes("name.isNotEmpty ? name : 'stranger'") === false && fread('lib/pages/bind_demo.dart').includes("name || 'stranger'"), 'Dart keeps JS || - its own truthiness already means empty');
+  assert(fread('lib/pages/bind_demo.dart').includes("roseOr(name, 'stranger')"), 'Dart maps JS || onto the kit, whose truthiness is the JS one (Dart has no truthiness operator)');
   // R146: $persist is a real primitive on the mini program (wx storage); the
   // other nine have no local storage for it and now say so, rather than
   // silently behaving as plain $state while the page promises persistence.
@@ -4236,7 +4236,7 @@ try {
     const posF = await exportProject('flutter', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-f') });
     const pf = walk(posF.outDir).filter((f) => f.endsWith('.dart')).map((f) => readFileSync(f, 'utf8')).join('\n');
     assert(pf.includes("'stack__index': RoseStyle(background: Color(0xFFEEEEEE), absolute: true, insetLeft: 6, insetTop: 4)"), 'flutter: the absolute box and its insets reach the compiled style table');
-    assert(/if \(s\.absolute\) \{\s*return Stack\(children: \[\s*Positioned\(/.test(pf), 'flutter: roseBox places an absolute style as a Positioned inside the Stack it needs');
+    assert(/if \(s\.absolute \?\? false\) \{\s*return Stack\(children: \[\s*Positioned\(/.test(pf), 'flutter: roseBox places an absolute style as a Positioned inside the Stack it needs');
     const posJ = await exportProject('java', posProj, { apiBase: 'x', outRoot: join(scratch, 'pos-j') });
     assert((posJ.warnings ?? []).some((w) => /java: position: absolute on <div class="stack">/.test(w)), 'java: Swing names the position it cannot honour');
   }
@@ -4274,7 +4274,7 @@ try {
     const scF = await exportProject('flutter', scrollProj, { apiBase: 'x', outRoot: join(scratch, 'scroll-f') });
     const sf = walk(scF.outDir).filter((f) => f.endsWith('.dart')).map((f) => readFileSync(f, 'utf8')).join('\n');
     assert(sf.includes('scrolls: true'), 'flutter: the scrollable box reaches the compiled style table');
-    assert(/if \(s\.scrolls\) \{\s*return Container\(/.test(sf), 'flutter: roseBox wraps the scrolling box in a SingleChildScrollView');
+    assert(/if \(s\.scrolls \?\? false\) \{\s*return Container\(/.test(sf), 'flutter: roseBox wraps the scrolling box in a SingleChildScrollView');
     const scJ = await exportProject('java', scrollProj, { apiBase: 'x', outRoot: join(scratch, 'scroll-j') });
     const sj = readFileSync(join(scJ.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
     assert(sj.includes('RoseTheme.scrolled('), 'java: the scrollable box is put in its own JScrollPane');
