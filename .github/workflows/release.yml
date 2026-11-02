@@ -58,12 +58,16 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          # trusted publishing needs node >= 22.14 and npm >= 11.5.1
-          node-version: 22.14.0
+          # the newest 22.x: a pinned 22.14.0 was too old for current npm, and
+          # the tests themselves run in the job above, on their own version
+          node-version: 22
           registry-url: https://registry.npmjs.org
       - name: Upgrade npm for trusted publishing
-        # staged publishing needs npm >= 11.15, trusted publishing >= 11.5.1
-        run: npm install -g npm@latest
+        # npm 11 is the line that carries both features this workflow needs -
+        # trusted publishing (>= 11.5.1) and staged publishing (>= 11.15) - and
+        # it still runs on node 22. `npm@latest` now resolves to 12, which wants
+        # node ^22.22.2 || ^24.15 || >=26 and refused to install here.
+        run: npm install -g npm@11
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       # Staged, never live: `npm stage publish` puts the tarball in the staging
