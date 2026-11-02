@@ -567,8 +567,15 @@ try {
       // profile holds.
       const csproj = readFileSync(join(dr.outDir, 'rosezmApp.csproj'), 'utf8');
       assert(csproj.includes('PublishSingleFile') && csproj.includes("'$(Configuration)' == 'Release'"), 'dotnet: release publishes as a single file');
-      const pub = spawnSync('dotnet', ['publish', '-c', 'Release', '-r', 'osx-arm64', '-p:EnableWindowsTargeting=true', '-v', 'q', '--nologo'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(pub.status === 0, `dotnet: the release profile publishes${pub.status === 0 ? '' : ': ' + (pub.stdout ?? '').split('\n').filter((l) => l.includes('error')).slice(0, 2).join(' / ')}`);
+      const pub = spawnSync('dotnet', ['publish', '-c', 'Release', '-r', 'win-x64', '-p:EnableWindowsTargeting=true', '-v', 'q', '--nologo'], { cwd: dr.outDir, encoding: 'utf8', timeout: 600_000 });
+      // A WPF tree only has a runtime pack for a Windows RID, and that pack is
+      // a NuGet download: a host whose SDK cannot restore it (no network, a
+      // newer SDK that moved the pack) is a skipped gate, not a broken export.
+      // Any other failure is the export's own and still fails here.
+      const pubOut = (pub.stdout ?? '') + (pub.stderr ?? '');
+      const restoreOnly = /NETSDK1082|NETSDK1047|NU1101|NU1102|no runtime pack/i.test(pubOut);
+      if (restoreOnly) skippedGates.push('dotnet (the wpf runtime pack does not restore on this host)');
+      else assert(pub.status === 0, `dotnet: the release profile publishes${pub.status === 0 ? '' : ': ' + (pub.stdout ?? '').split('\n').filter((l) => l.includes('error')).slice(0, 2).join(' / ')}`);
     }
   }
   // The exported Compose tree must actually BUILD - the Android target was the
@@ -1682,26 +1689,24 @@ try {
   // The poisoned index.html above must not be in the export: if the emitter
   // ever goes back to copying dist/, this is the line that fails.
   assert(!existsSync(join(erdir, 'dist', 'index.html')) || !readFileSync(join(erdir, 'dist', 'index.html'), 'utf8').includes('stale build'), 'a stale dist/ in the project never reaches the export (the shell compiles the sources)');
-  assert(existsSync(join(erdir, '.github', 'workflows', 'electron.yml')) && existsSync(join(erdir, 'DEPLOY.md')), 'the electron export ships its CI workflow and DEPLOY.md');
+  assert(existsSync(join(erdir, '.github', 'workflows', 'electron.yml')), 'the electron export ships its CI workflow');
   writeFileSync(join(example, 'dist', 'index.html'), realIndex);
   void electronDir;
 
-  // 10b. the mobile CI scaffolds: every export ships the workflow and the
-  // DEPLOY.md that names its one manual signing step. A template missing from
-  // deploy/native/ used to leave the export with a warning and no manual.
+  // 10b. the mobile CI scaffolds: every export ships its workflow, and a
+  // template missing from deploy/native/ is a warning, never a silent drop.
   {
     const scaffolds: Array<[string, string]> = [['android', 'android.yml'], ['flutter', 'flutter.yml'], ['xcode', 'ios.yml']];
     for (const [target, workflow] of scaffolds) {
       const m = await exportProject(target as never, example, { apiBase: 'https://api.example.com', outRoot: join(scratch, `scaffold-${target}`) });
       assert(existsSync(join(m.outDir, '.github', 'workflows', workflow)), `${target}: the export ships its CI workflow`);
-      assert(existsSync(join(m.outDir, 'DEPLOY.md')), `${target}: the export ships the DEPLOY.md that names its manual step`);
       assert(!(m.warnings ?? []).some((w: string) => /deploy template .* is missing/.test(w)), `${target}: no deploy template is reported missing`);
     }
-    const fDeploy = readFileSync(join(scratch, 'scaffold-flutter', 'flutter', 'DEPLOY.md'), 'utf8');
-    assert(fDeploy.includes('flutter create --platforms=android,ios --org dev.rosezm') && fDeploy.includes('flutter build appbundle'), 'flutter: DEPLOY.md carries the runner scaffold and the release commands');
+    const fWorkflow = readFileSync(join(scratch, 'scaffold-flutter', 'flutter', '.github', 'workflows', 'flutter.yml'), 'utf8');
+    assert(fWorkflow.includes('--org dev.rosezm') && fWorkflow.includes('flutter build apk'), 'flutter: the workflow carries the runner scaffold and the release commands');
   }
 
-  // Every exported tree ships a .gitignore: the DEPLOY manuals say "push this
+  // Every exported tree ships a .gitignore: the CI workflows say "push this
   // folder to GitHub", and an Android keystore committed once is a key handed
   // to the world. One list per toolchain, merged with anything the emitter
   // already wrote.
@@ -7233,7 +7238,6 @@ h2 { font-size: 40px; }
     }
     for (const [label, dir] of [['wails', join(scratch, 'shell-wails', 'wails')], ['tauri', join(scratch, 'shell-tauri', 'tauri')]] as const) {
       assert(existsSync(join(dir, '.github', 'workflows', `${label}.yml`)), `${label}: the CI workflow ships with the export`);
-      assert(existsSync(join(dir, 'DEPLOY.md')), `${label}: DEPLOY.md ships with the export`);
     }
     const conf = JSON.parse(readFileSync(join(tauriDir, 'tauri.conf.json'), 'utf8'));
     assert(conf.build.frontendDist === '../frontend', 'tauri: frontendDist points at the built site (relative to src-tauri/)');
@@ -7407,9 +7411,7 @@ h2 { font-size: 40px; }
     // A CI scaffold turns "an exported project opened in an IDE and stopped
     // there" into "push and it builds for every platform" - the same wiring the
     // native targets already had.
-    for (const f of [join('.github', 'workflows', 'zig.yml'), 'DEPLOY.md']) {
-      assert(existsSync(join(r.outDir, f)), `zig: ${f} ships with the export`);
-    }
+    assert(existsSync(join(r.outDir, '.github', 'workflows', 'zig.yml')), 'zig: the CI workflow ships with the export');
     assert(readFileSync(join(r.outDir, '.github/workflows/zig.yml'), 'utf8').includes('version: 0.17.0'), 'zig: the CI pins the version the tree was written against');
     assert(/std\.Thread\.spawn\(\.\{\}, serveConnection/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: every connection gets its own thread - a single stalled client must not hold the server');
     assert(/fn readRequest\(/.test(readFileSync(join(r.outDir, 'main.zig'), 'utf8')), 'zig: the request is read until the header block is complete, not until the first packet returns');
@@ -7527,8 +7529,6 @@ h2 { font-size: 40px; }
     // org/name would put every export on dev.rosezm.rosezm_app.
     const idFlutterYml = readFileSync(join(scratch, 'id-flutter', 'flutter', '.github', 'workflows', 'flutter.yml'), 'utf8');
     assert(idFlutterYml.includes('--org com.acme --project-name widgets') && !idFlutterYml.includes('dev.rosezm'), 'flutter: the CI workflow scaffolds the runners with the app\'s own identity');
-    const idFlutterDeploy = readFileSync(join(scratch, 'id-flutter', 'flutter', 'DEPLOY.md'), 'utf8');
-    assert(idFlutterDeploy.includes('--org com.acme --project-name widgets'), 'flutter: DEPLOY.md scaffolds with the identity the workflow uses');
     const idFlutterReadme = readFileSync(join(scratch, 'id-flutter', 'flutter', 'README.md'), 'utf8');
     assert(idFlutterReadme.includes('--org com.acme --project-name widgets') && !idFlutterReadme.includes('no third-party dependencies'), 'flutter: the README gives the real first-run command and does not claim a dependency-free project');
     // The name is user text that lands in XML: escaped, not trusted.

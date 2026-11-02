@@ -8,7 +8,6 @@
  * each exported project, all copied from the templates in `deploy/native/`:
  *
  *   .github/workflows/<target>.yml   the CI build (unsigned; ready to edit)
- *   DEPLOY.md                        the one manual step (signing key/profile)
  *   rosezmApp.xcodeproj/xcshareddata/xcschemes/rosezmApp.xcscheme
  *                                    (xcode only - `xcodebuild archive`
  *                                    requires a scheme, and Xcode only
@@ -24,15 +23,15 @@ import { fileURLToPath } from 'node:url';
 
 export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig' | 'electron';
 
-/** One workflow + manual per target, keyed by the export target name. */
-const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; deployMd: string; label: string }> = {
-  wails: { workflow: 'wails.yml', deployMd: 'wails.DEPLOY.md', label: 'wails' },
-  tauri: { workflow: 'tauri.yml', deployMd: 'tauri.DEPLOY.md', label: 'tauri' },
-  zig: { workflow: 'zig.yml', deployMd: 'zig.DEPLOY.md', label: 'zig' },
-  android: { workflow: 'android.yml', deployMd: 'android.DEPLOY.md', label: 'android' },
-  xcode: { workflow: 'ios.yml', deployMd: 'ios.DEPLOY.md', label: 'xcode' },
-  flutter: { workflow: 'flutter.yml', deployMd: 'flutter.DEPLOY.md', label: 'flutter' },
-  electron: { workflow: 'electron.yml', deployMd: 'electron.DEPLOY.md', label: 'electron' },
+/** One workflow per target, keyed by the export target name. */
+const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; label: string }> = {
+  wails: { workflow: 'wails.yml', label: 'wails' },
+  tauri: { workflow: 'tauri.yml', label: 'tauri' },
+  zig: { workflow: 'zig.yml', label: 'zig' },
+  android: { workflow: 'android.yml', label: 'android' },
+  xcode: { workflow: 'ios.yml', label: 'xcode' },
+  flutter: { workflow: 'flutter.yml', label: 'flutter' },
+  electron: { workflow: 'electron.yml', label: 'electron' },
 };
 
 /**
@@ -50,8 +49,8 @@ function templateDir(): string | null {
 }
 
 /**
- * Emit the CI workflow, DEPLOY.md and (for xcode) the shared scheme into one
- * exported project. Returns the files written, relative to `exportRoot`.
+ * Emit the CI workflow and (for xcode) the shared scheme into one exported
+ * project. Returns the files written, relative to `exportRoot`.
  *
  * `exportRoot` is the exported target's own directory (`<out>/android`,
  * `<out>/xcode`, `<out>/flutter`): the workflow sits at its root, so every
@@ -91,7 +90,6 @@ export async function writeDeployScaffold(
     .replaceAll('__ROSEZM_PROJECT__', vars.project ?? 'rosezm_app');
 
   await emit(spec.workflow, path.join(exportRoot, '.github', 'workflows', spec.workflow), fill);
-  await emit(spec.deployMd, path.join(exportRoot, 'DEPLOY.md'), fill);
 
   if (target === 'xcode') {
     // A shared scheme is what `xcodebuild archive -scheme rosezmApp` looks for.
