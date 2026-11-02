@@ -71,7 +71,11 @@ export async function writeDeployScaffold(
   const written: string[] = [];
   const emit = async (template: string, dest: string, transform?: (src: string) => string): Promise<void> => {
     const src = path.join(dir, template);
-    if (!fs.existsSync(src)) {
+    // Exact case, not just "resolves": macOS is case-insensitive, so a template
+    // named `RosezmApp.xcscheme` was reachable locally and missing on the Linux
+    // runner - the export shipped no scheme and the suite only found out in CI.
+    const listed = fs.existsSync(src) && fs.readdirSync(path.dirname(src)).includes(path.basename(src));
+    if (!listed) {
       warnings.push(`${spec.label}: deploy template ${template} is missing - that file is skipped`);
       return;
     }
@@ -104,7 +108,7 @@ export async function writeDeployScaffold(
       warnings.push('xcode: the rosezmApp target id could not be read from project.pbxproj - the shared scheme is skipped (Xcode creates one when the project is opened)');
     } else {
       await emit(
-        'rosezmApp.xcscheme',
+        'RosezmApp.xcscheme',
         path.join(exportRoot, 'rosezmApp.xcodeproj', 'xcshareddata', 'xcschemes', 'rosezmApp.xcscheme'),
         (text) => text.replaceAll('__rosezm_TARGET_ID__', id),
       );

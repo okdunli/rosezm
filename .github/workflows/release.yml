@@ -4,8 +4,11 @@ on:
   push:
     tags: ['v*']
 
+# id-token: write is what npm's trusted publishing exchanges for a short-lived
+# publish token - no NPM_TOKEN secret lives in this repository.
 permissions:
   contents: write
+  id-token: write
 
 # The release is gated on CI: a tag alone does not publish anything. The
 # test job runs the same suites as the CI workflow, and the release job
@@ -55,7 +58,33 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # trusted publishing needs node >= 22.14 and npm >= 11.5.1
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
+      - name: Upgrade npm for trusted publishing
+        # staged publishing needs npm >= 11.15, trusted publishing >= 11.5.1
+        run: npm install -g npm@latest
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      # Staged, never live: `npm stage publish` puts the tarball in the staging
+      # area and a maintainer approves it with 2FA (`npm stage approve <id>`, or
+      # the Staged Packages tab on npmjs.com). The version is the tag's own, so a
+      # v0.2.1 tag stages rosezm@0.2.1. npm attaches the provenance attestation
+      # itself, so there is no --provenance flag to keep in sync.
+      - name: Stage the package on npm
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          # A staged tarball still becomes a version nobody can replace, and a
+          # mistyped tag would stage the wrong one under the right-looking name.
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "the tag is $GITHUB_REF_NAME but package.json says $version" >&2
+            exit 1
+          fi
+          if npm view "rosezm@$version" version >/dev/null 2>&1; then
+            echo "rosezm@$version is already live on npm - nothing to stage"
+          else
+            npm stage publish
+          fi
       - run: node tools/release-notes.mjs "$GITHUB_REF_NAME" > notes.md
       - uses: softprops/action-gh-release@v2
         with:
