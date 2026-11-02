@@ -59,9 +59,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # the newest 22.x: a pinned 22.14.0 was too old for current npm, and
-          # the tests themselves run in the job above, on their own version
+          # the tests themselves run in the job above, on their own version.
+          # No registry-url: that writes `_authToken=${NODE_AUTH_TOKEN}` into
+          # .npmrc, and with no token to fill it npm sent an empty credential and
+          # answered E401 before it ever tried the OIDC exchange.
           node-version: 22
-          registry-url: https://registry.npmjs.org
       - name: Upgrade npm for trusted publishing
         # npm 11 is the line that carries both features this workflow needs -
         # trusted publishing (>= 11.5.1) and staged publishing (>= 11.15) - and
@@ -70,6 +72,19 @@ jobs:
         run: npm install -g npm@11
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: Drop any inherited npm credential
+        run: |
+          npm config delete //registry.npmjs.org/:_authToken 2>/dev/null || true
+          npm config delete //registry.npmjs.org/:_auth 2>/dev/null || true
+      # id-token: write is what mints these; printing presence (never the value)
+      # is the difference between "the OIDC path was never available" and "npm
+      # rejected the publisher configured on npmjs.com".
+      - name: Show the OIDC surface
+        run: |
+          for v in ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+            if [ -n "${!v}" ]; then echo "$v present"; else echo "$v MISSING"; fi
+          done
+          npm --version
       # Staged, never live: `npm stage publish` puts the tarball in the staging
       # area and a maintainer approves it with 2FA (`npm stage approve <id>`, or
       # the Staged Packages tab on npmjs.com). The version is the tag's own, so a
