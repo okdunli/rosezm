@@ -2704,7 +2704,6 @@ async function exportCmd(): Promise<void> {
       console.error(`rosezm export --watch: no ${path.relative(process.cwd(), srcRoot)} to watch`);
       process.exit(1);
     }
-    console.log(`  watching ${path.relative(process.cwd(), srcRoot)} - Ctrl+C to stop`);
     let timer: NodeJS.Timeout | null = null;
     let busy = false;
     const again = async (): Promise<void> => {
@@ -2733,6 +2732,10 @@ async function exportCmd(): Promise<void> {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => { void again(); }, 120);
     });
+    // Printed AFTER the watch is armed: a save made the instant this line shows
+    // up used to land in the gap before fs.watch existed and was lost - the
+    // watcher then sat there until the next edit.
+    console.log(`  watching ${path.relative(process.cwd(), srcRoot)} - Ctrl+C to stop`);
   }
 }
 
