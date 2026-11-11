@@ -1379,7 +1379,7 @@ try {
 // the cookie - so the first language rendered was replayed to every other
 // language for a whole TTL, and boot warm (which sends no accept-language at
 // all) let the app's default win that shared key: an English browser got the
-// Chinese installer (BUG.md AB). The key now carries the negotiated language,
+// Chinese installer. The key now carries the negotiated language,
 // and a response that declares itself uncacheable (no-store / no-cache /
 // private / max-age=0) or that varies on a dimension the key does not carry
 // (anything but accept-encoding) never enters the store. The fixture echoes
@@ -1545,7 +1545,7 @@ try {
   lang.kill();
 }
 
-// AC (BUG.md): the hot cache used to store and replay responses that carry a
+// the hot cache used to store and replay responses that carry a
 // Set-Cookie. The key folds the cookie principal, and anonymous visitors share
 // the empty-cookie slot - so a route that issues a cookie on first visit would
 // hand the SAME cookie to every subsequent anonymous visitor: session fixation,
@@ -1594,7 +1594,7 @@ try {
   const a1 = await anonGet('/api/issue');
   assert(a1.status === 200 && a1.sid && a1.sid.startsWith('sid='), `the first anonymous visitor is issued a cookie (got ${a1.status} ${a1.sid})`);
   // Second anonymous visitor must get its OWN cookie - not a replay of the
-  // first visitor's (which is the cross-visitor leak BUG.md AC describes).
+  // first visitor's (the cross-visitor leak described above).
   const a2 = await anonGet('/api/issue');
   assert(a2.status === 200, `the second anonymous request answers (got ${a2.status})`);
   assert(a2.sid !== a1.sid, `a Set-Cookie is never replayed across anonymous visitors - each gets its own (first ${a1.sid}, second ${a2.sid})`);
@@ -1609,7 +1609,7 @@ try {
   scSrv.kill();
 }
 
-// AM (BUG.md): the conditional-request layer was HTML-only. A feed, a sitemap, a
+// the conditional-request layer was HTML-only. A feed, a sitemap, a
 // robots.txt or a JSON API is the most-polled dynamic document there is, and it
 // used to leave the server with NO validator at all, so every poll re-paid the
 // whole body. The fix widens the gate to every buffered response. It also had to
@@ -1752,7 +1752,7 @@ const fn = fs.readFileSync(path.join(REPO, 'deploy/api/rosezm.ts'), 'utf8');
 assert(fn.includes("from '../src/cli/edge.ts'"), 'the function imports the edge adapter that ships in this repo');
 // The default export must be a FUNCTION: the Vercel Node runtime rejects the
 // { fetch } object shape at boot - every deploy of the old template answered
-// 500 FUNCTION_INVOCATION_FAILED before the first request (BUG.md BUG-009).
+// 500 FUNCTION_INVOCATION_FAILED before the first request.
 assert(fn.includes('export default async function rosezm') && fn.includes('a instanceof Request'), 'the Vercel entry is a dual-mode function (the { fetch } object is rejected by the Node runtime)');
 assert(fs.existsSync(path.join(REPO, 'src/cli/edge.ts')), 'the imported adapter file exists');
 const nodeDocker = fs.readFileSync(path.join(REPO, 'deploy/Dockerfile.node'), 'utf8');
@@ -3615,16 +3615,17 @@ assert(parsedOne.ok === true && parsedOne.target === 'weapp' && parsedOne.pages.
 const groupedHuman = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(groupedHuman.out.includes('server calls with no --api endpoint'), 'the grouped output collapses the missing-endpoint warning to its fact, not its file list');
 assert(!groupedHuman.out.includes('+8 more'), 'the grouped output does not print the file list the --json output already carries');
-const allJson = await run(['export', 'all', path.join(REPO, 'example'), '--json'], REPO);
+const allJson = await run(['export', 'all', path.join(REPO, 'example'), '--build', '--json'], REPO);
 const parsedAll = JSON.parse(allJson.out.trim().split('\n').pop());
-assert(parsedAll.ok === true && parsedAll.targets.length === targetCount && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
+const allDiagnostics = `exit=${allJson.code} failed=${JSON.stringify(parsedAll.failed ?? [])} stderr=${allJson.err.slice(-400)}`;
+assert(parsedAll.ok === true && parsedAll.targets.length === targetCount && parsedAll.targets.every((t) => t.pages >= 0), `export all reports every target as JSON (${allDiagnostics})`);
 // `export all` writes the index a CI reads: one file saying where each tree is.
 const allManifest = JSON.parse(fs.readFileSync(path.join(REPO, 'example', '.rosezm-export', 'rosezm-export-all.json'), 'utf8'));
 assert(allManifest.targets.length === targetCount && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
 const human = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(human.out.includes('warning(s) -') && human.out.includes('kind(s)'), 'the human exporter groups its warnings by kind instead of dumping 40 lines');
 
-// BUG.md AP: a vendored copy of this tree sits on a live sync, so a gate that
+// a vendored copy of this tree sits on a live sync, so a gate that
 // compares BYTES flaps. `rosezm export surface` is the thing a gate can pin
 // instead: the module exports, the CLI verbs, and every target's kit.
 const surfHuman = await run(['export', 'surface'], REPO);
@@ -3685,7 +3686,7 @@ await rmTreeStable(tmp);
   for (const f of srcFiles) {
     try { esbuild.transformSync(fs.readFileSync(f, 'utf8'), { loader: f.endsWith('.mjs') ? 'js' : 'ts' }); }
     catch (err) {
-      // BUG.md AN: a backtick in a `///` comment opens a template literal and
+ // a backtick in a `///` comment opens a template literal and
       // the failure surfaces hundreds of lines away, so the message must name
       // the file AND the offending line - an editor and tsc both accept it.
       const first = err?.errors?.[0];

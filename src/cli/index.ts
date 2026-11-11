@@ -169,7 +169,7 @@ async function sendWebResponse(req: any, web: any, res: any): Promise<void> {
   // sees only the app's own Vary dimensions.
   addVary(res, 'Accept-Encoding');
   res.statusCode = web.status;
-  // AM (BUG.md): a short-circuit used to be the one exit in this server with no
+ // a short-circuit used to be the one exit in this server with no
   // validator at all - a 302 from middleware, a JSON error from an auth guard,
   // a static file the app served itself - every poll re-transferred the whole
   // body. The tag is content-derived (never length-derived, which let two
@@ -271,7 +271,7 @@ if (__portArg) {
 
 // --strict-port: bind the asked port or die. The default hops up to 20 ports
 // (nice for a human running dev), but a deploy script that checks a fixed
-// URL must not find its server three ports away - AW in BUG.md.
+// URL must not find its server three ports away.
 const STRICT_PORT = process.argv.includes('--strict-port');
 
 
@@ -1447,7 +1447,7 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
             ssrModule.setQuery?.(queryOf(req.url));
             if ((req.method || 'GET') !== 'GET') ssrModule.invalidateRenderCache?.();
             let apiRes = await ssrModule.handleApi(reqMethod, apiPath, request);
-            // AM (BUG.md): the JSON half of an app is the most-polled dynamic
+ // the JSON half of an app is the most-polled dynamic
             // document there is, and it used to be the one buffered exit with no
             // validator at all. Content-derived, app's own ETag wins, GET-only 304.
             //
@@ -1907,7 +1907,7 @@ function projectTag(): string {
  * packed layout, until pack.mjs re-runs besides). The banner names the
  * fingerprint so "I fixed it but nothing changed" is visible at a glance:
  * two servers printing different fingerprints are running different
- * compilers, whatever their version line says. AW in BUG.md.
+ * compilers, whatever their version line says.
  */
 function compilerFingerprint(): string {
   for (const rel of ['../compiler/index.ts', '../../src/compiler/index.ts']) {
@@ -2131,7 +2131,7 @@ async function serve(): Promise<void> {
         // Accept-Language) and setHeader would drop them.
         addVary(res, 'Accept-Encoding');
         const htmlDoc = (response.headers.get('content-type') ?? '').startsWith('text/html');
-        // AM (BUG.md): the validator no longer lives behind the text/html gate.
+ // the validator no longer lives behind the text/html gate.
         // A feed, a sitemap, a robots.txt or a JSON API answered by the edge used
         // to be the machine-read documents that never got a conditional answer,
         // so every poll re-transferred the whole body. The tag is content-derived
@@ -2759,7 +2759,7 @@ async function exportCmd(): Promise<void> {
   }
   // `export surface` prints what a vendored consumer may key on: the module
   // exports, the CLI verbs and every target's kit, plus one hash over the lot.
-  // A gate that pins THIS survives upstream churn (BUG.md AP) - the bytes of a
+ // A gate that pins THIS survives upstream churn - the bytes of a
   // live-synced tree move without the surface moving.
   if (target === 'surface') {
     const { publicSurface } = await import('../export/surface.js');
@@ -2793,6 +2793,19 @@ async function exportCmd(): Promise<void> {
     const cssAll = flagAll('--css');
     const startedAll = Date.now();
     const done: string[] = [];
+    // The batch's WebView shells bake dist/index.html; a fresh checkout has
+    // no built site, so `--build` runs the project's own build ONCE before
+    // the batch instead of failing each shell individually.
+    if (rest.includes('--build')) {
+      const built = spawnSync(process.execPath, [...process.execArgv, process.argv[1], 'build', '.'], {
+        cwd: projectRootAll,
+        stdio: asJson ? ['ignore', 'ignore', 'inherit'] : 'inherit',
+      });
+      if (built.status !== 0) {
+        console.error('rosezm export all: the project build failed - nothing was exported (fix the build first)');
+        process.exit(1);
+      }
+    }
     const failures: Array<{ target: string; error: string }> = [];
     const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; bytes?: number; files?: number; ms?: number; error?: string; kernelChecks?: number }> = [];
     // One target's failure must not hide the other sixteen: a batch command
