@@ -27,13 +27,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { extractAppLifecycle } from './miniprogram.js';
+import { keepOnlyExcept, SIGNING_KEEP } from './fs-util.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
+import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, stripTsTypes, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, swiftFill, type SvgShape } from './svg-path.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
-import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteAutoSetterWrites, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, rewriteJoinCalls, rewriteStringMethods, coerceStringConcat, coerceStringConcatInAssignments, callifyBareReads, collectForms, formFieldKey, isSubmitButton, type FormInfo, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, rewriteForOf, rewriteLoweredLogicalAssign, rewriteOptionalIndex, rewriteRegexReplace, rewriteObjectAssign, rewriteSetDedupe, rewriteInCheck, rewriteCollectionChain, rewriteLocalArrow, spellArrowParams } from './state-ops.js';
+import { translateExpr, rewriteStringCalls, rewriteToFixedCalls, type ExprDialect, matchArrow } from './expr-ir.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 import {
@@ -48,7 +49,10 @@ import {
   type StyleModel,
   type StyleSheet,
   type StyleSubject,
-} from './style-engine.js';
+  unsupportedForTarget,
+  listMarkerOf,
+
+  filterDowngradesFor,}  from './style-engine.js';
 import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
 import { appIcon } from './app-icon.js';
 
@@ -67,14 +71,14 @@ const ROW_TAGS = new Set(['header', 'footer', 'nav', 'tr']);
 
 /** Element/tag rules (button {}, a {}, nav a {}) compiled once per export. */
 let tagStyles = new Map<string, StyleModel>();
-/** R471: the prefers-color-scheme dark half, kept apart from the light rows. */
+/** The prefers-color-scheme dark half, kept apart from the light rows. */
 let swiftDarkClasses = new Map<string, StyleModel>();
 let swiftDarkTags = new Map<string, StyleModel>();
 let swiftDarkRules = 0;
-/** R475: asset name of every public image copied for this export, by URL. */
+/** Asset name of every public image copied for this export, by URL. */
 let swiftMedia = new Map<string, string>();
 
-/** R478: Swift's reserved words. A state named `repeat` or `where` used to be
+/** Swift's reserved words. A state named `repeat` or `where` used to be
  *  emitted verbatim, and the page stopped compiling. */
 const SWIFT_KEYWORDS = new Set(['associatedtype', 'class', 'deinit', 'enum', 'extension', 'fileprivate', 'func', 'import', 'init', 'inout', 'internal', 'let', 'open', 'operator', 'private', 'precedencegroup', 'protocol', 'public', 'rethrows', 'static', 'struct', 'subscript', 'typealias', 'var', 'break', 'case', 'continue', 'default', 'defer', 'do', 'else', 'fallthrough', 'for', 'guard', 'if', 'in', 'repeat', 'return', 'throw', 'switch', 'where', 'while', 'as', 'catch', 'false', 'is', 'nil', 'super', 'self', 'Self', 'throws', 'true', 'try', 'any', 'some', 'async', 'await', 'actor', 'convenience', 'dynamic', 'final', 'indirect', 'lazy', 'mutating', 'nonmutating', 'optional', 'override', 'required', 'unowned', 'weak']);
 let swiftNames = new Map<string, string>();
@@ -184,10 +188,15 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     });
   }
 
-  // R478: one rename map for the whole export, built from the state names.
+  // One rename map for the whole export, built from the state names.
   swiftNames = new Map<string, string>();
   for (const p of pages) {
     for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data)\b/g)) {
+      if (SWIFT_KEYWORDS.has(m[1]) && !swiftNames.has(m[1])) swiftNames.set(m[1], m[1] + '_');
+    }
+    // A page FUNCTION named after a Swift keyword (`function guard()`) is a
+    // parse error wherever it is declared - the handler, not just a state.
+    for (const m of (p.script ?? '').matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
       if (SWIFT_KEYWORDS.has(m[1]) && !swiftNames.has(m[1])) swiftNames.set(m[1], m[1] + '_');
     }
   }
@@ -201,7 +210,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     components.push({ name, view: viewName(name), nodes: parsed.nodes, script: parsed.script, slots: collectSlots(parsed.nodes), style: parsed.style ?? '' });
   }
 
-  await fs.promises.rm(out, { recursive: true, force: true });
+  await keepOnlyExcept(out, [], [SIGNING_KEEP]);
   await fs.promises.mkdir(path.join(appDir, 'Pages'), { recursive: true });
   await fs.promises.mkdir(path.join(appDir, 'Components'), { recursive: true });
   await fs.promises.mkdir(path.join(appDir, 'Kit'), { recursive: true });
@@ -217,7 +226,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   // come from the site's stylesheet, and a family with no bundled file is a
   // silent fall back to the system default.
   const allCss = [globalCss, ...pages.map((p) => p.style)].join('\n') + '\n' + SHELL_STYLES;
-  // R465: the launch frame draws before SwiftUI does. Its colour asset is the
+  // The launch frame draws before SwiftUI does. Its colour asset is the
   // app's own body colour, so a dark app no longer opens on a white sheet.
   const bodyBg = (() => {
     const raw = (cascadeFor(parseStylesheet(allCss), { tag: 'body', classes: [] }, [], { viewport: 390 }).model.background ?? '').trim();
@@ -226,7 +235,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
     return hex[1].length === 3 ? '#' + hex[1].split('').map((c) => c + c).join('') : hex[0];
   })();
   const { assets, vectors } = await copyAssets(root, path.join(appDir, 'Resources'), pages.map((p) => p.nodes), warnings, allCss);
-  // R465: the named colour UILaunchScreen points at - one color set, the body
+  // The named colour UILaunchScreen points at - one color set, the body
   // background, so the launch frame matches the first painted frame.
   const launchSet = path.join(appDir, 'Resources', 'Assets.xcassets', 'RoseLaunchBackground.colorset');
   await fs.promises.mkdir(launchSet, { recursive: true });
@@ -255,7 +264,7 @@ export async function emitSwift(opts: EmitSwiftOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseKit.swift'), renderKit(opts.apiBase ?? '', content, native, pages.map((p) => p.route), bakeRouteStates(root)), 'utf8');
   await fs.promises.writeFile(path.join(appDir, 'Kit', 'RoseTheme.swift'), renderTheme(styles, fontMap), 'utf8');
   for (const comp of components) {
-    await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap, globalCss), 'utf8');
+    await fs.promises.writeFile(path.join(appDir, 'Components', comp.view + '.swift'), renderComponent(comp, assets, warnings, fontMap, globalCss, components), 'utf8');
   }
   for (const page of pages) {
     await fs.promises.writeFile(path.join(appDir, 'Pages', page.view + '.swift'), renderPage(page, components, assets, vectors, warnings, content, fontMap, globalCss), 'utf8');
@@ -327,7 +336,7 @@ async function copyAssets(root: string, resources: string, trees: IrNode[][], wa
     }
   };
   trees.forEach(visit);
-  // R475: a background-image in a <style> block is copied like an <img> src.
+  // A background-image in a <style> block is copied like an <img> src.
   for (const m of css.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\1\s*\)/gi)) {
     const url = m[2];
     if (used.has(url) || vectors.has(url)) continue;
@@ -363,7 +372,7 @@ async function copyAssets(root: string, resources: string, trees: IrNode[][], wa
     await fs.promises.mkdir(path.join(resources, 'Assets.xcassets'), { recursive: true });
     await fs.promises.writeFile(path.join(resources, 'Assets.xcassets', 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 } }, null, 2) + '\n', 'utf8');
   }
-  // R448: the build settings name AppIcon, so an app iconset has to exist -
+  // The build settings name AppIcon, so an app iconset has to exist -
   // Xcode fails the build when the catalog carries none. public/icon.png is the
   // convention every other target already follows; a missing one draws the
   // placeholder and says so.
@@ -421,14 +430,25 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
   if (!css.trim()) return rules;
   const sheet = parseStylesheet(css);
   for (const w of sheet.warnings) warnings.push(`xcode: ${w}`);
+  // The model carries a few properties SwiftUI cannot paint - the report
+  // says which, for THIS target, instead of the declaration vanishing.
+  const unsupported = unsupportedForTarget('xcode', sheet);
+  if (unsupported.length) {
+    warnings.push(`xcode: these declarations have no SwiftUI equivalent - dropped: ${unsupported.join(', ')}`);
+  }
+  // The filter/collapse downgrade lines: what the CSS asked and what
+  // THIS target draws (or does not) - named by selector, never silent.
+  for (const line of filterDowngradesFor('xcode', sheet)) {
+    warnings.push('xcode: ' + line);
+  }
   const merged = new Map<string, StyleModel>();
-  // R259: focus rows register in a second pass (see below).
+  // Focus rows register in a second pass (see below).
   const focusRules: Array<{ last: { classes: string[] }; focus: StyleModel }> = [];
-  // R269: active rows register in the same second pass (see below).
+  // Active rows register in the same second pass (see below).
   const activeRules: Array<{ last: { classes: string[] }; active: StyleModel }> = [];
   for (const rule of sheet.rules) {
     const last = rule.parts[rule.parts.length - 1];
-    // R247: `:hover` is not dropped - it becomes a second style class keyed
+    // `:hover` is not dropped - it becomes a second style class keyed
     // `__hover_<class>`, applied while the pointer is over the element
     // (.onHover). An iPhone has no pointer, so the flag never flips there; on
     // an iPad with a trackpad or a Mac (SwiftUI targets both) it is real.
@@ -438,11 +458,11 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
         merged.set(key, mergeModels(merged.get(key) ?? null, rule.hover));
       }
     }
-    // R259: the `:focus` half, registered in a SECOND pass below (after every
+    // The `:focus` half, registered in a SECOND pass below (after every
     // base row) so a recolor-only half can borrow the base border width
     // whatever order the stylesheet listed.
     if (rule.focus && last.classes.length) focusRules.push({ last, focus: rule.focus });
-    // R269: the `:active` half, same second-pass shape with the pressing flag.
+    // The `:active` half, same second-pass shape with the pressing flag.
     if (rule.active && last.classes.length) activeRules.push({ last, active: rule.active });
     if (last.unsupported.includes(':hover') && !rule.hover) {
       warnings.push(`xcode: :hover has no SwiftUI equivalent on "${rule.selector}" - dropped`);
@@ -478,7 +498,7 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
       merged.set(key, mergeModels(merged.get(key) ?? null, rule.model));
     }
   }
-  // R259: focus rows go in second - a recolor-only half borrows the base row's
+  // Focus rows go in second - a recolor-only half borrows the base row's
   // border width (the browser shorthand rule); every base row is merged by now.
   for (const f of focusRules) {
     for (const cls of f.last.classes) {
@@ -488,7 +508,7 @@ function compileStyles(css: string, warnings: string[], fontMap: Map<string, str
       merged.set(key, mergeModels(merged.get(key) ?? null, adopt));
     }
   }
-  // R269: active rows register right after focus rows, the same second pass.
+  // Active rows register right after focus rows, the same second pass.
   for (const f of activeRules) {
     for (const cls of f.last.classes) {
       const key = scope ? `__active_${cls}__${scope}` : `__active_${cls}`;
@@ -554,16 +574,23 @@ function swiftTextModsOf(model: StyleModel, fontMap: Map<string, string>): strin
   }
   if (model.fontWeight !== undefined) out.push(`.fontWeight(${swiftWeightOf(model.fontWeight)})`);
   if (model.italic) out.push('.italic()');
+  if (model.tabularNums) out.push('.monospacedDigit()');
   if (model.letterSpacing !== undefined) out.push(`.kerning(${n(model.letterSpacing)})`);
   if (model.underline) out.push('.underline()');
   if (model.strike) out.push('.strikethrough()');
   if (model.textAlign) out.push(`.multilineTextAlignment(${SWIFT_TEXT_ALIGN[model.textAlign] ?? '.leading'})`);
-  // R415: one line with a tail ellipsis - SwiftUI's own truncation pair.
+  // One line with a tail ellipsis - SwiftUI's own truncation pair.
   if (model.ellipsis) out.push('.lineLimit(1).truncationMode(.tail)');
   else if (model.nowrap) out.push('.lineLimit(1)');
   if (model.lineHeight !== undefined && model.fontSize !== undefined && model.lineHeight > 1) {
     out.push(`.lineSpacing(${n(Math.round((model.fontSize * model.lineHeight - model.fontSize) * 10) / 10)})`);
   }
+  // The shadow the glyphs cast (CSS text-shadow).
+  if (model.textShadow) {
+    out.push(`.shadow(color: Color.rose(${JSON.stringify(hexOf(model.textShadow.color))}), radius: ${n(model.textShadow.blur)}, x: ${n(model.textShadow.x)}, y: ${n(model.textShadow.y)})`);
+  }
+  // user-select: none - the text is not selectable.
+  if (model.noSelect) out.push('.textSelection(.disabled)');
   return out;
 }
 
@@ -601,12 +628,19 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
       : `.clipShape(RoseCorners(radii: [${r.map((v) => n(v)).join(', ')}]))`);
   }
   if (model.shadow) out.push(`.shadow(color: Color.rose(${JSON.stringify(hexOf(model.shadow.color))}), radius: ${n(model.shadow.blur)}, x: ${n(model.shadow.x)}, y: ${n(model.shadow.y)})`);
+  // The shadow the glyphs cast (CSS text-shadow) - SwiftUI draws it on the text.
+  if (model.textShadow) out.push(`.shadow(color: Color.rose(${JSON.stringify(hexOf(model.textShadow.color))}), radius: ${n(model.textShadow.blur)}, x: ${n(model.textShadow.x)}, y: ${n(model.textShadow.y)})`);
   if (model.opacity !== undefined) out.push(`.opacity(${n(model.opacity)})`);
-  // R488: the CSS transform as SwiftUI's own three modifiers.
+  // pointer-events: none - the view stops taking the pointer.
+  if (model.noPointer) out.push('.allowsHitTesting(false)');
+  // The filter functions SwiftUI draws natively.
+  if (model.filterBlur !== undefined && model.filterBlur > 0) out.push(`.blur(radius: ${n(model.filterBlur)})`);
+  if (model.filterBrightness !== undefined && model.filterBrightness !== 1) out.push(`.brightness(${n(model.filterBrightness - 1)})`);
+  // The CSS transform as SwiftUI's own three modifiers.
   if (model.translateX !== undefined || model.translateY !== undefined) out.push(`.offset(x: ${n(model.translateX ?? 0)}, y: ${n(model.translateY ?? 0)})`);
   if (model.rotate !== undefined) out.push(`.rotationEffect(.degrees(${n(model.rotate)}))`);
   if (model.scale !== undefined) out.push(`.scaleEffect(${n(model.scale)})`);
-  // R420: CSS aspect-ratio is SwiftUI's own aspectRatio modifier.
+  // CSS aspect-ratio is SwiftUI's own aspectRatio modifier.
   if (model.aspectRatio !== undefined) out.push(`.aspectRatio(${n(model.aspectRatio)}, contentMode: .fit)`);
   if (model.width && model.width.u !== 'auto') {
     out.push(model.width.u === '%' ? '.frame(maxWidth: .infinity)' : `.frame(width: ${n(model.width.n)})`);
@@ -615,7 +649,7 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
     out.push(model.height.u === '%' ? '.frame(maxHeight: .infinity)' : `.frame(height: ${n(model.height.n)})`);
   }
   if (model.margin) out.push(`.padding(${edgeLiteral(model.margin)})`);
-  // R224: SwiftUI places an out-of-flow view with .position inside a ZStack, but
+  // SwiftUI places an out-of-flow view with .position inside a ZStack, but
   // a plain .offset is the safe reading when the parent is a V/HStack - it shifts
   // the view without re-parenting it, which is what CSS position looks like here.
   if (model.position) {
@@ -624,7 +658,7 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
     out.push(`.offset(x: ${n(x)}, y: ${n(y)})`);
   }
   if (model.zIndex !== undefined && (model.position || model.shadow)) out.push(`.zIndex(${n(model.zIndex)})`);
-  // R228: SwiftUI's frame carries the max-height that makes the box scrollable;
+  // SwiftUI's frame carries the max-height that makes the box scrollable;
   // wrapping it in a ScrollView is what turns overflow:auto into real scrolling.
   if (model.overflow === 'scroll') out.push('.roseScroll()');
   return out;
@@ -632,7 +666,7 @@ function swiftBoxModsOf(model: StyleModel, opts: { full: boolean; align: string 
 
 /** The frame alignment that carries justify-content for a row container. */
 function swiftFrameAlignOf(justify: string | undefined, dir: string): string {
-  // R256: the callers interpolate this straight into `alignment:` - it must be
+  // The callers interpolate this straight into `alignment:` - it must be
   // the SwiftUI member (.leading), not a bare identifier the compiler rejects.
   if (dir !== 'row' || !justify) return '.leading';
   if (justify === 'center' || justify === 'around' || justify === 'evenly') return '.center';
@@ -648,16 +682,17 @@ function swiftStyleLiteral(model: StyleModel, fontMap: Map<string, string>): str
   if (model.color) args.push(`color: ${q(model.color)}`);
   if (model.background) args.push(`background: ${q(model.background)}`);
   if (model.backgroundImage) {
-    // R475: an asset name for a copied picture; a remote URL stays a URL.
+    // An asset name for a copied picture; a remote URL stays a URL.
     const mapped = swiftMedia.get(model.backgroundImage) ?? model.backgroundImage;
     args.push(`image: ${q(mapped)}`);
-    // R483: cover fills the box, contain fits inside it.
+    // Cover fills the box, contain fits inside it.
     args.push(`imageFit: ${model.backgroundSize === 'contain' ? '"contain"' : '"cover"'}`);
   }
   if (model.gradient && model.gradient.stops.length >= 2) args.push(`gradient: [${model.gradient.stops.map((s) => q(s.color)).join(', ')}]`);
   if (model.fontSize !== undefined) args.push(`fontSize: ${n(model.fontSize)}`);
   if (model.fontWeight !== undefined) args.push(`weight: ${model.fontWeight}`);
   if (model.italic) args.push('italic: true');
+  if (model.tabularNums) args.push('tabularNums: true');
   if (model.letterSpacing !== undefined) args.push(`letterSpacing: ${n(model.letterSpacing)}`);
   if (model.lineHeight !== undefined && model.fontSize !== undefined) args.push(`lineHeight: ${n(Math.round(model.fontSize * model.lineHeight * 10) / 10)}`);
   if (model.textAlign) args.push(`align: ${q(model.textAlign)}`);
@@ -762,6 +797,7 @@ struct RoseStyle {
     var fontSize: Double? = nil
     var weight: Int? = nil
     var italic: Bool = false
+    var tabularNums: Bool = false
     var letterSpacing: Double? = nil
     var lineHeight: Double? = nil
     var align: String? = nil
@@ -802,6 +838,7 @@ struct RoseStyle {
         if let v = o.fontSize { m.fontSize = v }
         if let v = o.weight { m.weight = v }
         if o.italic { m.italic = true }
+        if o.tabularNums { m.tabularNums = true }
         if let v = o.letterSpacing { m.letterSpacing = v }
         if let v = o.lineHeight { m.lineHeight = v }
         if let v = o.align { m.align = v }
@@ -845,7 +882,7 @@ let roseTagStyles: [String: RoseStyle] = [
 ${tagRows}
 ]
 
-/// R471: the prefers-color-scheme dark half. roseDark is flipped by the page's
+/// The prefers-color-scheme dark half. roseDark is flipped by the page's
 /// body from SwiftUI's colorScheme, and roseResolve merges these on top only
 /// then - a light device never sees them.
 var roseDark = false
@@ -903,10 +940,12 @@ func rosePropsOf(_ props: [String: Any]) -> RoseStyle {
     var justify: String? = nil
     var items: String? = nil
     var direction: String? = nil
+    var tabularNums: Bool = false
     for (key, value) in props {
         switch key {
         case "color": color = roseColorOf(value)
         case "font-size": fontSize = roseFloatOf(value)
+        case "font-variant-numeric": tabularNums = (value as? String)?.contains("tabular") ?? false
         case "background", "background-color": background = roseColorOf(value)
         case "padding": padding = roseFloatOf(value)
         case "margin": margin = roseFloatOf(value)
@@ -926,6 +965,7 @@ func rosePropsOf(_ props: [String: Any]) -> RoseStyle {
         color: color,
         background: background,
         fontSize: fontSize,
+        tabularNums: tabularNums,
         padding: padding.map { [$0, $0, $0, $0] },
         margin: margin.map { [$0, $0, $0, $0] },
         radius: radius.map { [$0, $0, $0, $0] },
@@ -1105,16 +1145,23 @@ extension View {
             .fontWeight((s?.weight).map { roseWeightOf($0) })
             .kerning(s?.letterSpacing ?? 0)
             .italic(s?.italic ?? false)
+            .roseTabularIf(s?.tabularNums ?? false)
             .underline(s?.underline ?? false, color: nil)
             .strikethrough(s?.strike ?? false, color: nil)
             .multilineTextAlignment(roseAlignOf(s?.align))
             .lineSpacing(roseLineSpacingOf(s))
     }
 
+    /// font-variant-numeric: tabular-nums is a modifier with no argument in
+    /// SwiftUI, so the flag picks the view instead of being passed to it.
+    @ViewBuilder func roseTabularIf(_ on: Bool) -> some View {
+        if on { self.monospacedDigit() } else { self }
+    }
+
     /// The box half: the CSS background/border/padding chain at runtime.
     func roseBox(_ s: RoseStyle?) -> some View { modifier(RoseBoxMod(s: s)) }
 
-    /// R228: an overflow:auto box scrolls its own content. The frame carrying
+    /// An overflow:auto box scrolls its own content. The frame carrying
     /// the max-height is applied by the caller, so the view inside already has
     /// the size that makes it scrollable.
     func roseScroll() -> some View { ScrollView(.vertical, showsIndicators: true) { self } }
@@ -1143,11 +1190,15 @@ function nativeKit(native: NativeCapability[]): string {
   if (!native.length) return '';
   const branches = [
     native.includes('camera') ? `    if capability == "camera" {
-        // UIImagePickerController is the platform API, but it is a
-        // VIEW CONTROLLER, not a call: the presenting UIViewController must
-        // present it and receive the image through
+        // The SOURCE decides the picker: "gallery" opens
+        // the photo library, "camera" the camera. UIImagePickerController
+        // is the platform API, but it is a VIEW CONTROLLER, not a call:
+        // the presenting UIViewController must present it and receive the
+        // image through
         // imagePickerController(_:didFinishPickingMediaWithInfo:). Declare
-        // NSCameraUsageDescription in Info.plist and present it from the view.
+        // NSCameraUsageDescription / NSPhotoLibraryUsageDescription in
+        // Info.plist and present it from the view. The WebView shells
+        // answer the same contract through their own picker bridge.
         return nil
     }` : '',
     native.includes('geolocation') ? `    if capability == "geolocation" {
@@ -1180,6 +1231,13 @@ function nativeKit(native: NativeCapability[]): string {
         // uses; a duration option maps to heavier styles.
         let style = ((opts["duration"] as? Double) ?? 0) >= 100 ? UIImpactFeedbackGenerator.FeedbackStyle.heavy : UIImpactFeedbackGenerator.FeedbackStyle.medium
         UIImpactFeedbackGenerator(style: style).impactOccurred()
+        return true
+    }` : '',
+    native.includes('keep-awake') ? `    if capability == "keep-awake" {
+        // isIdleTimerDisabled is iOS's own "screen on while visible": the
+        // system resets it when the app leaves, opts["on"] == false hands
+        // control back.
+        UIApplication.shared.isIdleTimerDisabled = opts["on"] != false
         return true
     }` : '',
     native.includes('share') ? `    if capability == "share" {
@@ -1227,6 +1285,40 @@ function nativeKit(native: NativeCapability[]): string {
         RoseKit.roseScanRequested = true
         return nil
     }` : '',
+    native.includes('check-permission') ? `    if capability == "check-permission" {
+        // The AVFoundation authorization status IS the camera/microphone
+        // permission's answer; "not-determined" is "never asked".
+        let name = String(opts["name"] ?? "")
+        let status: AVAuthorizationStatus
+        switch name {
+        case "camera": status = AVCaptureDevice.authorizationStatus(for: .video)
+        case "microphone": status = AVCaptureDevice.authorizationStatus(for: .audio)
+        case "photos": status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        default: return nil
+        }
+        let state: String
+        switch status {
+        case .authorized: state = "granted"
+        case .denied, .restricted: state = "denied"
+        default: state = "not-determined"
+        }
+        return ["name": name, "state": state]
+    }` : '',
+    native.includes('request-permission') ? `    if capability == "request-permission" {
+        // The one request function: the system dialog IS the request, and
+        // the answer is the status afterwards. A refused dialog answers
+        // "denied" - never a crash.
+        let name = String(opts["name"] ?? "")
+        let status: AVAuthorizationStatus
+        switch name {
+        case "camera": status = AVCaptureDevice.requestAccess(for: .video) ? .authorized : .denied
+        case "microphone": status = AVCaptureDevice.requestAccess(for: .audio) ? .authorized : .denied
+        case "photos": status = PHPhotoLibrary.requestAuthorization(for: .readWrite) == .authorized ? .authorized : .denied
+        default: return nil
+        }
+        let state = status == .authorized ? "granted" : "denied"
+        return ["name": name, "state": state]
+    }` : '',
     native.includes('get-battery') ? `    if capability == "get-battery" {
         UIDevice.current.isBatteryMonitoringEnabled = true
         let level = Int(UIDevice.current.batteryLevel * 100)
@@ -1235,7 +1327,7 @@ function nativeKit(native: NativeCapability[]): string {
         return ["level": level, "charging": charging]
     }` : '',
     native.includes('get-network-type') ? `    if capability == "get-network-type" {
-        // R426: SCNetworkReachability answers synchronously - the one sync
+        // SCNetworkReachability answers synchronously - the one sync
         // network API iOS ships. A phone on a network reports wifi, matching
         // the other targets (desktop cannot tell wifi from ethernet either).
         var zero = sockaddr()
@@ -1251,6 +1343,20 @@ function nativeKit(native: NativeCapability[]): string {
     native.includes('get-system-info') ? `    if capability == "get-system-info" {
         return ["platform": "ios", "system": UIDevice.current.systemName + " " + UIDevice.current.systemVersion]
     }` : '',
+    native.includes('app-info') ? `    if capability == "app-info" {
+        // The identity the export baked into Info.plist: the page's about
+        // screen reads it, no guessing.
+        let bundle = Bundle.main
+        let info = bundle.infoDictionary ?? [:]
+        return [
+            "id": bundle.bundleIdentifier ?? "",
+            "version": info["CFBundleShortVersionString"] as? String ?? "",
+            "build": (info["CFBundleVersion"] as? String) ?? "",
+            "platform": "ios",
+            "os": UIDevice.current.systemVersion,
+            "device": UIDevice.current.model
+        ]
+    }` : '',
     native.includes('save-image') ? `    if capability == "save-image" {
         // UIImageWriteToSavedPhotosAlbum hands the image to the photo library.
         // NSPhotoLibraryAddUsageDescription in Info.plist is what makes the
@@ -1262,7 +1368,7 @@ function nativeKit(native: NativeCapability[]): string {
     }` : '',
   ].filter(Boolean).join('\n');
   return `
-${native.includes('get-network-type') ? 'import SystemConfiguration\n\n' : ''}${['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'get-battery', 'get-system-info', 'save-image'].some((c) => native.includes(c as NativeCapability)) ? 'import UIKit\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
+${native.includes('get-network-type') ? 'import SystemConfiguration\n\n' : ''}${['clipboard-read', 'clipboard-write', 'make-phone-call', 'vibrate', 'toast', 'get-battery', 'get-system-info', 'save-image', 'keep-awake'].some((c) => native.includes(c as NativeCapability)) ? 'import UIKit\n\n' : ''}${native.includes('check-permission') || native.includes('request-permission') ? 'import AVFoundation\nimport Photos\n\n' : ''}/// The device capabilities a page asked for through useNative(...): one
 /// function because each platform API is shaped its own way and returns its own
 /// value type.
 ///   camera          -> a local image path/URL, or nil when cancelled
@@ -1339,6 +1445,56 @@ ${nativeKit(native)}
 func roseThrow(_ message: Any) -> Any {
     print("rosezm: " + String(describing: message))
     return NSNull()
+}
+
+/// JS new Promise((r) => setTimeout(r, ms)) - the delay primitive async
+/// members and await-block heads are translated to. Task.sleep parks the
+/// task on the cooperative pool; the thread the UI runs on is never blocked.
+func roseDelay(_ ms: Double) async {
+    try? await Task.sleep(nanoseconds: UInt64(max(0, ms) * 1_000_000))
+}
+
+/// A page replays its effects at the head of body, and SwiftUI re-runs body
+/// whenever such a write lands. The flag lives on a class so arming and
+/// clearing it are not state writes; while it is up, the extra pass an
+/// effect's own write schedules returns without replaying them again.
+final class RosezmEffectGate {
+    var pending = false
+}
+
+/// The page scripts' globalThis box - the mutable globals an effect's body and its cleanup share.
+var rosezmGlobals = [String: Any]()
+func roseGlobal(_ key: String) -> Any? { rosezmGlobals[key] }
+func roseGlobalNumber(_ key: String, _ fallback: Double) -> Double {
+    (rosezmGlobals[key] as? NSNumber)?.doubleValue ?? fallback
+}
+func roseSetGlobal(_ key: String, _ value: Any) { rosezmGlobals[key] = value }
+
+/// The script's timers, spelled with a handle a cleanup's clearTimeout can stop.
+final class RosezmTimerHandle {
+    var stop = false
+}
+func roseSetTimeout(_ body: @escaping () -> Void, _ ms: Double) -> Any? {
+    let handle = RosezmTimerHandle()
+    Task { @MainActor in
+        try? await Task.sleep(nanoseconds: UInt64(max(0, ms) * 1_000_000))
+        if !handle.stop { body() }
+    }
+    return handle
+}
+func roseSetInterval(_ body: @escaping () -> Void, _ ms: Double) -> Any? {
+    let handle = RosezmTimerHandle()
+    Task { @MainActor in
+        while !handle.stop {
+            try? await Task.sleep(nanoseconds: UInt64(max(0, ms) * 1_000_000))
+            if handle.stop { break }
+            body()
+        }
+    }
+    return handle
+}
+func roseClearTimer(_ handle: Any?) {
+    (handle as? RosezmTimerHandle)?.stop = true
 }
 
 /// The routes this export carries a page for, written at export time. A wall's
@@ -1435,6 +1591,37 @@ private let rosezmSession: URLSession = {
 /// The JSON half of a render: the state the page's $data produced, plus the
 /// wall that answered instead when the route is behind one (the patch is empty
 /// then - a wall's body is the sign-in page's HTML, never data).
+/// The web's fetch, in the kit's currency: a dictionary with ok and status
+/// plus the decoded JSON body, so a page reads .ok / .json() the way it does
+/// off a Response. A missing server is ok=false, never a throw.
+func roseFetch(_ url: String, _ method: String = "GET", _ body: String? = nil) async -> [String: Any] {
+    var out: [String: Any] = ["ok": false, "status": 0]
+    let target = url.hasPrefix("http") ? url : roseApiBase + url
+    guard let parsed = URL(string: target) else { return out }
+    var request = URLRequest(url: parsed)
+    request.httpMethod = method
+    if !rosezmCookie.isEmpty { request.setValue(rosezmCookie, forHTTPHeaderField: "Cookie") }
+    if let body = body {
+        request.httpBody = body.data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    }
+    do {
+        let (data, response) = try await rosezmSession.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return out }
+        if let cookie = http.value(forHTTPHeaderField: "Set-Cookie"), !cookie.isEmpty { rosezmCookie = cookie }
+        out["ok"] = http.statusCode >= 200 && http.statusCode < 300
+        out["status"] = http.statusCode
+        if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for (key, value) in json { out[key] = value }
+        } else if let text = String(data: data, encoding: .utf8) {
+            out["body"] = text
+        }
+    } catch {
+        // A missing server is a data-less screen, not a crash.
+    }
+    return out
+}
+
 func roseData(_ route: String) async -> (patch: [String: Any], wall: RosezmWall?) {
     let baked = rosezmBakedFor(route)
     guard !roseApiBase.isEmpty,
@@ -1517,6 +1704,62 @@ func roseString(_ patch: [String: Any], _ key: String, _ fallback: String) -> St
     patch[key] as? String ?? fallback
 }
 
+/// JS truthiness over a dynamic value: the rule every if the page writes
+/// with a non-Bool condition needs (Swift refuses the bare value).
+func roseCharAt(_ value: Any, _ idx: Int) -> String {
+    let s = "\(value)"
+    let i = idx < 0 ? s.count + idx : idx
+    guard i >= 0 && i < s.count else { return "" }
+    return String(s[s.index(s.startIndex, offsetBy: i)])
+}
+
+func roseAt(_ value: Any, _ idx: Int) -> String { roseCharAt(value, idx) }
+
+func roseRepeat(_ value: Any, _ n: Int) -> String {
+    String(repeating: "\(value)", count: max(0, n))
+}
+
+func roseAssign(_ a: Any, _ b: Any) -> [String: Any] {
+    var out: [String: Any] = [:]
+    if let da = a as? [String: Any] { for (k, v) in da { out[k] = v } }
+    if let db = b as? [String: Any] { for (k, v) in db { out[k] = v } }
+    return out
+}
+
+func roseReReplace(_ value: Any, _ pat: String, _ repl: String) -> String {
+    let s = "\(value)"
+    return s.replacingOccurrences(of: pat, with: repl, options: .regularExpression)
+}
+
+func roseReReplaceFirst(_ value: Any, _ pat: String, _ repl: String) -> String {
+    let s = "\(value)"
+    guard let r = s.range(of: pat, options: .regularExpression) else { return s }
+    return s.replacingCharacters(in: r, with: repl)
+}
+
+func roseTruthy(_ value: Any?) -> Bool {
+    if value == nil { return false }
+    if let b = value as? Bool { return b }
+    if let s = value as? String { return !s.isEmpty }
+    if let n = value as? NSNumber { return n.doubleValue != 0 }
+    if let a = value as? [Any] { return !a.isEmpty }
+    return true
+}
+
+/// The synthetic event a field's change callback hands a named page handler:
+/// the web passes the DOM event, the kit wraps the incoming text so the
+/// handler's e.target.value reads it.
+class RoseEventTarget {
+    let value: Any?
+    init(_ value: Any?) { self.value = value }
+}
+class RoseEvent {
+    let target: RoseEventTarget
+    init(_ value: Any?) { self.target = RoseEventTarget(value) }
+}
+func roseEvent(_ value: Any?) -> RoseEvent { RoseEvent(value) }
+func roseEventValue(_ e: Any?) -> Any? { (e as? RoseEvent)?.target.value ?? e }
+
 /// JS's String(x) has no Swift constructor: this kit helper stringifies any
 /// value (nil answers "") so a template that calls String(...) still compiles.
 func roseText(_ value: Any?) -> String {
@@ -1525,7 +1768,7 @@ func roseText(_ value: Any?) -> String {
     return String(describing: value!)
 }
 
-/// R444: the date input's wire format - the same ISO day the web input writes.
+/// The date input's wire format - the same ISO day the web input writes.
 private let roseIsoFormat: DateFormatter = {
     let f = DateFormatter()
     f.locale = Locale(identifier: "en_US_POSIX")
@@ -1586,6 +1829,21 @@ func roseBool(_ value: Any?) -> Bool {
     return value != nil
 }
 
+func roseHas(_ value: Any?, _ key: String) -> Bool {
+    if let d = value as? [String: Any] { return d.keys.contains(key) }
+    return false
+}
+
+func roseDistinct(_ value: Any?) -> [Any?] {
+    var out: [Any?] = []
+    var seen: [String] = []
+    for item in roseListOf(value) {
+        let key = String(describing: item)
+        if !seen.contains(key) { seen.append(key); out.append(item) }
+    }
+    return out
+}
+
 func roseListOf(_ value: Any?) -> [Any?] {
     value as? [Any?] ?? []
 }
@@ -1594,11 +1852,52 @@ func roseCount(_ value: Any?) -> Int {
     roseListOf(value).count
 }
 
+func roseStr(_ value: Any?) -> String {
+    if let s = value as? String { return s }
+    if let n = value as? NSNumber { return n.stringValue }
+    if value == nil { return "" }
+    return String(describing: value)
+}
+
+func rosePathOf(_ owner: Any?, _ path: [String]) -> Any? {
+    var cur: Any? = owner
+    for seg in path {
+        if let arr = cur as? [Any] {
+            guard let i = Int(seg), i >= 0, i < arr.count else { return nil }
+            cur = arr[i]
+        } else if let dict = cur as? [String: Any] {
+            cur = dict[seg]
+        } else {
+            return nil
+        }
+        if cur == nil { return nil }
+    }
+    return cur
+}
+
+/// The immutable path write a member-path two-way binding uses: replace the
+/// owner with a copy that carries the new value at the path.
+func roseSetPath(_ owner: Any?, _ path: [String], _ value: Any?) -> Any? {
+    if path.isEmpty { return value }
+    let head = path[0]
+    let rest = Array(path.dropFirst())
+    if var arr = owner as? [Any] {
+        guard let i = Int(head), i >= 0, i < arr.count else { return owner }
+        arr[i] = roseSetPath(arr[i], rest, value)
+        return arr
+    }
+    if var dict = owner as? [String: Any] {
+        dict[head] = roseSetPath(dict[head], rest, value)
+        return dict
+    }
+    return owner
+}
+
 func roseGet(_ container: Any?, _ key: String) -> Any? {
     (container as? [String: Any])?[key]
 }
 
-/// R275: xs[i] over an untyped list - a bounds-safe index read.
+/// Xs[i] over an untyped list - a bounds-safe index read.
 func roseIndex(_ list: Any?, _ index: Int) -> Any? {
     let items = roseListOf(list)
     guard index >= 0 && index < items.count else { return nil }
@@ -1608,6 +1907,15 @@ func roseIndex(_ list: Any?, _ index: Int) -> Any? {
 /// JS list.join(sep) over whatever the state actually holds. SwiftUI reads its
 /// fields out of an untyped dictionary, so selm.join("|") is a method on Any? -
 /// a compile error on a page that looked portable, and one no shape check sees.
+/// A JS number: any numeric value answers a Double (the arithmetic the
+/// reduce accumulator needs).
+func roseNumber(_ value: Any?) -> Double {
+    if let n = value as? Double { return n }
+    if let n = value as? Int { return Double(n) }
+    if let s = value as? String { return Double(s) ?? 0 }
+    return 0
+}
+
 func roseJoin(_ value: Any?, _ sep: String) -> String {
     if let text = value as? String { return text }
     var parts: [String] = []
@@ -1663,27 +1971,27 @@ func roseHasSuffix(_ value: Any?, _ suffix: Any?) -> Bool {
     roseTextOf(value).hasSuffix(roseTextOf(suffix))
 }
 
-/// R291: xs.every(pred) - the mirror of roseAny: true when no element fails.
+/// Xs.every(pred) - the mirror of roseAny: true when no element fails.
 /// An empty list passes, which is what JS's Array.every does, and a value that
 /// is not a list passes vacuously rather than trapping on an untyped field.
 func roseEvery(_ value: Any?, _ pred: (Any?) -> Bool) -> Bool {
     roseListOf(value).allSatisfy(pred)
 }
 
-/// R287/R291b: xs.find(pred) - the first element the predicate accepts, or nil.
+/// /xs.find(pred) - the first element the predicate accepts, or nil.
 /// Swift's own first(where:) cannot be asked of an Any? element, so the read
 /// goes through the kit like every other collection helper here.
 func roseFind(_ value: Any?, _ pred: (Any?) -> Bool) -> Any? {
     roseListOf(value).first(where: pred)
 }
 
-/// R287/R291b: xs.some(pred) - does any element pass. Empty list = false, which
+/// /xs.some(pred) - does any element pass. Empty list = false, which
 /// is what JS's Array.some answers.
 func roseAny(_ value: Any?, _ pred: (Any?) -> Bool) -> Bool {
     roseListOf(value).contains(where: pred)
 }
 
-/// R291: s.split(sep) - the string broken into a list of its pieces. Swift's
+/// S.split(sep) - the string broken into a list of its pieces. Swift's
 /// components(separatedBy:) is a method on String and a SwiftUI field is Any?,
 /// so the read goes through roseTextOf first; an EMPTY separator is JS's
 /// split-by-character case, which Swift spells as a map over the characters.
@@ -1694,7 +2002,7 @@ func roseSplit(_ value: Any?, _ sep: Any?) -> [Any?] {
     return text.components(separatedBy: cut).map { $0 as Any? }
 }
 
-/// R291: xs.indexOf(item) - the first index, or -1. Swift's own firstIndex(of:)
+/// Xs.indexOf(item) - the first index, or -1. Swift's own firstIndex(of:)
 /// answers nil for "absent" and cannot be asked of an Any? element, and a page
 /// that tests ">= 0" would silently read the wrong branch - so the spelling is a
 /// scan over the list and a range search over text, never a translation of nil.
@@ -1709,7 +2017,7 @@ func roseIndexOf(_ value: Any?, _ item: Any?) -> Int {
     return text.distance(from: text.startIndex, to: hit.lowerBound)
 }
 
-/// R288/R291b: xs.slice(from[, to]) - the sub-list from (inclusive) to
+/// /xs.slice(from[, to]) - the sub-list from (inclusive) to
 /// (exclusive). The one-argument form runs to the end; JS's negative and
 /// out-of-range indexes clamp rather than trap, so the bounds are clamped here.
 func roseSlice(_ value: Any?, _ from: Any?, _ to: Any? = nil) -> [Any?] {
@@ -1947,11 +2255,12 @@ struct RoseRootView: View {
     @State private var history: [String] = []
 
     private func navigate(_ target: String) {
-        if route != target { history.append(route); route = target }
+        if route != target { history = history + [route]; route = target }
     }
 
     private func back() {
-        if let prev = history.popLast() { route = prev }
+        if let prev = history.last { route = prev }
+        if !history.isEmpty { history = Array(history.dropLast()) }
     }
 
     var body: some View {
@@ -2058,9 +2367,20 @@ interface SwiftCtx {
   stateNames: Set<string>;
   /** `$data` field names: their member reads are JSON map reads (see swiftExpr). */
   dataNames?: Set<string>;
-  /** R191: `$derived` name -> its source expression, re-evaluated per read. */
+  /** `$derived` name -> its source expression, re-evaluated per read. */
   derivedExprs?: Map<string, string>;
   mapBinds: Set<string>;
+  /** {#each} item variable -> the $state root its items expression names, when
+   *  the source is a plain state read. A row-field two-way binding writes back
+   *  through it. */
+  eachRoots?: Map<string, string>;
+  /** A counting marker the <ol> emitter installs around its children: an <li>
+   *  inside reads and increments it, so its marker is "1. ", "2. ", ... */
+  olCounter?: { n: number };
+  /** The "N. " string an <ol>-installed counter handed this <li>. */
+  olMarker?: string;
+  /** The bullet (or the ordered number) this <li> prefixes its text with. */
+  liMarker?: string;
   components: Array<{ name: string; view: string; script: string | null; nodes: IrNode[]; slots: SlotUsage }>;
   lines: string[];
   depth: number;
@@ -2074,23 +2394,36 @@ interface SwiftCtx {
   /** Vector assets by URL: SwiftUI draws them as Paths. */
   vectors: Map<string, SvgShape>;
   navigate: string;
-  /** {#await} blocks registered for the page's .task kick-off. */
-  awaits: Array<{ done: string; value: string; err: string; expr: string }>;
+  /** {#await} blocks registered for the page's .task kick-off. `fail` marks a
+   *  head this target cannot run - its runner degrades the block to the catch
+   *  branch instead of painting a null into the then branch. */
+  awaits: Array<{ done: string; value: string; err: string; expr: string; fail?: string }>;
+  /** The page's own async script functions - emitted as real async members. */
+  asyncFns?: Set<string>;
+  /** The page's own script functions: a raw on:input={fn} handler resolves
+   *  against this set before it can be called with a synthetic event. */
+  fnNames?: Set<string>;
+  /** Page function name -> its parameter count: a bound field's coexisting
+   *  on:input handler calls a zero-argument function bare, without the
+   *  synthetic event a one-argument handler receives. */
+  fnParams?: Map<string, number>;
+  /** The page's exported async functions - server actions, not client code. */
+  serverActions?: Set<string>;
   /** {#defer} flags: each starts false and its hold flips it true. */
   deferred: Array<{ name: string; hold: number }>;
   /** Script-level consts the {#await} heads may reference. */
   scriptConsts: Map<string, string>;
-  /** R247: the synthetic hover keys this page's sheet registered. An element
+  /** The synthetic hover keys this page's sheet registered. An element
    *  whose class is in here gets an .onHover modifier that flips its flag. */
   hoverKeys?: Set<string>;
-  /** R259: same exposure for the `__focus_<class>__<scope>` keys - an element
+  /** Same exposure for the `__focus_<class>__<scope>` keys - an element
    *  whose class is in here gets a .focused binding on a @FocusState flag. */
   focusKeys?: Set<string>;
-  /** R443: the @FocusState flags autofocus fields add, emitted with the page. */
+  /** The @FocusState flags autofocus fields add, emitted with the page. */
   autoFocusDecls?: string[];
-  /** R451: the @State flags a <details> opens with, one per fold-out panel. */
+  /** The @State flags a <details> opens with, one per fold-out panel. */
   detailsDecls?: string[];
-  /** R269: same exposure for the `__active_<class>__<scope>` keys - an element
+  /** Same exposure for the `__active_<class>__<scope>` keys - an element
    *  whose class is in here gets a pressing gesture on an @State flag. */
   activeKeys?: Set<string>;
   /** Raw-CSS facts the shared model does not carry: a grid's fixed column
@@ -2101,11 +2434,13 @@ interface SwiftCtx {
   /** The forms this page declares and the page's exported action. */
   forms: FormInfo[];
   pageAction: string | null;
+  /** The host page's route: a component-owned action posts to it. */
+  hostRoute?: string;
   /** Inline handlers registered for this page: code -> generated method name. */
   inline: Map<string, string>;
   /** The generated methods themselves, appended to the page's handler block. */
   inlineBodies: string[];
-  /** R295: `{@const}` source name -> the Swift local that holds it. A const is
+  /** `{@const}` source name -> the Swift local that holds it. A const is
    *  a real `let` in the builder closure; one that would redeclare a name
    *  already in scope (a `$state`/`$derived` field, an outer const, an
    *  `{#each}` item) takes a fresh spelling instead, because Swift refuses the
@@ -2113,11 +2448,11 @@ interface SwiftCtx {
    *  outer name's later reads. Copied per block, so a binding's scope ends
    *  where its block does. */
   constAlias?: Map<string, string>;
-  /** R256: state name -> the Swift field type this view declares. A ternary
+  /** State name -> the Swift field type this view declares. A ternary
    *  over a non-optional field must not grow `!= nil` - on a Bool that is
    *  always true, so the branch never flips. */
   stateTypes?: Map<string, string>;
-  /** R256: the module binds whose value is a thunk. The web build calls a
+  /** The module binds whose value is a thunk. The web build calls a
    *  function-valued bind at the read site; Swift must too, or `{#each
    *  docListE as d}` iterates the closure instead of the list it returns. */
   thunkBinds?: Set<string>;
@@ -2138,7 +2473,12 @@ function renderPage(
   globalCss: string = '',
 ): string {
   const facts = scanState(page.script);
-  // R461: onPullDownRefresh is already a server action method; the pull gesture
+  // A `$setState('k', …)` key with no `$state` still needs a SwiftUI field to assign.
+  for (const m of (page.script ?? '').matchAll(/\$setState\s*\(\s*['"]([A-Za-z_$][\w$]*)['"]/g)) {
+    if (facts.state.some((s) => s.name === m[1]) || facts.derived.some((d) => d.name === m[1]) || facts.data.includes(m[1])) continue;
+    facts.state.push({ name: m[1], init: 'null' });
+  }
+  // OnPullDownRefresh is already a server action method; the pull gesture
   // is the missing half - .refreshable drives it.
   const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');
   // `__rosezmContent` is a server-side bridge over the markdown collections.
@@ -2172,8 +2512,19 @@ function renderPage(
   const initOf = (name: string): string => safeInit(initialOf(page.script, name), known, warnings, page.view);
   // The page's exported action, if any: a form with no on:submit posts to
   // it, and on a desktop build the action runs locally.
-  let pageAction: string | null = null;
-  try { pageAction = extractExports(page.script).actions[0]?.name ?? null; } catch { /* unparsable script keeps no action */ }
+  let actions: string[] = [];
+  try { actions = extractExports(page.script).actions.map((a) => a.name); } catch { /* unparsable script keeps no action */ }
+  const pageAction: string | null = actions[0] ?? null;
+  // The page's own async functions become real async members; the exported
+  // ones are server actions by framework contract and stay on the action
+  // channel. A keyword-named member joins the page-wide rename map, so the
+  // declaration and every head that calls it spell the same Swift name.
+  const asyncFns = new Set<string>();
+  for (const m of (page.script ?? '').matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)) asyncFns.add(m[1]);
+  for (const a of actions) asyncFns.delete(a);
+  for (const f of asyncFns) if (SWIFT_KEYWORDS.has(f) && !swiftNames.has(f)) swiftNames.set(f, f + '_');
+  // Indented declarations count: real pages indent their functions.
+  const fnNames = new Set<string>([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
   const ctx: SwiftCtx = {
     warnings,
     file: page.view,
@@ -2195,18 +2546,26 @@ function renderPage(
     vectors,
     navigate: 'onNavigate',
     awaits: [],
+    asyncFns,
+    fnNames,
+    fnParams: new Map<string, number>([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => {
+      const params = m[2].split(',').map((p) => p.split(/[=:]/)[0].trim()).filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+      return [m[1], params.length];
+    })),
+    serverActions: new Set(actions),
     deferred: [],
     scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data])),
     componentProps: new Set(),
     forms: collectForms(page.nodes),
     pageAction: pageAction,
+    hostRoute: page.route,
     inline: new Map(),
     inlineBodies: [],
-    // R256: state name -> its Swift field type, for the ternary-truth pass.
+    // State name -> its Swift field type, for the ternary-truth pass.
     stateTypes: new Map([...facts.state].map((s) => [s.name, swiftType(initOf(s.name))])),
-    // R256: the arrow-thunk binds; a bare template read calls them.
+    // The arrow-thunk binds; a bare template read calls them.
     thunkBinds: new Set(binds.filter((b) => THUNK_INIT.test(b.init)).map((b) => b.name)),
-    // R247: the hover keys, derived from the page's own sheet with the same
+    // The hover keys, derived from the page's own sheet with the same
     // scoping compileStyles uses - the class list is resolved against ctx.file.
     hoverKeys: (() => {
       const keys = new Set<string>();
@@ -2217,7 +2576,7 @@ function renderPage(
       }
       return keys;
     })(),
-    // R259: same derivation for the :focus halves.
+    // Same derivation for the :focus halves.
     focusKeys: (() => {
       const keys = new Set<string>();
       for (const rule of parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
@@ -2227,7 +2586,7 @@ function renderPage(
       }
       return keys;
     })(),
-    // R269: same derivation for the :active halves.
+    // Same derivation for the :active halves.
     activeKeys: (() => {
       const keys = new Set<string>();
       for (const rule of parseStylesheet([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).rules) {
@@ -2240,23 +2599,23 @@ function renderPage(
     cssExtras: swiftCssExtras([globalCss, page.style].filter((s) => s && s.trim()).join('\n'), warnings),
   };
   emitNodes(page.nodes, ctx);
-  // R247: one @State flag per synthetic hover class. The element's .onHover
+  // One @State flag per synthetic hover class. The element's .onHover
   // flips it; the synthetic class joins the resolve list while it is set.
   const hoverDecls = [...(ctx.hoverKeys ?? [])].map((key) => {
     const v = hoverVarName(key);
     return `    @State private var ${v}: Bool = false`;
   }).join('\n');
-  // R259: one @FocusState flag per synthetic focus class - the element's
+  // One @FocusState flag per synthetic focus class - the element's
   // .focused($flag) binding flips it; @FocusState tracks keyboard focus.
   const focusDecls = [...(ctx.focusKeys ?? [])].map((key) => {
     const v = focusVarName(key);
     return `    @FocusState private var ${v}: Bool`;
   }).join('\n');
-  // R443: one @FocusState flag per autofocus field; .onAppear flips it.
+  // One @FocusState flag per autofocus field; .onAppear flips it.
   const autoFocusDecls = (ctx.autoFocusDecls ?? []).map((v) => `    @FocusState private var ${v}: Bool`).join('\n');
-  // R451: one @State flag per <details>, seeded by its `open` attribute.
+  // One @State flag per <details>, seeded by its `open` attribute.
   const detailsDecls = (ctx.detailsDecls ?? []).map((d) => `    ${d}`).join('\n');
-  // R269: one @State flag per synthetic active class - the element's
+  // One @State flag per synthetic active class - the element's
   // .onLongPressGesture(minimumDuration: .infinity, pressing:) flips it; the
   // pressing callback is SwiftUI's own pressed-state signal on any view.
   const activeDecls = [...(ctx.activeKeys ?? [])].map((key) => {
@@ -2267,7 +2626,7 @@ function renderPage(
   const bindFields = binds.map((b) => {
     // A baked content read carries its own type: a list of entries or an
     // optional single entry, so `posts[0]` and `post?["x"]` both compile.
-    // R256: an arrow thunk bind keeps its closure shape - the template reads
+    // An arrow thunk bind keeps its closure shape - the template reads
     // the bare name where the web build calls it, so the field must be
     // callable. The initializer itself has no view scope, so the closure body
     // is the content read when that is what it wraps (the baked data needs no
@@ -2280,7 +2639,11 @@ function renderPage(
     }
     if (b.init.startsWith('roseContentList(')) return `    static let ${swName(b.name)}: [[String: Any]] = ${swiftStringLiteralize(b.init)}`;
     if (b.init.startsWith('roseContentGet(')) return `    static let ${swName(b.name)}: [String: Any]? = ${swiftStringLiteralize(b.init)}`;
-    return `    static let ${swName(b.name)}: [String: Any] = ${swiftMapLiteral(b.init)}`;
+    // A map bind is the module store - a handler writes its entries - so it
+    // is a var: a let dictionary refuses the subscript write.
+    // A `null` initializer is a handle, not a dictionary: only `Any?` accepts both the mount's assignment and the cleanup's nil test.
+    if (/^(null|undefined)$/.test(b.init)) return `    static var ${swName(b.name)}: Any? = nil`;
+    return `    static var ${swName(b.name)}: [String: Any] = ${swiftMapLiteral(b.init)}`;
   }).join('\n');
   const persist = persistKeys(page.script ?? '');
   const stateFields = [
@@ -2296,6 +2659,9 @@ function renderPage(
     }),
     ...facts.data.map((d) => `    @State private var ${swName(d)}: Any? = nil`),
     ...ctx.deferred.map((d) => `    @State private var ${d.name}: Bool = false`),
+    // The settle state of every {#await} block: the runner flips done, and the
+    // branches read the resolved value or the error off these.
+    ...ctx.awaits.map((a) => `    @State private var ${a.done}: Bool = false\n    @State private var ${a.value}: Any? = nil\n    @State private var ${a.err}: String? = nil`),
   ].join('\n');
   // A $persist write is mirrored into UserDefaults by an .onChange on the root
   // view - SwiftUI's own idiom for "observe this state and react".
@@ -2312,9 +2678,35 @@ function renderPage(
   const formFieldsHelper = formFields.length
     ? '\n    private func __formFields() -> [String: Any] {\n        return [' + formFields.map((f) => `"${f}": ${f}`).join(', ') + ']\n    }'
     : '';
-  // R189: `knownBinds`, not `known` - the latter also carries state names, and a
+  const effectNames: string[] = [];
+  const disposeNames: string[] = [];
+  const mountNames: string[] = [];
+  const mountAsync: boolean[] = [];
+  // `knownBinds`, not `known` - the latter also carries state names, and a
   // state array must keep its native `.count` member.
-  const handlers = [translateHandlers(page.script, facts, page, knownBinds, warnings, formFields), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
+  const handlers = [translateHandlers(page.script, facts, page, knownBinds, warnings, formFields, effectNames, disposeNames, mountNames, mountAsync), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
+  // `body` IS the recompute pass, so the page's effects replay at its head -
+  // before the tree below reads the fields they maintain.
+  const effectCall = effectNames.length ? '\n        let _ = __runEffects()' : '';
+  const effectGate = effectNames.length ? '    @State private var __effectGate = RosezmEffectGate()\n' : '';
+  const effectRun = effectNames.length
+    ? `
+
+    private func __runEffects() {
+        let gate = __effectGate
+        // A write from inside the pass must not replay the effects - that is a
+        // loop, not a recompute. The flag is cleared as soon as the pass ends,
+        // so the NEXT build (a real state change) always runs them again.
+        if gate.pending { return }
+        gate.pending = true
+        ${effectNames.map((n) => `${n}()`).join('\n        ')}
+        gate.pending = false
+    }`
+    : '';
+  // The cleanups' disposal moment: the root view's .onDisappear, the pair of .task.
+  const disposeHook = disposeNames.length
+    ? `\n        .onDisappear {\n${disposeNames.map((n) => `            ${n}()`).join('\n')}\n        }`
+    : '';
   const patchApply = [
     ...facts.state.map((s) => {
       const type = swiftType(initOf(s.name));
@@ -2323,6 +2715,10 @@ function renderPage(
       if (type === 'Double') return `            ${id} = (patch["${s.name}"] as? NSNumber)?.doubleValue ?? ${id}`;
       if (type === 'Bool') return `            ${id} = roseBool(patch, "${s.name}", ${id})`;
       if (type === 'String') return `            ${id} = roseString(patch, "${s.name}", ${id})`;
+      // A dict state also starts with `[` ([String: Any]) - roseList is the
+      // ARRAY getter ([[String: Any]]), so the dict takes its own cast, or
+      // the whole tree fails the Swift type check.
+      if (type === '[String: Any]') return `            ${id} = (patch["${s.name}"] as? [String: Any]) ?? ${id}`;
       if (type.startsWith('[') && type.endsWith(']')) return `            ${id} = roseList(patch, "${s.name}", ${id})`;
       return `            if let value = patch["${s.name}"] { ${id} = value }`;
     }),
@@ -2339,18 +2735,18 @@ ${compImports}
 struct ${page.view}: View {
     var route: String
     var onNavigate: (String) -> Void = { _ in }
-    // R471: the system appearance, read where every roseResolve below sees it.
+    // The system appearance, read where every roseResolve below sees it.
     @Environment(\\.colorScheme) private var roseScheme
 ${paramsDecl}${bindFields}
 ${stateFields}
-${hoverDecls}
+${effectGate}${hoverDecls}
 ${focusDecls}
 ${autoFocusDecls}
 ${detailsDecls}
 ${activeDecls}
 
     var body: some View {
-        let _ = roseSetDark(roseScheme == .dark)
+        let _ = roseSetDark(roseScheme == .dark)${effectCall}
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
 ${layout}
@@ -2358,7 +2754,7 @@ ${layout}
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
         }${pull ? '\n        .refreshable { await onPullDownRefresh() }' : ''}${swiftDarkRules > 0 ? '\n        .roseBox(roseResolve("body", [], ""))' : ''}
-        .task { await loadData()${ctx.awaits.map((a, i) => `; await __runAwait${i}()`).join('')}${ctx.deferred.map((d, i) => `; await __runDefer${i}()`).join('')}${kvSeedLines ? `; __seedKv()` : ''} }
+        .task { await loadData()${ctx.awaits.map((a, i) => `; await __runAwait${i}()`).join('')}${ctx.deferred.map((d, i) => `; await __runDefer${i}()`).join('')}${kvSeedLines ? `; __seedKv()` : ''}${mountNames.map((nm, i) => `; ${mountAsync[i] ? 'await ' : ''}${nm}()`).join('')} }${disposeHook}
 ${persistMirrors}
     }
 ${kvSeedLines ? `
@@ -2374,15 +2770,18 @@ ${ctx.deferred.map((d, i) => `
     }`).join('\\n')}
 ${ctx.awaits.map((a, i) => `
     private func __runAwait${i}() async {
-        do {
-            __await${i}Value = try await { () async throws -> Any? in
+${a.fail
+  ? `        ${a.err} = ${JSON.stringify(a.fail)}
+        ${a.done} = true`
+  : `        do {
+            ${a.value} = try await { () async throws -> Any? in
                 return ${a.expr}
             }()
             ${a.done} = true
         } catch {
-            ${a.err} = (error as? NSError)?.localizedDescription ?? "\(error)"
+            ${a.err} = (error as? NSError)?.localizedDescription ?? "\\(error)"
             ${a.done} = true
-        }
+        }`}
     }`).join('')}
 
     private func loadData() async {
@@ -2409,7 +2808,7 @@ ${patchApply}
         FileHandle.standardError.write(Data((rosezmWallLine(route, wall) + "\\n").utf8))
     }
 
-${handlers}${formFieldsHelper}
+${handlers}${formFieldsHelper}${effectRun}
 }
 `;
 }
@@ -2434,29 +2833,29 @@ function swiftType(init: string): string {
 function swiftLiteral(init: string): string {
   if (!init.trim()) return 'nil';
   let out = init.trim();
-  // R179: a collection chain in a state initializer is translated before any of
+  // A collection chain in a state initializer is translated before any of
   // the scalar passes, while the state getter is still a call the IR can read.
-  // R291: a collection chain is translated before any of the scalar passes;
+  // A collection chain is translated before any of the scalar passes;
   // the widened list is the same family the template gate above routes.
   if (/\.(map|filter|reduce|find|some|every|slice|concat|join|split|indexOf|startsWith|endsWith|toUpperCase|toLowerCase)\s*\(/.test(out)) {
     const t = translateExpr(out, SWIFT_EXPR, new Set());
     if (t !== null) out = t;
   }
-  // R176: a state initializer is an arbitrary JS expression on a code path of
+  // A state initializer is an arbitrary JS expression on a code path of
   // its own, so "n === 2" would otherwise survive verbatim into Swift, where it
   // is not an operator. Swift has ?? natively.
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   // safeInit already spelled a static-bind read as Self.store["key"]; the
   // member pass below must not turn Self.store into Self["store"].
   if (/^Self\./.test(out)) return out;
-  // R187: `$query().k` is the launch parameter, spelled per target. This runs
+  // `$query().k` is the launch parameter, spelled per target. This runs
   // before the member-read rewrite below, which would otherwise turn the view's
   // `params` into a dictionary subscript. Blanking `$query()` here (as this pass
   // used to) made `let q = $state($query().q ?? '')` compile to `""` - the query
   // string silently dropped.
   out = out.replace(/\$query\s*\(\s*\)\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, key: string) => `(params[${JSON.stringify(key)}] ?? "")`);
   out = out.replace(/\$query\s*\(\s*\)/g, 'params');
-  // R187: `$query()` is deliberately absent from this list - it has a real Swift
+  // `$query()` is deliberately absent from this list - it has a real Swift
   // spelling, applied just above.
   out = out.replace(/\$(?:store|kv|cookies|actionError|actionPending|sessionCookie)\s*\([^)]*\)(?:\s*\.\s*[A-Za-z_$][\w$]*)?/g, 'nil');
   out = out.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
@@ -2487,7 +2886,7 @@ function swiftMapLiteral(src: string): string {
 }
 
 /**
- * R256: re-spell the source's single-quoted string literals as Swift ones.
+ * Re-spell the source's single-quoted string literals as Swift ones.
  *
  * A content initializer is emitted verbatim (`roseContentList('posts')`), and a
  * single-quoted literal is not Swift - the page does not compile. Only the
@@ -2553,7 +2952,8 @@ function emitNodes(nodes: IrNode[], ctx: SwiftCtx): void {
   const flush = () => {
     if (!run.length) return;
     const text = textOf(run, ctx);
-    if (text) emit(`Text(${text})`, ctx);
+    // A list marker prefixes the run the way a browser's <li> paints one.
+    if (text) emit(`Text(${ctx.liMarker ? `${JSON.stringify(ctx.liMarker)} + ${text}` : text})`, ctx);
     run.length = 0;
   };
   for (const node of nodes) {
@@ -2568,7 +2968,7 @@ function emitNodes(nodes: IrNode[], ctx: SwiftCtx): void {
 }
 
 /**
- * R295: the `{@const}` nodes a text run swallows. The `<p>`/`<a>`/`<button>`
+ * The `{@const}` nodes a text run swallows. The `<p>`/`<a>`/`<button>`
  * shortcuts collapse their children into one `Text(...)` and never reach
  * emitNode, so a binding declared in one of them used to vanish.
  */
@@ -2576,7 +2976,7 @@ function inlineConsts(nodes: IrNode[]): Array<Extract<IrNode, { kind: 'const' }>
   return nodes.filter((n): n is Extract<IrNode, { kind: 'const' }> => n.kind === 'const');
 }
 
-/** R295: a name that will not collide with anything already bound here. */
+/** A name that will not collide with anything already bound here. */
 function freshConstLocal(name: string, ctx: SwiftCtx): string {
   const taken = new Set([...ctx.stateNames, ...ctx.mapBinds, ...(ctx.constAlias?.values() ?? [])]);
   let n = 1;
@@ -2585,7 +2985,7 @@ function freshConstLocal(name: string, ctx: SwiftCtx): string {
 }
 
 /**
- * R295: declare one `{@const}` as a real `let` and register the name its later
+ * Declare one `{@const}` as a real `let` and register the name its later
  * reads must use. `taken` is the set of names this closure already declares -
  * a const the template renames onto a `$state` (`{@const qty = qty() * 1000}`)
  * would otherwise both redeclare nothing and silently capture the property for
@@ -2600,7 +3000,7 @@ function emitConst(name: string, code: string, ctx: SwiftCtx): void {
 }
 
 /**
- * R295: emit one `Text`/`Button` line, preceded by the bindings its own children
+ * Emit one `Text`/`Button` line, preceded by the bindings its own children
  * declare. A `let` is a legal statement in a @ViewBuilder closure (SE-0289,
  * Swift 5.4+; this project targets iOS 16), so `Group` - which is
  * layout-transparent and applies its modifiers to the single child it wraps -
@@ -2623,7 +3023,7 @@ function emitTextRun(inner: string, consts: Array<Extract<IrNode, { kind: 'const
   ctx.constAlias = saved;
 }
 
-/** R295: emit a nested block with its own const bindings - a `{@const}` inside
+/** Emit a nested block with its own const bindings - a `{@const}` inside
  *  `{#if}`/`{#each}` shadows only for that block, exactly as on the web, so the
  *  outer map is restored when the block closes. */
 function emitScoped(nodes: IrNode[], ctx: SwiftCtx): void {
@@ -2643,6 +3043,10 @@ function textOf(nodes: IrNode[], ctx: SwiftCtx, trim = true): string {
       out += n.preserve ? raw.replace(/\r?\n|\r/g, '\\n').replace(/\t/g, '\\t') : raw;
     }
     else if (n.kind === 'expr') out += '\\(' + swiftExpr(n.code, ctx) + ')';
+    // Trusted markup ({@html}) inside a text tag rides the same string:
+    // SwiftUI's Text carries it verbatim where a RoseHtmlText view cannot be
+    // inline-concatenated, but the markup survives instead of vanishing.
+    else if (n.kind === 'html') out += '\\(' + swiftExpr(n.code, ctx) + ')';
   }
   if (trim) out = out.trim();
   if (!out) return '';
@@ -2659,7 +3063,7 @@ function emitNode(node: IrNode, ctx: SwiftCtx): void {
       emit(`RoseHtmlText(html: ${swiftExpr(node.code, ctx)})`, ctx);
       return;
     case 'const':
-      // R295: a `{@const x = expr}` binds `x` for the rest of the block. It used
+      // A `{@const x = expr}` binds `x` for the rest of the block. It used
       // to be dropped here, so every later read of `x` reached the emitted view
       // as an undeclared identifier (a compile error in the exported app).
       // A `let` is a legal declaration inside a @ViewBuilder closure (SE-0289,
@@ -2687,14 +3091,19 @@ function emitNode(node: IrNode, ctx: SwiftCtx): void {
     }
     case 'each': {
       const list = swiftExpr(node.items, ctx);
+      // An {#await} then-branch value is an untyped Any?: its bare read must
+      // reach ForEach as the kit's list, or .enumerated() cannot type-check.
+      const listExpr = ctx.awaits.some((a) => a.value === list.trim()) ? `roseListOf(${list.trim()})` : list;
       const binding = /^[A-Za-z_$][\w$]*$/.test(node.binding) ? node.binding : 'item';
-      emit(`ForEach(Array((${list}).enumerated()), id: \\.offset) { _, ${binding} in`, ctx);
+      emit(`ForEach(Array((${listExpr}).enumerated()), id: \\.offset) { __ri, ${binding} in`, ctx);
       ctx.depth++;
       // The item is a real binding of the loop body: it shadows any outer const
       // alias of the same name, so the body reads the item, not the const.
       const inner = new Map(ctx.constAlias ?? []);
       inner.delete(binding);
-      const scoped: SwiftCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]), constAlias: inner };
+      const itemsSrc = node.items.trim();
+      const eachRoot = /^[A-Za-z_$][\w$]*$/.test(itemsSrc) || /^\w+\(\)$/.test(itemsSrc) ? itemsSrc.replace(/\(\)$/, '') : '';
+            const scoped: SwiftCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]), constAlias: inner, eachRoots: new Map([...ctx.eachRoots ?? [], [binding, eachRoot]]) };
       emitScoped(node.children, scoped);
       ctx.depth--;
       emit('}', ctx);
@@ -2707,12 +3116,41 @@ function emitNode(node: IrNode, ctx: SwiftCtx): void {
       const done = `__await${id}Done`;
       const value = `__await${id}Value`;
       const err = `__await${id}Err`;
-      const expr = swiftExpr(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts), ctx);
-      // A head that is still a promise at runtime (a call, not a literal) cannot
-      // be awaited where this target evaluates the block: it would land in the
-      // state field as a promise object. Say so instead of rendering garbage.
-      if (!awaitHeadIsLiteral(node.expr)) ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
-      ctx.awaits.push({ done, value, err, expr });
+      const raw = node.expr.trim();
+      const normalized = substituteParams(normalizeAwaitExpr(raw), ctx.scriptConsts).trim();
+      // Three heads this target can really run, and one it cannot. A literal
+      // promise evaluates in place; a call to one of the page's own async
+      // members is genuinely awaited; a value read (state/derived/thunk bind)
+      // resolves like the web's await of a non-promise. Anything else has no
+      // value to hand the then branch, so the block degrades to the catch
+      // branch instead of painting a null into it.
+      let expr = '';
+      let fail: string | undefined;
+      if (awaitHeadIsLiteral(raw)) {
+        expr = swiftExpr(normalized, ctx);
+      } else {
+        const callee = bareCallName(normalized);
+        const ident = callee ?? (/^[A-Za-z_$][\w$]*$/.test(normalized) ? normalized : null);
+        if (callee && ctx.asyncFns?.has(callee)) {
+          expr = `await ${swiftExpr(normalized, ctx)}`;
+        } else if (ident && (ctx.stateNames.has(ident) || ctx.derivedExprs?.has(ident) || ctx.thunkBinds?.has(ident))) {
+          // A state/derived/thunk read is a plain value: it settles as itself,
+          // the way the web's await of a non-promise does.
+          expr = swiftExpr(normalized, ctx);
+        } else if (callee) {
+          const why = ctx.serverActions?.has(callee)
+            ? 'an exported async function is a server action, and the action channel returns a state patch, not a value the then branch could render'
+            : 'no async member of this page backs the call';
+          ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await (${why}) - the block renders the catch branch`);
+          fail = 'this await head cannot run on this target';
+        } else {
+          // A compound expression evaluates in the .task closure as before;
+          // the warning names the promise that will not settle into a value.
+          ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
+          expr = swiftExpr(normalized, ctx);
+        }
+      }
+      ctx.awaits.push({ done, value, err, expr, fail });
       const thenMap = new Map<string, string>();
       if (node.thenName) thenMap.set(node.thenName, value);
       const catchMap = new Map<string, string>();
@@ -2778,18 +3216,46 @@ function emitNode(node: IrNode, ctx: SwiftCtx): void {
       return;
     case 'slot':
       return;
-    case 'element':
+    case 'element': {
+      // An ordered list installs its counter around its <li> children: every
+      // item's marker numbers itself (1. 2. 3.), the way a browser paints one.
+      if (node.tag.toLowerCase() === 'ol') {
+        const counter = { n: 0 };
+        for (const child of node.children) {
+          if (child.kind === 'element' && child.tag.toLowerCase() === 'li') {
+            counter.n += 1;
+            emitElement(child, { ...ctx, olMarker: `${counter.n}. ` });
+          } else {
+            emitNode(child, ctx);
+          }
+        }
+        return;
+      }
       emitElement(node, ctx);
       return;
+    }
   }
 }
 
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: SwiftCtx): void {
   const binding = elementStyleBinding(node);
   const style = swiftStyleOf(node, binding, ctx);
+  // A list item's marker: the <ol>-handed counter wins; otherwise the model's
+  // listStyle picks the bullet, `none` draws nothing.
+  const liCtx = node.tag.toLowerCase() === 'li'
+    ? (() => {
+        let marker = '';
+        if (ctx.olMarker) marker = ctx.olMarker;
+        else {
+          const m = listMarkerOf({ tag: node.tag.toLowerCase(), classes: binding.staticClasses, ancestors: [...ctx.ancestors].reverse() }, style.model);
+          if (m) marker = m.marker;
+        }
+        return marker ? { ...ctx, liMarker: marker } : ctx;
+      })()
+    : ctx;
   ctx.ancestors.push({ tag: node.tag.toLowerCase(), classes: binding.staticClasses });
   try {
-    emitElementStyled(node, ctx, style);
+    emitElementStyled(node, liCtx, style);
   } finally {
     ctx.ancestors.pop();
   }
@@ -2888,7 +3354,7 @@ function swiftStyleOf(
   // of the same answer.
   const cascaded = cascadeFor(ctx.sheet, { tag: node.tag.toLowerCase(), classes: binding.staticClasses }, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model;
   const model = mergeModels(cascaded, binding.inlineStyle);
-  // R247: a class carrying a `:hover` half gets its synthetic class appended
+  // A class carrying a `:hover` half gets its synthetic class appended
   // while the pointer is over the element. The key names the class so two
   // hovered elements stay independent.
   let hoverKey: string | null = null;
@@ -2896,13 +3362,13 @@ function swiftStyleOf(
     const key = `__hover_${c}__${ctx.file}`;
     if (ctx.hoverKeys?.has(key)) { hoverKey = key; break; }
   }
-  // R259: same walk for the `:focus` half - the @FocusState flag gates it.
+  // Same walk for the `:focus` half - the @FocusState flag gates it.
   let focusKey: string | null = null;
   for (const c of binding.staticClasses) {
     const key = `__focus_${c}__${ctx.file}`;
     if (ctx.focusKeys?.has(key)) { focusKey = key; break; }
   }
-  // R269: same walk for the `:active` half - the pressing flag gates it.
+  // Same walk for the `:active` half - the pressing flag gates it.
   let activeKey: string | null = null;
   for (const c of binding.staticClasses) {
     const key = `__active_${c}__${ctx.file}`;
@@ -2924,7 +3390,7 @@ function swiftStyleOf(
       if (p.after !== undefined && pseudo.after === undefined) pseudo.after = p.after;
     }
   }
-  // R471: a project with a dark half resolves every class at runtime, so the
+  // A project with a dark half resolves every class at runtime, so the
   // system appearance can switch the colours; inlined ones could not.
   if (!binding.hasDynamic && !hoverKey && !focusKey && !activeKey && swiftDarkRules === 0) return { expr: null, model, hoverKey, focusKey, activeKey, grid, radial, pseudo };
   const classParts = [
@@ -2943,17 +3409,17 @@ function swiftStyleOf(
   return { expr: `roseResolve(${args.join(', ')})`, model, hoverKey, focusKey, activeKey, grid, radial, pseudo };
 }
 
-/** R247: the SwiftUI @State name backing one synthetic hover class. */
+/** The SwiftUI @State name backing one synthetic hover class. */
 function hoverVarName(hoverKey: string): string {
   return '__hovered' + hoverKey.replace(/[^\w$]/g, '_');
 }
 
-/** R259: the SwiftUI @FocusState name backing one synthetic focus class. */
+/** The SwiftUI @FocusState name backing one synthetic focus class. */
 function focusVarName(focusKey: string): string {
   return '__focused' + focusKey.replace(/[^\w$]/g, '_');
 }
 
-/** R269: the SwiftUI @State name backing one synthetic active class. */
+/** The SwiftUI @State name backing one synthetic active class. */
 function activeVarName(activeKey: string): string {
   return '__pressed' + activeKey.replace(/[^\w$]/g, '_');
 }
@@ -2978,10 +3444,16 @@ function swiftInlineRuns(children: IrNode[], ctx: SwiftCtx, mods: string[]): Arr
       continue;
     }
     if (c.kind !== 'element' || !SWIFT_INLINE.has(c.tag.toLowerCase())) return null;
+    // A literal <sub>/<sup> has no SwiftUI inline baseline shift - the Text
+    // concatenation flattens it to plain text. Name the loss instead of hiding it.
+    const inlineTag = c.tag.toLowerCase();
+    if (inlineTag === 'sub' || inlineTag === 'sup') {
+      ctx.warnings.push(`xcode: <${inlineTag}> has no SwiftUI inline baseline here - the glyph is flattened`);
+    }
     const binding = elementStyleBinding(c);
     const child = swiftStyleOf(c, binding, ctx);
     if (child.expr) return null;
-    ctx.ancestors.push({ tag: c.tag.toLowerCase(), classes: binding.staticClasses });
+    ctx.ancestors.push({ tag: inlineTag, classes: binding.staticClasses });
     let inner: Array<{ text: string; mods: string[] }> | null;
     try {
       inner = swiftInlineRuns(c.children, ctx, [...mods, ...swiftInlineMods(child.model, ctx.fontMap)]);
@@ -3034,10 +3506,10 @@ function emitElementStyled(
   if (model.display === 'none') return; // `display: none` renders nothing at all
   const textMods = styleExpr ? [`.roseText(${styleExpr})`] : swiftTextModsOf(model, ctx.fontMap);
   const boxMods = styleExpr ? [`.roseBox(${styleExpr})`] : swiftBoxModsOf(model, { full: false, align: 'leading' }, !!style.radial);
-  // R247: a `:hover` half makes the element hoverable - the closure flips the
+  // A `:hover` half makes the element hoverable - the closure flips the
   // @State flag the synthetic class reads. On a phone (no pointer) it never
   // fires; on an iPad with a trackpad or a Mac it is real.
-  // R259: the `:focus` half binds a @FocusState flag - SwiftUI's focus system
+  // The `:focus` half binds a @FocusState flag - SwiftUI's focus system
   // flips it on keyboard focus. Kept as their own array because the container
   // tail builds its modifier chain separately from boxMods.
   const variantMods: string[] = [];
@@ -3049,7 +3521,7 @@ function emitElementStyled(
     const v = focusVarName(style.focusKey);
     variantMods.push(`.focused($${v})`);
   }
-  // R269: the `:active` half - the pressing callback of a long-press gesture
+  // The `:active` half - the pressing callback of a long-press gesture
   // with an infinite minimum duration is SwiftUI's own pressed-state signal on
   // any view (ButtonStyle would only reach Buttons).
   if (style.activeKey) {
@@ -3097,10 +3569,10 @@ function emitElementStyled(
     const pad = '        '.repeat(ctx.depth);
     const argPad = '        '.repeat(ctx.depth + 1);
     if (!slotArgs.length) {
-      emit(`${comp.view}(${[args, ...bindArgs].filter(Boolean).join(', ')})`, ctx);
+      emit(`${comp.view}(${[args, ...bindArgs, ctx.hostRoute ? `route: "${ctx.hostRoute}"` : ''].filter(Boolean).join(', ')})`, ctx);
       return;
     }
-    const all = [args, ...bindArgs, ...slotArgs].filter(Boolean).join(',\n').split('\n').map((l) => argPad + l).join('\n');
+    const all = [args, ...bindArgs, ...slotArgs, ctx.hostRoute ? `route: "${ctx.hostRoute}"` : ''].filter(Boolean).join(',\n').split('\n').map((l) => argPad + l).join('\n');
     emit(`${comp.view}(\n${all}\n${pad})`, ctx);
     return;
   }
@@ -3116,12 +3588,19 @@ function emitElementStyled(
   }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = textOf(node.children, ctx);
+    // Trusted markup inside a text tag renders as MARKUP: RoseHtmlText reads
+    // the same inline subset a bare {@html} does, so the whole paragraph
+    // becomes attributed text instead of literal tags in the string.
+    if (node.children.some((c) => c.kind === 'html') && text) {
+      emitTextRun(`RoseHtmlText(html: ${text})${[...textMods, ...boxMods].join('')}`, inlineConsts(node.children), ctx);
+      return;
+    }
     // The box half travels with the text half: padding/background/opacity on a
     // text element are real on the web, so Text takes them after its own mods.
     emitTextRun(`Text(${text || '""'})${[...textMods, ...boxMods].join('')}`, inlineConsts(node.children), ctx);
     return;
   }
-  // R451: <details>/<summary> is SwiftUI's DisclosureGroup - collapsed until
+  // <details>/<summary> is SwiftUI's DisclosureGroup - collapsed until
   // tapped, with the summary as the label; `open` starts it expanded.
   if (tag === 'details') {
     const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
@@ -3172,28 +3651,45 @@ function emitElementStyled(
     const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
     const label = alt ? `.accessibilityLabel(${JSON.stringify(alt)})` : '';
     const asset = ctx.assets.get(url);
-    // R418: object-fit picks the SwiftUI content mode; cover clips the overflow.
+    // Object-fit picks the SwiftUI content mode; cover clips the overflow.
     const fitModel = model;
     const fitChain = fitModel.objectFit === 'cover' ? '.resizable().scaledToFill().clipped()'
       : fitModel.objectFit === 'fill' ? '.resizable()'
       : '.resizable().scaledToFit()';
-    if (asset) { emit(`Image(${JSON.stringify(asset)})${fitChain}.frame(width: 72)${label}${boxMods.join('')}`, ctx); return; }
-    const shape = ctx.vectors.get(url);
-    if (shape) { emit(`${swiftVectorExpr(shape)}${label}${boxMods.join('')}`, ctx); return; }
-    // R416: a remote (or site-relative) image loads at runtime instead of
-    // collapsing to a placeholder - AsyncImage is SwiftUI's own loader.
-    if (url) {
-      const source = /^https?:\/\//i.test(url)
-        ? `URL(string: ${JSON.stringify(url)})`
-        : `(roseApiBase.isEmpty ? nil : URL(string: roseApiBase + ${JSON.stringify(url)}))`;
-      emit(`AsyncImage(url: ${source}) { phase in
-          if let image = phase.image { image${fitChain} }
-          else if phase.error != nil { Image(systemName: "photo") }
-          else { ProgressView() }
-      }.frame(width: 72)${label}${boxMods.join('')}`, ctx);
-      return;
+    // vertical-align on a replaced element: a frame(maxWidth:) + alignment
+    // wrapper carries the alignment (SwiftUI's Image has none of its own).
+    const va = model.verticalAlign;
+    const vaOpen = va === 'middle' || va === 'top' || va === 'bottom'
+      ? `HStack {`
+      : '';
+    const vaAlign = va === 'middle' ? '.center' : va === 'top' ? '.top' : '.bottom';
+    const closeVa = (): string => (vaOpen ? `}.frame(maxWidth: .infinity, alignment: ${vaAlign})` : '');
+    if (vaOpen) {
+      emit(vaOpen, ctx);
+      ctx.depth++;
     }
-    emit(`Image(systemName: "photo")${label}${boxMods.join('')}`, ctx);
+    if (asset) { emit(`Image(${JSON.stringify(asset)})${fitChain}.frame(width: 72)${label}${boxMods.join('')}`, ctx); }
+    else {
+      const shape = ctx.vectors.get(url);
+      if (shape) { emit(`${swiftVectorExpr(shape)}${label}${boxMods.join('')}`, ctx); }
+      // A remote (or site-relative) image loads at runtime instead of
+      // collapsing to a placeholder - AsyncImage is SwiftUI's own loader.
+      else if (url) {
+        const source = /^https?:\/\//i.test(url)
+          ? `URL(string: ${JSON.stringify(url)})`
+          : `(roseApiBase.isEmpty ? nil : URL(string: roseApiBase + ${JSON.stringify(url)}))`;
+        emit(`AsyncImage(url: ${source}) { phase in
+            if let image = phase.image { image${fitChain} }
+            else if phase.error != nil { Image(systemName: "photo") }
+            else { ProgressView() }
+        }.frame(width: 72)${label}${boxMods.join('')}`, ctx);
+      }
+      else emit(`Image(systemName: "photo")${label}${boxMods.join('')}`, ctx);
+    }
+    if (vaOpen) {
+      ctx.depth--;
+      emit(closeVa(), ctx);
+    }
     return;
   }
   if (tag === 'a') {
@@ -3236,7 +3732,19 @@ function emitElementStyled(
       else if (checked) emit(checkedProp
         ? `Toggle(isOn: Binding(get: { ${checked} as? Bool ?? false }, set: { v in ${propChangeHandler(checkedProp)}(v) })) { Text("") }`
         : `Toggle(isOn: Binding(get: { ${checked} }, set: { ${checked} = $0 })) { Text("") }`, ctx);
-      else emit('Toggle(isOn: .constant(false)) { Text("") }', ctx);
+      else {
+        // A member-path binding whose root is an {#each} row variable: the
+        // write swaps the row AT ITS INDEX (the enumerated offset __ri) inside
+        // a copied array, applying the field through the kit's path setter.
+        const rowPath = bindChecked && bindChecked.value.kind === 'expr' ? bindChecked.value.code.trim() : '';
+        const rowRoot = rowPath.includes('.') ? rowPath.split('.')[0] : '';
+        const rowRest = rowPath.includes('.') ? rowPath.split('.').slice(1) : [];
+        const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+        if (rowState) {
+          const pathLit = rowRest.map((p) => JSON.stringify(p)).join(', ');
+          emit(`Toggle(isOn: Binding(get: { roseBool(rosePathOf(${rowRoot}, [${pathLit}])) }, set: { v in var rows = (${rowState} as? [Any]) ?? []; if __ri < rows.count { rows[__ri] = roseSetPath(rows[__ri], [${pathLit}], v) }; ${rowState} = rows })) { Text("") }`, ctx);
+        } else emit('Toggle(isOn: .constant(false)) { Text("") }', ctx);
+      }
       return;
     }
     if (type === 'radio') {
@@ -3263,14 +3771,14 @@ function emitElementStyled(
     const disabledMod = disabledInput
       ? `.disabled(${disabledInput.value.kind === 'expr' ? swiftExpr(disabledInput.value.code, ctx) : disabledInput.value.kind === 'text' ? disabledInput.value.text : 'true'})`
       : '';
-    // R443: autofocus is a @FocusState flag flipped on appear.
+    // Autofocus is a @FocusState flag flipped on appear.
     let autoMod = '';
     if (ctx.autoFocusDecls && node.attrs.some((a) => a.name === 'autofocus')) {
       const flag = `__autoFocus${ctx.autoFocusDecls.length}`;
       ctx.autoFocusDecls.push(flag);
       autoMod = `.focused($${flag}).onAppear { ${flag} = true }`;
     }
-    // R444: a date input is the platform's own picker, not free text. The
+    // A date input is the platform's own picker, not free text. The
     // state keeps the ISO yyyy-MM-dd string the web input writes; an empty
     // state adopts today on appear so what the chip shows is what a form sends.
     if (type === 'date') {
@@ -3293,7 +3801,7 @@ function emitElementStyled(
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const maxLen = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
     const clamp = (expr: string): string => (maxLen ? `String(${expr}.prefix(${maxLen}))` : expr);
-    // R439: a <textarea> is a TextEditor - multiline by nature; rows sets its
+    // A <textarea> is a TextEditor - multiline by nature; rows sets its
     // minimum height. SwiftUI's TextEditor has no placeholder, so hint is unused.
     if (tag === 'textarea') {
       const rowsAttr = node.attrs.find((a) => a.name === 'rows');
@@ -3304,7 +3812,11 @@ function emitElementStyled(
         return;
       }
       if (boundName) {
-        emit(`TextEditor(text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${frame}`, ctx);
+        const extra = boundFieldExtra(node, clamp('v'), ctx);
+        const setter = extra
+          ? `Binding(get: { ${boundName} }, set: { v in ${boundName} = ${clamp('v')};${extra} })`
+          : `Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} })`;
+        emit(`TextEditor(text: ${setter})${frame}`, ctx);
         return;
       }
       const nameAttr = node.attrs.find((a) => a.name === 'name');
@@ -3318,7 +3830,11 @@ function emitElementStyled(
     if (propName) {
       emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${propName} as? String ?? "" }, set: { v in ${propChangeHandler(propName)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else if (boundName) {
-      emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+      const extra = boundFieldExtra(node, clamp('v'), ctx);
+      const setter = extra
+        ? `Binding(get: { ${boundName} }, set: { v in ${boundName} = ${clamp('v')};${extra} })`
+        : `Binding(get: { ${boundName} }, set: { ${boundName} = ${clamp('$0')} })`;
+      emit(`${fieldKind}(String(describing: ${hint}), text: ${setter})${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
     } else {
       // A named input inside a submitting form binds to its name, like the
       // desktop channel: the handler reads the same state key.
@@ -3333,7 +3849,39 @@ function emitElementStyled(
       if (valueProp) {
         emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { ${valueProp} as? String ?? "" }, set: { v in ${propChangeHandler(valueProp)}(${clamp('v')}) }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
       } else {
-        emit(`${fieldKind}(String(describing: ${hint}), text: .constant(""))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        // A raw `on:input` arrow is the field's change callback: the browser's
+        // own spelling for an unbound field. `e.target.value` is the incoming
+        // text; the statements translate like any handler body.
+        const rawChange = node.attrs.find((a) => (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+        // `on:input={onInput}` - a bare name naming a page function - is called
+        // with a synthetic event: the kit's roseEvent stub carries target.value.
+        if (rawChange && rawChange.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(rawChange.value.code.trim()) && (ctx.fnNames?.has(rawChange.value.code.trim()) ?? false)) {
+          emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { "" }, set: { v in ${rawChange.value.code.trim()}(roseEvent(v)); }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+          return;
+        } else if (rawChange && rawChange.value.kind === 'expr') {
+          const head = /^(?:async\s+)?(?:\((?:[^()]*)\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(rawChange.value.code.trim());
+          const bodyRaw = head ? rawChange.value.code.trim().slice(head[0].length) : rawChange.value.code;
+          // stripTsTypes leaves a cast's outer parens (`(e.target)`), which the
+          // value rewrite below would otherwise miss.
+          const body = stripTsTypes(bodyRaw).replace(/\(\s*(e\.target|e\.currentTarget)\s*\)\.value\b/g, '$1.value').replace(/\be\.target\.value\b/g, 'v').replace(/\be\.currentTarget\.value\b/g, 'v').trim().replace(/;$/, '');
+          const translated = translateBody(body, ctx.file, [...ctx.stateNames], ctx.mapBinds, ctx.warnings, ctx.asyncFns).trim().replace(/^\{/, '').replace(/\}$/, '').trim();
+          emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { "" }, set: { v in\n${translated.endsWith(';') ? translated : translated + ';'}\n}))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+          return;
+        }
+        // A member-path binding whose root is an {#each} row variable: the
+        // write swaps the row AT ITS INDEX (the enumerated offset __ri) inside
+        // a copied array - the same contract the checkbox row bind follows.
+        const rowPath = bindValue && bindValue.value.kind === 'expr' && !boundName && !propName && bindValue.value.code.includes('.')
+          ? bindValue.value.code.trim() : '';
+        const rowRoot = rowPath ? rowPath.split('.')[0] : '';
+        const rowRest = rowPath ? rowPath.split('.').slice(1) : [];
+        const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+        if (rowState) {
+          const pathLit = rowRest.map((p) => JSON.stringify(p)).join(', ');
+          emit(`${fieldKind}(String(describing: ${hint}), text: Binding(get: { roseStr(rosePathOf(${rowRoot}, [${pathLit}])) }, set: { v in var rows = (${rowState} as? [Any]) ?? []; if __ri < rows.count { rows[__ri] = roseSetPath(rows[__ri], [${pathLit}], v) }; ${rowState} = rows }))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        } else {
+          emit(`${fieldKind}(String(describing: ${hint}), text: .constant(""))${keyMod}${fieldMods}${disabledMod}${autoMod}`, ctx);
+        }
       }
     }
     return;
@@ -3342,7 +3890,7 @@ function emitElementStyled(
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
     let action = click && click.value.kind === 'expr' ? handlerCall(click.value.code.trim(), ctx) : '';
     // A submit button in a form with no handler posts to the page's action.
-    if (!click && isSubmitButton(node) && ctx.pageAction) action = `${ctx.pageAction}()`;
+    if (!click && isSubmitButton(node) && ctx.pageAction) action = `Task { await ${ctx.pageAction}() }`;
     const label = textOf(node.children, ctx) || '""';
     // disabled - static or bound - greys the control and stops the action.
     const disabledAttr = node.attrs.find((a) => a.name === 'disabled');
@@ -3434,7 +3982,7 @@ function emitElementStyled(
   const cross = dir === 'row' ? (crossRow[model.align ?? ''] ?? '.center') : (crossCol[model.align ?? ''] ?? '.leading');
   const gap = model.gap !== undefined ? n(model.gap) : (dir === 'row' ? '8' : '6');
   const frameAlign = swiftFrameAlignOf(model.justify, dir);
-  // R471: a runtime-resolved container carries the text half too - SwiftUI
+  // A runtime-resolved container carries the text half too - SwiftUI
   // inherits foregroundColor/font to its children, which is what CSS does, so
   // a colour that flips with the appearance reaches the bare text inside.
   const chain = (styleExpr
@@ -3479,8 +4027,37 @@ function attrOf(attr: Extract<IrNode, { kind: 'element' }>['attrs'][number], ctx
   return '""';
 }
 
+/** A bound field that also carries on:input/on:change keeps the handler, the
+ *  way the web does: the change callback performs the bind write first, then
+ *  the handler's statements. `valueExpr` is the incoming text spelled for the
+ *  binding's setter (named `v`). A bare page function is called with the kit's
+ *  synthetic event - or bare when it takes no argument; an inline arrow
+ *  translates exactly like the unbound field's arrow branch, with its
+ *  `e.target.value` reads rewritten to the incoming value. */
+function boundFieldExtra(node: Extract<IrNode, { kind: 'element' }>, valueExpr: string, ctx: SwiftCtx): string {
+  const attr = node.attrs.find((a) => (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+  if (!attr || attr.value.kind !== 'expr') return '';
+  const code = attr.value.code.trim();
+  if (/^[A-Za-z_$][\w$]*$/.test(code) && (ctx.fnNames?.has(code) ?? false)) {
+    return ` ${ctx.fnParams?.get(code) === 0 ? `${code}()` : `${code}(roseEvent(${valueExpr}))`};`;
+  }
+  const head = /^(?:async\s+)?(?:\((?:[^()]*)\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(code);
+  const bodyRaw = head ? code.slice(head[0].length) : code;
+  // stripTsTypes leaves a cast's outer parens (`(e.target)`), which the value
+  // rewrite below would otherwise miss.
+  const body = stripTsTypes(bodyRaw).replace(/\(\s*(e\.target|e\.currentTarget)\s*\)\.value\b/g, '$1.value').replace(/\be\.target\.value\b/g, 'v').replace(/\be\.currentTarget\.value\b/g, 'v').trim().replace(/;$/, '');
+  const translated = translateBody(body, ctx.file, [...ctx.stateNames], ctx.mapBinds, ctx.warnings, ctx.asyncFns).trim().replace(/^\{/, '').replace(/\}$/, '').trim();
+  if (!translated) return '';
+  return `\n${translated.endsWith(';') ? translated : translated + ';'}`;
+}
+
 function handlerCall(code: string, ctx: SwiftCtx): string {
-  if (/^[A-Za-z_$][\w$]*$/.test(code)) return `${code}()`;
+  if (/^[A-Za-z_$][\w$]*$/.test(code)) {
+    // An async member cannot run in the sync action closure: launch a Task that awaits it.
+    const name = swName(code);
+    const async = ctx.asyncFns?.has(code) || ctx.serverActions?.has(code);
+    return async ? `Task { await ${name}() }` : `${name}()`;
+  }
   return `${registerInlineHandler(code, ctx)}()`;
 }
 
@@ -3507,7 +4084,7 @@ function swiftHandlerDialect(ctx: SwiftCtx): HandlerDialect {
     expr: (code) => swiftExpr(code, ctx),
     set: (name, expr) => `${swName(name)} = ${expr}`,
     action: (name) => `${name}()`,
-    refresh: () => '/* refresh: the data channel reloads on navigation */',
+    refresh: () => '/* refresh: the data channel reloads on navigation */ ()',
     refuses: (body, params) => {
       const event = refusesEventUse(body, params);
       if (event) return event;
@@ -3551,16 +4128,64 @@ function swiftVectorExpr(shape: SvgShape): string {
  *  Swift global functions; rounding answers Int (the type pages declare). */
 function swiftScalarCalls(code: string): string {
   return rewriteToFixedCalls(
-    rewriteStringCalls(code, (arg) => `roseText(${arg})`)
+    rewriteStringCalls(code, (arg) => `roseTextOf(${arg})`)
       .replace(/\bMath\.(round|floor|ceil)\s*\(/g, (_m, name: string) => `${name === 'round' ? 'roseRound' : name === 'floor' ? 'roseFloor' : 'roseCeil'}(`)
-      .replace(/\bMath\.(max|min|abs)\s*\(/g, (_m, name: string) => `Swift.${name}(`),
+      .replace(/\bMath\.(max|min|abs)\s*\(/g, (_m, name: string) => `Swift.${name}(`)
+      .replace(/\bNumber\s*\(/g, 'roseNum(')
+      .replace(/\bparseInt\s*\(/g, 'roseNum('),
     (recv, d) => `roseFixed(${recv}, ${d})`,
   );
 }
 
-/** R478: the Swift expression, with the keyword rename applied at the end. */
+/** The Swift expression, with the keyword rename applied at the end. */
 function swiftExpr(code: string, ctx: SwiftCtx): string {
   return swRename(swiftExprRaw(code, ctx));
+}
+
+/** The JS string-method family, one dispatch shared by the expression path
+ *  and the handler-body path (which never had it). */
+function swiftStringMethod(recv: string, method: string, args: string[], boolPos: boolean): string | null {
+  // Plain `.trim()` stays here as null: the script pipeline spells it natively
+  // (trimmingCharacters) after this pass, and the kit helper would shadow it.
+  // map/filter/reduce stay null too: the mapper pass and the string-ops arms
+  // own them - the catch-all below would swallow them into roseContains.
+  if (method === 'trim' || method === 'map' || method === 'filter' || method === 'reduce') return null;
+  // A list transform over a state list of maps: the lambda parameter is a
+  // dictionary, so the body's member reads spell through the kit.
+  const mapBody = (arrow: { params: string[]; body: string }, get: (o: string, k: string) => string): string =>
+    arrow.body.replace(new RegExp(`\\b${arrow.params[0]}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\b(?!\\s*\\()`, 'g'), (_m: string, k: string) => get(arrow.params[0], k));
+  if (method === 'map' || method === 'filter') {
+    const arrow = matchArrow(args[0] ?? '');
+    if (!arrow || !arrow.params.length) return null;
+    const b = mapBody(arrow, (o, k) => `roseGet(${o}, "${k}")`);
+    return method === 'map' ? `roseMap(${recv}) { ${arrow.params[0]} in ${b} }` : `roseFilter(${recv}) { ${arrow.params[0]} in ${b} }`;
+  }
+  if (method === 'reduce') {
+    const arrow = matchArrow(args[0] ?? '');
+    if (!arrow || arrow.params.length !== 2) return null;
+    const seed = args[1]?.trim();
+    let b = arrow.body.trim();
+    const sum = new RegExp(`^${arrow.params[0]}\\s*\\+\\s*${arrow.params[1]}$`).exec(b);
+    if (sum) b = `roseNumber(${arrow.params[0]}) + roseNumber(${arrow.params[1]})`;
+    return seed !== undefined
+      ? `roseReduce(${recv}, ${seed}) { ${arrow.params[0]}, ${arrow.params[1]} in ${b} }`
+      : `roseReduce(${recv}) { ${arrow.params[0]}, ${arrow.params[1]} in ${b} }`;
+  }
+  const call = method === 'trimStart' ? `roseTrimStart(${recv})`
+    : method === 'trimStart' ? `roseTrimStart(${recv})`
+    : method === 'trimEnd' ? `roseTrimEnd(${recv})`
+    : method === 'toLowerCase' ? `roseLower(${recv})`
+    : method === 'toUpperCase' ? `roseUpper(${recv})`
+    : method === 'startsWith' ? `roseHasPrefix(${recv}, ${args[0] ?? '""'})`
+    : method === 'endsWith' ? `roseHasSuffix(${recv}, ${args[0] ?? '""'})`
+    : method === 'charAt' ? `roseCharAt(${recv}, ${args[0] ?? '0'})`
+    : method === 'at' ? `roseAt(${recv}, ${args[0] ?? '0'})`
+    : method === 'repeat' ? `roseRepeat(${recv}, ${args[0] ?? '0'})`
+    : `roseContains(${recv}, ${args[0] ?? '""'})`;
+  if (!boolPos) return call;
+  return method === 'startsWith' || method === 'endsWith' || method === 'includes'
+    ? call
+    : `!${call}.isEmpty`;
 }
 
 function swiftExprRaw(code: string, ctx: SwiftCtx): string {
@@ -3579,24 +4204,31 @@ function swiftExprRaw(code: string, ctx: SwiftCtx): string {
       return expr;
     });
   }
+  // The then-branch binding of an {#await} block is an untyped value, so its
+  // `.length` cannot be Swift's own member - it goes through the kit's count.
+  if (ctx.awaits.length) {
+    for (const a of ctx.awaits) {
+      out = out.replace(new RegExp(`(?<![\\w$])${escapeRe(a.value)}\\s*\\.\\s*length\\b`, 'g'), `roseCount(${a.value})`);
+    }
+  }
   // JS String(x), Math.* and toFixed have no Swift spelling: one shared pass,
   // so a template and a handler body can never disagree.
   out = swiftScalarCalls(out);
-  // R295: a `{@const}` renamed onto a name already in scope (see emitConst) is
+  // A `{@const}` renamed onto a name already in scope (see emitConst) is
   // read back through the local it was declared as. Runs first, so the pass
   // below - which only unwraps a `name()` call - never sees a stale spelling.
   if (ctx.constAlias?.size) {
     const alias = ctx.constAlias;
     out = callifyBareReads(out, (n) => (alias.get(n) ?? n) !== n, (n) => alias.get(n) as string);
   }
-  // R275: the four R273 constructs translate BEFORE the `$`-name rewrite - a
+  // The four constructs translate BEFORE the `$`-name rewrite - a
   // template literal's `${name}` would be rewritten to `$rosezm_name` and the
   // interpolation would never fire (the probe showed raw backticks surviving
   // inside Text()). The state read rides `read`. The index arm of the gate
   // matches only JS-shaped keys (single-quoted or bare) - `props["note"]` is
   // Swift the slot rewriter already emitted, and handing it to the IR would
   // wrap it in a roseIndex call the slot contract never asked for.
-  // R291: the string + search family joins the list - `.join(sep)`,
+  // The string + search family joins the list - `.join(sep)`,
   // `.split(sep)`, `.indexOf(x)`, `.startsWith(p)`, `.endsWith(s)`,
   // `.toUpperCase()` and `.toLowerCase()` are all JS method names an Any? does
   // not have, so they must be spelled here rather than reach the file as member
@@ -3606,7 +4238,7 @@ function swiftExprRaw(code: string, ctx: SwiftCtx): string {
     const translated = translateExpr(out, SWIFT_EXPR, new Set());
     if (translated !== null) return translated;
   }
-  // R191: a `$derived` read is its own expression, re-evaluated on every read.
+  // A `$derived` read is its own expression, re-evaluated on every read.
   // This runs before the state-read rewrite below, which would otherwise turn
   // `doubled()` into a read of the value snapshotted once in build().
   if (ctx.derivedExprs?.size) {
@@ -3629,7 +4261,7 @@ function swiftExprRaw(code: string, ctx: SwiftCtx): string {
   out = out.replace(/\$([A-Za-z_$][\w$]*)/g, 'rosezm_$1');
   out = out.replace(/'((?:[^'\\\\]|\\\\.)*)'/g, '"$1"');
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (whole, name: string) => (ctx.stateNames.has(name) ? name : whole));
-  // R256: a thunk bind read bare is a call - the web build invokes a
+  // A thunk bind read bare is a call - the web build invokes a
   // function-valued bind at the read site, and `ForEach(Array((docListE)...)`
   // would otherwise iterate the closure itself, which is not a sequence.
   if (ctx.thunkBinds?.size) {
@@ -3641,7 +4273,7 @@ function swiftExprRaw(code: string, ctx: SwiftCtx): string {
   out = rewriteOrFallback(out, (operand) => `!(${operand}).isEmpty`, (name) => ctx.stateNames.has(name));
   // `x ? a : b` needs a boolean condition; Swift rejects a bare optional - and
   // a bare Int or String. The test is spelled from the field's declared type:
-  // a Bool is its own condition (R256: `on != nil ? "on" : "off"` on `on: Bool`
+  // a Bool is its own condition (`on != nil ? "on" : "off"` on `on: Bool`
   // is always true, so four pages' toggles never flip), a String or a list is
   // an emptiness test, a number compares against 0, and the optional / unknown
   // shapes keep the nil test they had.
@@ -3653,28 +4285,15 @@ function swiftExprRaw(code: string, ctx: SwiftCtx): string {
     return `${operand} != nil`;
   }, (name) => ctx.stateNames.has(name));
   out = ctx.mapBinds.size ? rewriteMemberReads(out, (obj, key) => `${obj}["${key}"] ?? ""`) : out;
-  // R202: the JS list join has no Swift spelling for an untyped value - the kit
+  // The JS list join has no Swift spelling for an untyped value - the kit
   // helper flattens whatever the field holds instead of failing to compile.
   out = rewriteJoinCalls(out, (list, sep) => `roseJoin(${list}, ${sep})`);
-  // R204: the JS string-method family. Swift spells none of them - String has
+  // The JS string-method family. Swift spells none of them - String has
   // lowercased(), hasPrefix(), contains() and no trim at all - and a SwiftUI
   // state read can be Any?, so `q.trim()` is a hard compile error in the page
   // the web build renders fine. A string result in a condition is an emptiness
   // test, because Swift will not accept a String where a Bool belongs.
-  out = rewriteStringMethods(out, (recv, method, args, boolPos) => {
-    const call = method === 'trim' ? `roseTrim(${recv})`
-      : method === 'trimStart' ? `roseTrimStart(${recv})`
-      : method === 'trimEnd' ? `roseTrimEnd(${recv})`
-      : method === 'toLowerCase' ? `roseLower(${recv})`
-      : method === 'toUpperCase' ? `roseUpper(${recv})`
-      : method === 'startsWith' ? `roseHasPrefix(${recv}, ${args[0] ?? '""'})`
-      : method === 'endsWith' ? `roseHasSuffix(${recv}, ${args[0] ?? '""'})`
-      : `roseContains(${recv}, ${args[0] ?? '""'})`;
-    if (!boolPos) return call;
-    return method === 'startsWith' || method === 'endsWith' || method === 'includes'
-      ? call
-      : `!${call}.isEmpty`;
-  });
+  out = rewriteStringMethods(out, swiftStringMethod);
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   out = out.replace(/\bundefined\b/g, 'nil');
   // Swift has no `String + int`: coerce every string-bearing `+` chain in
@@ -3711,7 +4330,7 @@ function initialOf(script: string, name: string): string {
   return sliceBalanced(script, m.index + m[0].length - 1);
 }
 
-/** R256: a single-line arrow thunk initializer (`() => expr` / `(a, b) => expr`). */
+/** A single-line arrow thunk initializer (`() => expr` / `(a, b) => expr`). */
 const THUNK_INIT = /^(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\S/;
 
 function moduleBinds(script: string): Array<{ name: string; init: string }> {
@@ -3720,7 +4339,7 @@ function moduleBinds(script: string): Array<{ name: string; init: string }> {
     const init = m[2].trim();
     if (/^\$(?:state|derived|data|kv|persist)\b/.test(init)) continue;
     if (['params', 'csr', 'headers', 'prefetch', 'revalidate', 'buffer', 'bundle', 'hotVary', 'prerender', 'csp'].includes(m[1])) continue;
-    // R256: a single-line arrow thunk (`const docListE = () => ...list('posts')`)
+    // A single-line arrow thunk (`const docListE = () => ...list('posts')`)
     // is a real bind the template reads - `{#each docListE as d}` emitted an
     // undeclared identifier without it. bindFields spells the closure; the
     // line-scoped capture plus balanced() keeps multi-line bodies out.
@@ -3737,7 +4356,7 @@ function moduleBinds(script: string): Array<{ name: string; init: string }> {
 }
 
 function safeInit(init: string, known: Set<string>, warnings: string[], who: string): string {
-  // R187: `$query().k` is the launch parameter, spelled per target. It used to be
+  // `$query().k` is the launch parameter, spelled per target. It used to be
   // blanked here to its `??` fallback, which discarded the query string on every
   // page whose state read one - `let q = $state($query().q ?? '')` seeded `""`.
   let src = init
@@ -3821,6 +4440,16 @@ function matchParen(src: string, open: number): number {
   return -1;
 }
 
+/** A head shaped `name(...)` and nothing else - the callee an {#await} block
+ *  can run as this page's own async member (or degrade on, by name). */
+function bareCallName(expr: string): string | null {
+  const s = expr.trim();
+  const m = /^([A-Za-z_$][\w$]*)\s*\(/.exec(s);
+  if (!m) return null;
+  const close = matchParen(s, m[0].length - 1);
+  return close === s.length - 1 ? m[1] : null;
+}
+
 function rewriteSetState(src: string, _stateNames: Set<string>): string {
   // The setter is a plain key/value rewrite: every key is a state field, so the
   // declared names are not consulted here.
@@ -3839,11 +4468,11 @@ function rewriteSetState(src: string, _stateNames: Set<string>): string {
   }
 }
 
-function translateHandlers(script: string, facts: StateFacts, page: { route: string; view: string }, knownBinds: Set<string>, warnings: string[], formFields: string[] = []): string {
+function translateHandlers(script: string, facts: StateFacts, page: { route: string; view: string }, knownBinds: Set<string>, warnings: string[], formFields: string[] = [], effectNames: string[] = [], disposeNames: string[] = [], mountNames: string[] = [], mountAsync: boolean[] = []): string {
   if (!script.trim()) return '';
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
   try {
-    // R241: esbuild's first call pays a ~90ms service spawn; skip it when the
+    // Esbuild's first call pays a ~90ms service spawn; skip it when the
     // script is plain JavaScript and there is nothing to strip.
     code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
   } catch {
@@ -3859,10 +4488,87 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     if (close < 0) continue;
     code = code.slice(0, m.index) + code.slice(close + 1).replace(/^;/, '');
   }
+  // Mount/cleanup callbacks become methods: mounts ride .task, cleanups join the .onDisappear list; an unreadable body is warned, never silently dropped.
+  const nilableBinds = new Set(moduleBinds(script).filter((b) => /^(null|undefined)$/.test(b.init)).map((b) => b.name));
+  code = code
+    .replace(/\bonMount\s*\(/g, '__roseMount(')
+    .replace(/\bonCleanup\s*\(/g, '__roseCleanup(');
+  const lifecycleBodies = (marker: string, kind: string): string[] => {
+    const out: string[] = [];
+    for (const m of code.matchAll(new RegExp(`__rose${marker}\\s*\\(`, 'g'))) {
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0) continue;
+      const fn = code.slice(open + 1, close).trim();
+      const head = /^(?:\(\s*\)\s*=>|function\s*\(\s*\)\s*)/.exec(fn);
+      if (!head) {
+        warnings.push(`xcode: ${page.view}: an ${kind} callback the exporter could not read is skipped (${fn.slice(0, 40)})`);
+        continue;
+      }
+      let body = fn.slice(head[0].length).trim();
+      if (body.startsWith('{')) {
+        const bc = matchParen(body, 0);
+        if (bc !== body.length - 1) {
+          warnings.push(`xcode: ${page.view}: the ${kind} body is not a balanced block - skipped`);
+          continue;
+        }
+        body = body.slice(1, bc).trim();
+      }
+      if (/\$(?:state|derived|data|persist|kv)\b/.test(body)) {
+        warnings.push(`xcode: ${page.view}: an ${kind} body declares state, which has no view-field scope here - skipped`);
+        continue;
+      }
+      const shadow = capturedLocals('', body, script, stateNames, knownBinds).filter((nm) => nm !== 'params');
+      if (shadow.length) {
+        warnings.push(`xcode: ${page.view}: the ${kind} body reads script locals the view has no field for (${shadow.join(', ')}) - skipped`);
+        continue;
+      }
+      const translated = translateBody(body, page.view, stateNames, knownBinds, warnings, undefined, nilableBinds);
+      if (!translated.includes('not translated')) out.push(translated);
+    }
+    return out;
+  };
+  const mountBodies = lifecycleBodies('Mount', 'onMount');
+  const cleanupBodies = lifecycleBodies('Cleanup', 'onCleanup');
+  // A mount kicking off an async member awaits it: the web's fire-and-forget
+  // promise becomes a real await, and the mount method turns async with it.
+  const asyncMembers = new Set([...script.matchAll(/^[ \t]*(?:export\s+)?async\s+function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
   let actions: string[] = [];
   try { actions = extractExports(script).actions.map((a) => a.name); } catch { /* unparsable script keeps no actions */ }
   const methods: string[] = [];
+  for (const rawBody of mountBodies) {
+    let body = rawBody;
+    for (const member of asyncMembers) {
+      body = body.replace(new RegExp(`\\b(?:await\\s+)?${escapeRe(member)}\\s*\\(`, 'g'), `await ${member}(`);
+      body = body.replace(new RegExp(`^(\\s*)await ${escapeRe(member)}\\(`, 'gm'), `$1_ = await ${member}(`);
+    }
+    const name = `__mount${mountNames.length}`;
+    mountNames.push(name);
+    mountAsync.push(/\bawait\b/.test(body));
+    methods.push(`    private func ${name}()${mountAsync[mountAsync.length - 1] ? ' async' : ''} {
+${body}
+    }`);
+  }
+  for (const body of cleanupBodies) {
+    const name = `__dispose${disposeNames.length}`;
+    disposeNames.push(name);
+    methods.push(`    private func ${name}() {
+${body}
+    }`);
+  }
+  // A page action a sibling awaits hands back the patch it applied: that is
+  // the value `const r = await action()` reads, so its fields are dictionary
+  // reads. An action nobody awaits keeps the fire-and-forget signature.
+  const awaitedActions = new Set(actions.filter((a) => new RegExp(`\\bawait\\s+${escapeRe(a)}\\s*\\(`).test(script)));
   for (const action of actions) {
+    // The action's DECLARED parameters ride the POST as form fields; a lone
+    // `form` parameter is the web form-data channel, not a field (a call site
+    // `save('x')` compiles only when the signature names the parameter).
+    const declMatch = new RegExp(`(?:export\\s+)?async\\s+function\\s+${escapeRe(action)}\\s*\\(([^)]*)\\)`).exec(script);
+    const declParams = (declMatch?.[1] ?? '').split(',').map((x) => x.trim().split(/[:=]/)[0].trim()).filter(Boolean);
+    const formOnly = declParams.length === 1 && declParams[0] === 'form';
+    const actionParams = formOnly ? [] : declParams;
+    const sigParams = actionParams.map((n) => `_ ${n}: Any`).join(', ');
     code = code.replace(new RegExp(`\\b(?:async\\s+)?function\\s+${escapeRe(action)}\\s*\\(`, 'g'), `function __server_${action}(`);
     const apply = facts.state.map((s) => {
       const type = swiftType(initialOf(script, s.name));
@@ -3873,17 +4579,38 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
       if (type === 'String') return `        ${id} = roseString(patch, "${s.name}", ${id})`;
       return `        if let value = patch["${s.name}"] { ${id} = value }`;
     }).join('\n');
-    methods.push(`    private func ${action}() async {
-        let (patch, wall) = await roseAction(route, "${action}"${formFields.length ? ', __formFields()' : ''})
+    const patch = awaitedActions.has(action);
+    const settle = patch ? 'return patch' : 'return';
+    const fieldsExpr = actionParams.length
+      ? `{ var f: [String: Any] = [${actionParams.map((n) => `"${n}": ${n}`).join(', ')}]${formFields.length ? '; f.merge(__formFields()) { a, _ in a }' : ''}; return f }()`
+      : (formFields.length ? '__formFields()' : '');
+    methods.push(`    ${patch ? '@discardableResult\n    ' : ''}private func ${action}(${sigParams}) async${patch ? ' -> [String: Any]' : ''} {
+        let (patch, wall) = await roseAction(route, "${action}"${fieldsExpr ? `, ${fieldsExpr}` : ''})
         if let wall = wall {
             __wall(wall)
-            return
+            ${settle}
         }
-        guard !patch.isEmpty else { return }
+        guard !patch.isEmpty else { ${settle} }
         await MainActor.run {
 ${apply}
-        }
+        }${patch ? '\n        return patch' : ''}
     }`);
+  }
+  // The page's own async functions, left after the exported ones became server
+  // actions above: each is emitted as a real async member the {#await}
+  // scaffolding can call, and their bodies keep their awaits.
+  const asyncFns = new Set<string>();
+  for (const m of code.matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)) asyncFns.add(m[1]);
+  // An awaited action is awaitable too: the member returns its patch.
+  for (const action of awaitedActions) asyncFns.add(action);
+  const stateTypes = new Map(facts.state.map((s) => [s.name, swiftType(initialOf(script, s.name))]));
+  // An async member that returns an object literal hands back a dictionary; an
+  // awaited action hands back its patch. Either is an untyped map to its caller.
+  const objectFns = new Set<string>(awaitedActions);
+  for (const m of code.matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close >= 0 && /\breturn\s*\{/.test(code.slice(open + 1, close))) objectFns.add(m[1]);
   }
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
@@ -3894,11 +4621,167 @@ ${apply}
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.view, stateNames, knownBinds, warnings);
     const isAsync = m[0].includes('async');
-    methods.push(`    private func ${name}()${isAsync ? ' async' : ''} {\n${body}\n    }`);
+    if (isAsync) {
+      // Parameters ride as untyped values; a Swift keyword among them is
+      // renamed in the signature and in the body alike, without touching the
+      // page-wide rename map.
+      const params = m[2].split(',').map((p) => p.split(/[=:]/)[0].trim()).filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+      let raw = code.slice(open + 1, close);
+      for (const p of params) {
+        if (!SWIFT_KEYWORDS.has(p)) continue;
+        raw = raw.replace(new RegExp(`(?<![.$\\w])${escapeRe(p)}(?![\\w$])`, 'g'), `${p}_`);
+      }
+      // A body that awaits a sibling action or async member reads that
+      // member's returned object: the awaited local is an untyped dictionary,
+      // so its field reads take the kit's roseGet (the component rule). A body
+      // that itself returns an object literal needs the dictionary spelling.
+      const awaited = [...raw.matchAll(/\bawait\s+([A-Za-z_$][\w$]*)\s*\(/g)].map((x) => x[1]).filter((n) => asyncFns.has(n));
+      const component: ComponentBodyCtx | undefined = awaited.length || objectFns.has(name)
+        ? { objectFns, stateTypes }
+        : undefined;
+      const body = translateBody(raw, page.view, stateNames, knownBinds, warnings, asyncFns, nilableBinds, component);
+      const lines = body.split('\n').filter((l) => l.trim());
+      const endsReturn = /^return\b/.test((lines[lines.length - 1] ?? '').trim());
+      const sig = params.map((p) => `_${SWIFT_KEYWORDS.has(p) ? p + '_' : swName(p)}: Any?`).join(', ');
+      methods.push(`    private func ${swName(name)}(${sig}) async -> Any? {\n${body}${endsReturn ? '' : '\n        return nil'}\n    }`);
+      continue;
+    }
+    // Parameters ride as untyped values, renamed in the signature and the body
+    // alike when one hits a Swift keyword (the async branch's rule); a
+    // handler's event param is what lets a raw `on:input={fn}` call the member
+    // with the kit's synthetic event, read back through roseEventValue.
+    const params = m[2].split(',').map((p) => p.split(/[=:]/)[0].trim()).filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+    let raw = code.slice(open + 1, close);
+    for (const p of params) {
+      if (!SWIFT_KEYWORDS.has(p)) continue;
+      raw = raw.replace(new RegExp(`(?<![.$\\w])${escapeRe(p)}(?![\\w$])`, 'g'), `${p}_`);
+    }
+    const body = translateBody(raw, page.view, stateNames, knownBinds, warnings, undefined, nilableBinds);
+    const sig = params.map((p) => `_ ${SWIFT_KEYWORDS.has(p) ? p + '_' : p}: Any?`).join(', ');
+    const first = params[0] ? (SWIFT_KEYWORDS.has(params[0]) ? params[0] + '_' : params[0]) : '';
+    const bodyText = first ? body.replace(new RegExp(`\\b${escapeRe(first)}\\.target\\.value\\b`, 'g'), `roseEventValue(${first})`) : body;
+    methods.push(`    private func ${swName(name)}(${sig}) {\n${bodyText}\n    }`);
+  }
+  // An effect body is the same statement list a handler carries, so it takes the
+  // same translation; body() then replays it before it renders the tree.
+  for (const eff of effectBodies(code)) {
+    const fn = `__effect${effectNames.length}`;
+    // `$effect(someFn)` calls that script function the way a handler does: a
+    // bare method call, which writes state without asking for a rebuild.
+    if (eff.call) {
+      effectNames.push(fn);
+      methods.push(`    private func ${fn}() {\n        ${swRename(eff.call)}()\n    }`);
+      continue;
+    }
+    if (!eff.body) {
+      warnings.push(`xcode: ${page.view}: an effect body the exporter could not read is skipped (${eff.arg.slice(0, 40)})`);
+      continue;
+    }
+    // The cleanup runs at the view's own disposal moment - the root view's
+    // .onDisappear - as long as it translates without the effect body's own
+    // locals; those have no second-function scope, so that shape keeps the
+    // honest drop warning.
+    const [run, dispose] = cutEffectReturn(eff.body);
+    const cleanup = dispose ? cleanupStatements(dispose) : null;
+    const globals = cleanup && !capturedLocals(run, cleanup, script, stateNames, knownBinds).length ? rewriteGlobalAccess(cleanup) : null;
+    if (globals === null) {
+      if (dispose) warnings.push(`xcode: ${page.view}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+    } else {
+      const name = `__dispose${disposeNames.length}`;
+      disposeNames.push(name);
+      methods.push(`    private func ${name}() {\n${translateBody(globals, page.view, stateNames, knownBinds, warnings, undefined, nilableBinds)}\n    }`);
+    }
+    effectNames.push(fn);
+    methods.push(`    private func ${fn}() {\n${translateBody(run, page.view, stateNames, knownBinds, warnings, undefined, nilableBinds)}\n    }`);
   }
   return methods.join('\n\n');
+}
+
+/** Split an effect body at its top-level `return`: [the statements, the cleanup]. */
+function cutEffectReturn(body: string): [string, string] {
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (depth === 0 && body.startsWith('return', i) && !/[\w$]/.test(body[i - 1] ?? '') && !/[\w$]/.test(body[i + 6] ?? '')) {
+      return [body.slice(0, i).replace(/;$/, ''), body.slice(i + 6).replace(/;$/, '').trim()];
+    }
+  }
+  return [body, ''];
+}
+
+/** The statements a returned cleanup carries: the body of a `() => { ... }` or
+ *  `function () { ... }`, or the one expression an expression arrow returns.
+ *  null when the head is a shape the disposal hook cannot read. */
+function cleanupStatements(fn: string): string | null {
+  const s = fn.trim();
+  const head = /^(?:\(\s*\)\s*=>|function\s*\([^)]*\)\s*)/.exec(s);
+  if (!head) return null;
+  const rest = s.slice(head[0].length).trim();
+  if (rest.startsWith('{')) {
+    const close = matchParen(rest, 0);
+    return close === rest.length - 1 ? rest.slice(1, close).trim() : null;
+  }
+  return /=>/.test(head[0]) ? rest.replace(/;$/, '') : null;
+}
+
+/** The locals a cleanup names that no dispose method can see: the effect body's
+ *  own declarations, and script locals that are neither state nor a bind. */
+function capturedLocals(run: string, cleanup: string, script: string, stateNames: string[], knownBinds: Set<string>): string[] {
+  const names = new Set<string>();
+  for (const m of run.matchAll(/\b(?:let|const|var|function)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1]);
+  const visible = new Set([...stateNames, ...knownBinds]);
+  for (const m of script.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=/g)) {
+    if (!visible.has(m[1])) names.add(m[1]);
+  }
+  return [...names].filter((n) => new RegExp(`\\b${escapeRe(n)}\\b`).test(cleanup));
+}
+
+/** The cleanup's globalThis reads and writes, spelled as kit calls over one
+ *  shared box; null when a shape the box cannot spell honestly survives. */
+function rewriteGlobalAccess(src: string): string | null {
+  if (/globalThis\s*\.\s*[A-Za-z_$][\w$]*\s*(?:[+\-*/%]=|\+\+|--)/.test(src)) return null;
+  const out = src
+    .replace(/globalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*\|\|\s*(-?\d+(?:\.\d+)?)/g, (_m, key: string, fb: string) => `roseGlobalNumber("${key}", ${fb})`)
+    .replace(/globalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)\s*([^;{}\n]+)\s*;?/g, (_m, key: string, val: string) => `roseSetGlobal("${key}", ${val.trim()});`)
+    .replace(/globalThis\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, key: string) => `roseGlobal("${key}")`);
+  if (/\bglobalThis\b/.test(out)) return null;
+  if (/roseGlobal\("[^"]*"\)\s*(?:\.|[+\-*/%<>&|^]=?|\+\+|--)/.test(out)) return null;
+  return balanced(out) ? out : null;
+}
+
+/** The script's timers, spelled with the kit's cancellable Task pair so a
+ *  cleanup's clearTimeout has a real handle to stop. A bare-identifier
+ *  callback stays untouched - that is the Promise-executor shape
+ *  rewriteDelayPromises owns. */
+function rewriteTimers(body: string): string {
+  body = body.replace(/\bclear(?:Timeout|Interval)\s*\(/g, 'roseClearTimer(');
+  let out = '';
+  let rest = body;
+  for (;;) {
+    const m = /\b(setTimeout|setInterval)\s*\(/.exec(rest);
+    if (!m) return out + rest;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(rest, open);
+    if (close < 0) return out + rest;
+    const args = splitTopLevel(rest.slice(open + 1, close));
+    const cb = (args[0] ?? '').trim();
+    const head = /^(?:\(\s*\)\s*=>|function\s*\([^)]*\)\s*|[A-Za-z_$][\w$]*\s*=>)/.exec(cb);
+    if (args.length !== 2 || !head) {
+      out += rest.slice(0, close + 1);
+      rest = rest.slice(close + 1);
+      continue;
+    }
+    const inner = cb.slice(head[0].length).trim();
+    const closure = inner.startsWith('{') ? inner : `{ ${inner} }`;
+    out += rest.slice(0, m.index) + `rose${m[1] === 'setTimeout' ? 'SetTimeout' : 'SetInterval'}(${closure}, ${(args[1] ?? '0').trim()})`;
+    rest = rest.slice(close + 1);
+  }
 }
 
 const SWIFT_EXPR: ExprDialect = {
@@ -3920,7 +4803,7 @@ const SWIFT_EXPR: ExprDialect = {
   arr: (items) => `roseArr(${items.join(', ')})`,
   not: (e) => `!roseBool(${e})`,
   lit: (v) => v,
-  // R275: the four R273 constructs in Swift's spelling. A template literal is
+  // The four constructs in Swift's spelling. A template literal is
   // Swift's own interpolation; the nullish default is `??`; the optional chain
   // is a safe subscript on the cast dictionary; the index read goes through
   // the kit (the value is untyped).
@@ -3933,7 +4816,7 @@ const SWIFT_EXPR: ExprDialect = {
   index: (l, i) => `roseIndex(${l}, ${i})`,
   nullish: (a, b) => `(${a}) ?? (${b})`,
   optChain: (o, k) => `((${o}) as? [String: Any])?["${k}"]`,
-  // R291: the string + search family. A SwiftUI @State field is Any?, so none
+  // The string + search family. A SwiftUI @State field is Any?, so none
   // of Swift's own members can be called on it - join, split, indexOf and every
   // go through the kit (which narrows the value first), exactly like roseIndex
   // and roseJoin already do. The four string spellings are the kit's text
@@ -3944,7 +4827,7 @@ const SWIFT_EXPR: ExprDialect = {
   split: (s, sep) => `roseSplit(${s}, ${sep})`,
   indexOf: (l, item) => `roseIndexOf(${l}, ${item})`,
   every: (l, ps, pred) => `roseEvery(${l}) { ${ps[0]} in ${pred} }`,
-  // R291b: `find` and `some` were the two predicate reads this dialect had no
+  // `find` and `some` were the two predicate reads this dialect had no
   // arm for, so `setFound(items().find(...))` - the shape cpp/java/android/
   // dotnet/arkts/python all spell - reached the arrow refusal and stubbed the
   // whole handler. Same convention as filter/every above.
@@ -3986,7 +4869,7 @@ function swiftIfBlocks(out: string): string {
 }
 
 /**
- * R291: `$setState('k', EXPR)` where EXPR is a direct value from the string +
+ * `$setState('k', EXPR)` where EXPR is a direct value from the string +
  * search family.
  *
  * The shared `rewriteDirectSetValue` in state-ops.ts claims only a collection
@@ -3994,7 +4877,7 @@ function swiftIfBlocks(out: string): string {
  * `text().toUpperCase()`, `words().join(',')` or `nums().every((x) => x > 1)`
  * fell through it - and the `every` form then hit the arrow refusal at the
  * bottom of translateBody, stubbing a handler the dialect spells fine. This is
- * the same rewrite with the R291 names added; `translateExpr` itself is the
+ * the same rewrite with the names added; `translateExpr` itself is the
  * authority on whether a shape is translatable, and a null leaves the call
  * untouched so the target's own refusal still fires.
  */
@@ -4022,7 +4905,7 @@ function rewriteFamilyDirectSets(body: string, spell: (key: string, expr: string
 }
 
 /**
- * R291b: `setNums(nums().slice(1))` - the AUTO-SETTER form of a write whose
+ * `setNums(nums().slice(1))` - the AUTO-SETTER form of a write whose
  * value is outside the shared pass's allowlist.
  *
  * `rewriteAutoSetterWrites` in state-ops.ts claims only
@@ -4060,12 +4943,132 @@ function rewriteFamilyAutoSetters(body: string, setterFor: (setter: string) => s
   return out;
 }
 
-/** R478: a handler body goes through the same keyword rename as an expression. */
-function translateBody(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[]): string {
-  return swRename(translateBodyRaw(body, file, stateNames, knownBinds, warnings));
+/**
+ * `await new Promise((r) => setTimeout(r, 80))` is JS's delay, and Swift's own
+ * is `Task.sleep` - wrapped here as the kit's `roseDelay(ms)` so the awaited
+ * form is a plain awaitable and the unawaited form a detached `Task`, the same
+ * fire-and-forget the web spelling has. Only the two canonical executor shapes
+ * are claimed; anything else keeps today's refusal path.
+ */
+function rewriteDelayPromises(body: string): string {
+  const arrow = /(await\s+)?new\s+Promise\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\s*(?:,\s*[A-Za-z_$][\w$]*)?\s*\)\s*=>\s*setTimeout\s*\(\s*\2\s*,\s*([^()]+?)\s*\)\s*\)/g;
+  const fnShape = /(await\s+)?new\s+Promise\s*\(\s*function\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{\s*setTimeout\s*\(\s*\2\s*,\s*([^()]+?)\s*\)\s*;?\s*\}\s*\)/g;
+  const spell = (m: string, ms: string): string => (m.startsWith('await') ? `await roseDelay(${ms})` : `Task { await roseDelay(${ms}) }`);
+  return body
+    .replace(arrow, (m, _a: string | undefined, _r: string, ms: string) => spell(m, ms.trim()))
+    .replace(fnShape, (m, _a: string | undefined, _r: string, ms: string) => spell(m, ms.trim()));
 }
 
-function translateBodyRaw(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[]): string {
+/** A component body: `objectFns` are the async members that return an object
+ *  literal (their awaited locals are untyped maps), `stateTypes` the declared
+ *  @State field types so a map read is coerced back to the field's own type. */
+interface ComponentBodyCtx {
+  objectFns: Set<string>;
+  stateTypes: Map<string, string>;
+}
+
+/** A handler body goes through the same keyword rename as an expression.
+ *  `nilableNames` are the bind fields typed `Any?` (a `null` initializer) -
+ *  the only names a JS truthiness test may still spell `if (x)` over. */
+function translateBody(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[], asyncFns?: Set<string>, nilableNames?: Set<string>, component?: ComponentBodyCtx): string {
+  body = rewriteForOf(body, (name, list) => `for ${name} in ${list}`);
+  return swRename(translateBodyRaw(body, file, stateNames, knownBinds, warnings, asyncFns, nilableNames, component));
+}
+
+/** `{ ok: 'saved' }` is Swift's dictionary literal, never a closure. */
+function rewriteObjectReturns(body: string): string {
+  let out = body;
+  for (;;) {
+    const m = /\breturn\s*\{/.exec(out);
+    if (!m) break;
+    const open = out.indexOf('{', m.index);
+    const close = matchParen(out, open);
+    if (close < 0) break;
+    out = out.slice(0, m.index) + `return ${swiftMapLiteral(out.slice(open, close + 1))} as [String: Any]` + out.slice(close + 1);
+  }
+  return out;
+}
+
+/** `const r = await save()` types r as Any?: its field reads are roseGet. */
+function rewriteAwaitedObjectLocals(body: string, objectFns: Set<string>): string {
+  const locals = new Set<string>();
+  for (const m of body.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (objectFns.has(m[2])) locals.add(m[1]);
+  }
+  let out = body;
+  for (const name of locals) {
+    out = out.replace(new RegExp(`\\b${escapeRe(name)}\\s*((?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*)+)`, 'g'), (_m, chain: string) => {
+      let expr = name;
+      for (const key of chain.split('.').map((s) => s.trim()).filter(Boolean)) expr = `roseGet(${expr}, "${key.replace(/^\?/, '')}")`;
+      return expr;
+    });
+  }
+  return out;
+}
+
+/** A roseGet value is Any?: a typed @State field needs its own conversion. */
+function coerceTypedStateWrites(body: string, stateTypes: Map<string, string>): string {
+  let out = body;
+  for (const [key, type] of stateTypes) {
+    let from = 0;
+    for (;;) {
+      const re = new RegExp(`\\b${escapeRe(key)}\\s*=\\s*roseGet\\(`, 'g');
+      re.lastIndex = from;
+      const m = re.exec(out);
+      if (!m) break;
+      const start = out.indexOf('roseGet(', m.index);
+      const close = matchParen(out, start + 'roseGet'.length);
+      if (close < 0) break;
+      const expr = out.slice(start, close + 1);
+      const wrapped = type === 'String' ? `roseTextOf(${expr})`
+        : type === 'Int' ? `roseRound(${expr})`
+        : type === 'Double' ? `(roseFloatOf(${expr}) ?? 0)`
+        : type === 'Bool' ? `roseBool(${expr})`
+        : null;
+      if (wrapped === null) break;
+      out = out.slice(0, start) + wrapped + out.slice(close + 1);
+      from = start + wrapped.length;
+    }
+  }
+  return out;
+}
+
+function translateBodyRaw(body: string, file: string, stateNames: string[], knownBinds: Set<string>, warnings: string[], asyncFns?: Set<string>, nilableNames?: Set<string>, component?: ComponentBodyCtx): string {
+  // esbuild lowers `x ||= y` to `x || (x = y)`; Swift accepts neither side,
+  // and `??` on a non-optional can never fire - only a nilable state keeps it.
+  body = rewriteLoweredLogicalAssign(body, (read, op, rhs) => {
+    if (!stateNames.includes(read)) return null;
+    if (op === '??') return nilableNames?.has(read) ? `if ${read} == nil { ${read} = ${rhs} }` : '';
+    const test = `roseTruthy(${read})`;
+    return op === '||' ? `if !${test} { ${read} = ${rhs} }` : `if ${test} { ${read} = ${rhs} }`;
+  })
+  // A regex literal is a pattern string; the kit owns the NSRegularExpression.
+  body = rewriteRegexReplace(body, (recv, pat, repl, global) => {
+    const p = pat.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return global ? `roseReReplace(${recv}, "${p}", ${repl})` : `roseReReplaceFirst(${recv}, "${p}", ${repl})`;
+  })
+  // esbuild keeps `x?.['k']` intact, but the member/subscript passes each own one
+  // side of it - the optional-chain index is spelled here, once, instead.
+  body = rewriteOptionalIndex(body, (recv, key) => `${recv}?["${key}"]`);
+  body = rewriteSetDedupe(body, (l) => `roseDistinct(${l})`);
+  body = rewriteInCheck(body, (key, obj) => `roseHas(${obj}, "${key}")`);
+/** A flat `{ k: v }` argument becomes a dictionary literal - Swift would read
+ *  the braces as a closure. */
+function swiftObjArg(raw: string): string {
+  const t = raw.trim();
+  if (!/^\{[^{}]*\}$/.test(t)) return t;
+  const pairs = t.slice(1, -1).split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+    const colon = part.indexOf(':');
+    if (colon < 0) return null;
+    const key = part.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+    return `"${key}": ${part.slice(colon + 1).trim()}`;
+  }).filter((x): x is string => !!x);
+  return pairs.length ? `[${pairs.join(', ')}]` : '[:]';
+}
+
+  // A flat `{ k: v }` argument parses as a CLOSURE in Swift: the kit-call
+  // arguments spell as dictionary literals here.
+  body = rewriteObjectAssign(body, (a, b) => `roseAssign(${swiftObjArg(a)}, ${swiftObjArg(b)})`);
   // useNative('camera', opts) becomes the kit's roseNative call - one dispatch
   // shared by every page. Done before the DOM refusal below so the call is
   // never mistaken for a web-only construct.
@@ -4088,6 +5091,9 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
   // input binds to), and preventDefault/reset/e.target are stripped. A genuine
   // DOM read survives and is still refused below.
   body = rewriteFormReads(body);
+  // AFTER the form reads: the form channel spells its own native trim, and
+  // an earlier string-method pass would shadow it with the kit helper.
+  body = rewriteStringMethods(body, swiftStringMethod);;;
   if (/\bFormData\(|\bdocument\.|\bwindow\./.test(body)) {
     warnings.push(`xcode: ${file}: a handler touches the DOM/FormData, which has no SwiftUI equivalent - emitted as a stub`);
     return '        // rosezm: handler body not translated (web-only API).';
@@ -4095,7 +5101,18 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
   // No JS construct may leak into the emitted file: a state write with a
   // spread becomes Swift's array concatenation, `throw new Error` the kit's
   // roseThrow.
+  // The script's timers, spelled with the kit's cancellable Task pair so a
+  // cleanup's clearTimeout has a real handle to stop. A bare-identifier
+  // callback stays untouched - that is the Promise-executor shape
+  // rewriteDelayPromises owns.
+  body = rewriteTimers(body);
   let body2 = rewriteThrowNew(body);
+  // An async member body: the JS delay promise becomes the kit's awaitable
+  // delay (a detached timer when nobody awaits it) - before any pass sees the
+  // arrow inside the promise executor.
+  if (asyncFns) {
+    body2 = rewriteDelayPromises(body2);
+  }
   body2 = rewritePromiseExprs(body2);
   // A mapper setter ($setState('k', p => EXPR)) is translated before anything
   // else: the target's own state pass then never sees the JS arrow.
@@ -4105,12 +5122,43 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
     const value = `${key}()`;
     return `${key} = ${out}`.replace(new RegExp(`\\b${param}\\b`, 'g'), value);
   });
+  // The standalone collection chains (map/filter/reduce NOT inside a
+  // $setState mapper): the same kit spellings the dialect arms use.
+  body2 = rewriteLocalArrow(body2, (name, params, b) => {
+    const kw = /^(?:as|break|case|catch|class|continue|default|defer|do|else|enum|extension|fallthrough|for|func|guard|if|import|in|is|let|nil|repeat|return|self|super|switch|throw|throws|try|var|where|while)$/;
+    const safe = kw.test(name) ? `${name}_` : name;
+    const { names, body: bb } = spellArrowParams(params, b, kw, (x) => `roseNumber(${x})`, (x) => `roseText(${x})`);
+    return [`let ${safe} = { (${names.join(', ')}: Any?) in ${bb} }`, safe];
+  });
+  body2 = rewriteCollectionChain(body2, (method, recv, args) => {
+    const mapBody = (arrow: { params: string[]; body: string }): string =>
+      arrow.body.replace(new RegExp(`\\b${arrow.params[0]}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\b(?!\\s*\\()`, 'g'), (_m: string, k: string) => `roseGet(${arrow.params[0]}, "${k}")`);
+    if (method === 'map' || method === 'filter') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || !arrow.params.length) return null;
+      const b = mapBody(arrow);
+      return method === 'map' ? `roseMap(${recv}, { ${arrow.params[0]} in ${b} })` : `roseFilter(${recv}, { ${arrow.params[0]} in ${b} })`;
+    }
+    if (method === 'reduce') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || arrow.params.length !== 2) return null;
+      const seed = args[1]?.trim();
+      let b = arrow.body.trim();
+      const sum = new RegExp(`^${arrow.params[0]}\\s*\\+\\s*${arrow.params[1]}$`).exec(b);
+      if (sum) b = `roseNumber(${arrow.params[0]}) + roseNumber(${arrow.params[1]})`;
+      return seed !== undefined
+        ? `roseReduce(${recv}, ${seed}, { ${arrow.params[0]}, ${arrow.params[1]} in ${b} })`
+        : `roseReduce(${recv}, { ${arrow.params[0]}, ${arrow.params[1]} in ${b} })`;
+    }
+    if (method === 'join') return `roseJoin(${recv}, ${args[0] ?? '","'})`;
+    return null;
+  });
   // The direct-value form of the same write: `$setState('list', list().filter(...))`.
   body2 = rewriteDirectSetValue(body2, (key, expr) => {
     const out = translateExpr(expr, SWIFT_EXPR, new Set());
     return out === null ? null : `${key} = ${out}`;
   });
-  // R291b: the AUTO-SETTER form of that write - `setNums(nums().filter(...))`.
+  // The AUTO-SETTER form of that write - `setNums(nums().filter(...))`.
   // The compiler mints `setNums` for every `let nums = $state(...)`, so this is
   // the shape real handlers actually write, and Swift was the only target with
   // no pass for it: the raw arrow reached the refusal at the bottom of this
@@ -4132,8 +5180,8 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
       return out === null ? null : `${key} = ${out}`;
     },
   );
-  // R291b: the same auto-setter rewrite with this dialect's full allowlist. The
-  // shared pass above claims map/filter/reduce/find/some/concat; the R291
+  // The same auto-setter rewrite with this dialect's full allowlist. The
+  // shared pass above claims map/filter/reduce/find/some/concat; the
   // family (every/slice/join/split/indexOf/startsWith/endsWith/toUpperCase/
   // toLowerCase) is this file's own, and an unclaimed one was rewritten
   // textually by rewriteSetState into broken Swift rather than stubbing.
@@ -4148,7 +5196,7 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
       return out === null ? null : `${key} = ${out}`;
     },
   );
-  // R291: the same direct-value write for the R291 family. The shared pass above
+  // The same direct-value write for the family. The shared pass above
   // only claims a collection chain (map/filter/reduce/find/some/concat), so
   // `$setState('allBig', nums().every((x) => x > 1))` fell through every pass
   // that knows the IR and hit the arrow refusal at the bottom of this function -
@@ -4162,7 +5210,7 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
   });
   body2 = rewriteSpreadWrites(body2, (kind, key, list, item) =>
     kind === 'append' ? `${key} = (${list}) + [ ${item} ]` : `${key} = [ ${item} ] + (${list})`,
-    // R286: the auto-setter form (setItems([...items(), 'new'])) rides the
+    // The auto-setter form (setItems([...items(), 'new'])) rides the
     // same spelling - it is what real handlers write.
     (setter) => {
       const key = setter.slice(3, 4).toLowerCase() + setter.slice(4);
@@ -4170,10 +5218,32 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
     },
   );
   let out = rewriteSetState(body2.trim(), new Set(stateNames));
-  out = out.replace(/\bawait\s+/g, '');
+  if (asyncFns) {
+    // Keep the await where a real async operation follows - one of this page's
+    // async members, or the kit delay - and strip the rest, as before.
+    out = out.replace(/\bawait\s+([A-Za-z_$][\w$]*)/g, (m, name: string) => (asyncFns.has(name) || name === 'roseDelay' || name === 'roseFetch' || name === 'fetch' ? `\u0001await\u0002 ${name}` : name));
+    out = out.replace(/\bawait\s+/g, '');
+    out = out.replace(/\u0001await\u0002/g, 'await');
+  } else {
+    out = out.replace(/\bawait\s+/g, '');
+  }
   out = out.replace(/\$action\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `${name}()`);
-  out = out.replace(/\brefresh\s*\(\s*\)/g, '/* refresh: the data channel reloads on navigation */');
+  out = out.replace(/\brefresh\s*\(\s*\)/g, '/* refresh: the data channel reloads on navigation */ ()');
+  // A script FUNCTION (not a handler) is a fourth code path, and `$t` was never
+  // rewritten here: `return $t("k", { name: "x" })` reached the file as rosezm
+  // syntax. The key is what the Kotlin and Dart paths fall back to, and the
+  // dictionary the kit bakes is what a real build would read; the same rewrite
+  // keeps the four paths from drifting.
+  out = out.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   out = out.replace(/\bconsole\.(?:log|warn|error)\(/g, 'print(');
+  // An awaited value is a parsed dictionary: `r.ok` is a subscript read, the
+  // same rule every other kit-backed target uses for a decoded body.
+  const awaitedLocals = [...out.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:fetch|roseFetch)\s*\(/g)].map((m) => m[1]);
+  for (const name of new Set(awaitedLocals)) {
+    out = out.replace(new RegExp(`\\b${name}\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, 'g'), (_m, key: string) => `${name}["${key}"]`);
+  }
+  // Swift has no fetch: the kit's URLSession request is the call a page makes.
+  out = out.replace(/\bfetch\s*\(/g, 'roseFetch(');
   out = out.replace(/\.length\b/g, '.count');
   // JS scalar calls (String/Math/toFixed) share one spelling with the template
   // path: a handler body with `Math.round` or `String(anyValue)` compiled to
@@ -4185,13 +5255,30 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (_whole, name: string) => (known.has(name) ? name : _whole));
   for (const name of known) {
     const cap = name.charAt(0).toUpperCase() + name.slice(1);
-    out = out.replace(new RegExp(`\\bset${cap}\\s*\\(`, 'g'), `${name} = `);
+    // Paren-aware: the old textual head rewrite left the argument list's
+    // closing paren behind - `setTicks(1)` emitted `ticks = 1)`, which no
+    // Swift compiler accepts.
+    for (;;) {
+      const m = new RegExp(`\\bset${escapeRe(cap)}\\s*\\(`).exec(out);
+      if (!m) break;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(out, open);
+      if (close < 0) break;
+      out = out.slice(0, m.index) + `${name} = ${out.slice(open + 1, close).trim()}` + out.slice(close + 1);
+    }
   }
   // Swift has no `String + Int`: coerce every string-bearing `+` chain so
   // `'Item ' + items.count + 1` runs (String(describing:)) instead of failing
   // to compile. Array concatenation `(items) + [x]` is already native Swift.
-  out = coerceStringConcat(out, (e) => `String(describing: ${e})`);
-  // R189: a handler body is a THIRD code path (after the template and the state
+  // A spelled local arrow is already target-ready: coercing inside its closure
+  // body read the parameter list as the chain's left operand
+  // (`String(describing: (w: Any?) in "Hi ")`), so its one-line declaration
+  // sits the pass out and comes back verbatim.
+  const spelledArrows: string[] = [];
+  out = out.replace(/let [A-Za-z_$][\w$]* = \{ \([^\n]+\}/g, (m) => { spelledArrows.push(m); return `__ROSE_ARROW_${spelledArrows.length - 1}__`; });
+  out = coerceStringConcatInAssignments(out, (e) => `String(describing: ${e})`);
+  out = out.replace(/__ROSE_ARROW_(\d+)__/g, (_m, i: string) => spelledArrows[Number(i)] ?? '');
+  // A handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it. `store.likes`
   // reached the file verbatim, which is not valid Swift: a module bind is a
   // static dictionary, so the read must be Self.store["likes"]. Only a BIND is
@@ -4204,10 +5291,26 @@ function translateBodyRaw(body: string, file: string, stateNames: string[], know
   out = out.replace(/\$formRead\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => name);
   out = out.replace(/\.trim\(\)/g, '.trimmingCharacters(in: .whitespaces)');
   out = out.replace(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g, 'let $1 =');
+  // A component's own async members return real values: the object literal is
+  // a dictionary (a Swift closure otherwise), an awaited sibling's field reads
+  // go through roseGet, and a typed @State field takes it back as its own type.
+  if (component) {
+    out = rewriteObjectReturns(out);
+    out = rewriteAwaitedObjectLocals(out, component.objectFns);
+    out = coerceTypedStateWrites(out, component.stateTypes);
+  }
   out = rewriteStringTruth(out, (name) => `!${name}.isEmpty`);
   // `e.key || ''` is JS truthiness; Swift has no truthy String either.
   out = rewriteOrFallback(out, (operand) => `!(${operand}).isEmpty`, () => true);
   out = swiftIfBlocks(out);
+  // A truthiness test over a nilable bind (a `let timer = null` handle) is
+  // Swift's nil test - `if (timer)` is a compile error, the handle's JS
+  // truthiness IS "not null".
+  if (nilableNames) {
+    for (const nm of nilableNames) {
+      out = out.replace(new RegExp(`\\bif \\(${escapeRe(nm)}\\) \\{`, 'g'), `if (${nm} != nil) {`);
+    }
+  }
   // A surviving JS arrow is not Swift: the mapper pass translated the shapes
   // it could, so whatever is left has no equivalent and must not leak.
   if (/=>/.test(out)) {
@@ -4225,14 +5328,179 @@ function componentProps(script: string | null): Array<{ name: string; init: stri
     .map((m) => ({ name: m[1], init: m[2].trim() }));
 }
 
-function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, assets: Map<string, string>, warnings: string[], fontMap: Map<string, string>, globalCss: string = ''): string {
+/** A component's own onMount/onCleanup callbacks, translated with the same
+ *  body machinery a page handler uses. The component is a real struct
+ *  instance, so a mount body rides .task and a cleanup joins .onDisappear;
+ *  a body reading a name that is no field (a script local, a bind) is a named
+ *  skip, never a silent one. The component's own $state fields and script
+ *  functions ARE fields/members now, so a lifecycle body that writes state or
+ *  calls a component function resolves instead of being refused. */
+function componentLifecycle(script: string | null, view: string, stateNames: string[], warnings: string[]): { mount: string[]; mountAsync: boolean[]; cleanup: string[] } {
+  const out = { mount: [] as string[], mountAsync: [] as boolean[], cleanup: [] as string[] };
+  if (!script?.trim() || !/\bon(?:Mount|Cleanup)\s*\(/.test(script)) return out;
+  let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
+  try {
+    code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+  } catch { /* the raw text still carries the callbacks */ }
+  const asyncFns = new Set([...code.matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1]));
+  code = code
+    .replace(/\bonMount\s*\(/g, '__roseMount(')
+    .replace(/\bonCleanup\s*\(/g, '__roseCleanup(');
+  const collect = (marker: 'Mount' | 'Cleanup', into: string[], asyncFlags?: boolean[]): void => {
+    for (const m of code.matchAll(new RegExp(`__rose${marker}\\s*\\(`, 'g'))) {
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(code, open);
+      if (close < 0) continue;
+      const kind = marker === 'Mount' ? 'onMount' : 'onCleanup';
+      const fn = code.slice(open + 1, close).trim();
+      const head = /^(?:\(\s*\)\s*=>|function\s*\(\s*\)\s*)/.exec(fn);
+      if (!head) {
+        warnings.push(`xcode: ${view}: an ${kind} callback the exporter could not read is skipped (${fn.slice(0, 40)})`);
+        continue;
+      }
+      let body = fn.slice(head[0].length).trim();
+      if (body.startsWith('{')) {
+        const bc = matchParen(body, 0);
+        if (bc !== body.length - 1) {
+          warnings.push(`xcode: ${view}: the ${kind} body is not a balanced block - skipped`);
+          continue;
+        }
+        body = body.slice(1, bc).trim();
+      }
+      if (/\$(?:state|derived|data|persist|kv)\b/.test(body)) {
+        warnings.push(`xcode: ${view}: an ${kind} body declares state, which has no field on the component struct - skipped`);
+        continue;
+      }
+      const shadow = capturedLocals('', body, script, stateNames, new Set()).filter((nm) => nm !== 'params');
+      if (shadow.length) {
+        warnings.push(`xcode: ${view}: the ${kind} body reads names the component struct has no field for (${shadow.join(', ')}) - skipped`);
+        continue;
+      }
+      let translated = translateBody(body, view, stateNames, new Set(), warnings, asyncFns);
+      // A mount kicking off an async member awaits it in the .task closure -
+      // the web's fire-and-forget promise becomes a real await.
+      for (const name of asyncFns) {
+        translated = translated.replace(new RegExp(`\\b(?:await\\s+)?${escapeRe(name)}\\s*\\(`, 'g'), `await ${name}(`);
+        // A bare statement call discards the member's value - spell that.
+        translated = translated.replace(new RegExp(`^(\\s*)await ${escapeRe(name)}\\(`, 'gm'), `$1_ = await ${name}(`);
+      }
+      if (translated.includes('not translated')) continue;
+      into.push(translated);
+      asyncFlags?.push(/\bawait\b/.test(translated));
+    }
+  };
+  collect('Mount', out.mount, out.mountAsync);
+  collect('Cleanup', out.cleanup);
+  return out;
+}
+
+/** The component script's own top-level functions, emitted as real members on
+ *  the component struct through the same body pipeline a page handler uses -
+ *  the component's template handlers call them by bare name, so a run that
+ *  skipped this emission left every one of those calls undefined. State reads
+ *  and writes resolve against the expanded stateNames (props + the component's
+ *  own $state/$derived/$data); nilableNames are the names typed Any? whose JS
+ *  truthiness must spell a nil test. */
+function componentFunctions(script: string | null, view: string, stateNames: string[], warnings: string[], nilableNames?: Set<string>, stateTypes: Map<string, string> = new Map(), actionNames: string[] = [], formFields: string[] = []): string {
+  if (!script?.trim()) return '';
+  let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
+  try {
+    code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+  } catch {
+    warnings.push(`xcode: ${view}: the component script did not parse as TypeScript - its functions are skipped`);
+    return '';
+  }
+  for (const name of stateNames) {
+    const re = new RegExp(`\\b(?:let|const|var)\\s+${escapeRe(name)}\\s*(?::[^=;\\n]*)?=\\s*\\$(?:state|derived|data|persist|kv)\\b(?:<[^>]*>)?\\s*\\(`);
+    const m = re.exec(code);
+    if (!m) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    code = code.slice(0, m.index) + code.slice(close + 1).replace(/^;/, '');
+  }
+  const asyncFns = new Set<string>();
+  for (const m of code.matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)) asyncFns.add(m[1]);
+  // An async member whose body returns an object literal: an awaited result of
+  // it is an untyped map, so `r.ok` must read through roseGet.
+  const objectFns = new Set<string>();
+  for (const m of code.matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close >= 0 && /\breturn\s*\{/.test(code.slice(open + 1, close))) objectFns.add(m[1]);
+  }
+  const component: ComponentBodyCtx = { objectFns, stateTypes };
+  const compActionList = actionNames;
+  const compActionSet = new Set(compActionList);
+  code = code
+    .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
+    .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+  const methods: string[] = [];
+  for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
+    const name = m[1];
+    if (name.startsWith('__')) continue;
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(code, open);
+    if (close < 0) continue;
+    const isAsync = m[0].includes('async');
+    if (isAsync && compActionSet.has(name)) {
+      // A server action's body is server-only code (it reads FormData and
+      // module state the client does not carry): the twin POSTs through the
+      // kit's roseAction and seeds this component's state from the patch -
+      // the page-level twin's shape. The route rides the view's own
+      // `route` property, which every generated call site passes.
+      const seeds = stateNames.map((st) => '        if let value = patch["' + st + '"] { ' + swName(st) + ' = value }').join('\n');
+      const fieldPayload = formFields.map((fl) => '"' + fl + '": ' + swName(fl)).join(', ');
+      methods.push('    private func ' + swName(name) + '() async {'
+        + '\n        let (patch, wall) = await roseAction(route, "' + name + '"' + (fieldPayload ? ', [' + fieldPayload + ']' : '') + ')'
+        + '\n        if wall != nil { return }'
+        + '\n        guard !patch.isEmpty else { return }'
+        + (seeds ? '\n' + seeds : '\n        _ = patch')
+        + '\n    }');
+      continue;
+    }
+    if (isAsync) {
+      const params = m[2].split(',').map((p) => p.split(/[=:]/)[0].trim()).filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+      let raw = code.slice(open + 1, close);
+      for (const p of params) {
+        if (!SWIFT_KEYWORDS.has(p)) continue;
+        raw = raw.replace(new RegExp(`(?<![.$\\w])${escapeRe(p)}(?![\\w$])`, 'g'), `${p}_`);
+      }
+      const body = translateBody(raw, view, stateNames, new Set(), warnings, asyncFns, nilableNames, component);
+      const lines = body.split('\n').filter((l) => l.trim());
+      const endsReturn = /^return\b/.test((lines[lines.length - 1] ?? '').trim());
+      const sig = params.map((p) => `_${SWIFT_KEYWORDS.has(p) ? p + '_' : swName(p)}: Any?`).join(', ');
+      methods.push(`    private func ${swName(name)}(${sig}) async -> Any? {\n${body}${endsReturn ? '' : '\n        return nil'}\n    }`);
+      continue;
+    }
+    const body = translateBody(code.slice(open + 1, close), view, stateNames, new Set(), warnings, undefined, nilableNames, component);
+    methods.push(`    private func ${swName(name)}() {\n${body}\n    }`);
+  }
+  return methods.join('\n\n');
+}
+
+function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, assets: Map<string, string>, warnings: string[], fontMap: Map<string, string>, globalCss: string = '', components: Array<{ name: string; view: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = []): string {
   const props = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  // The component's OWN state, resolved exactly like a page's: fields on the
+  // struct, reads and writes from the template and from the emitted functions.
+  const facts = comp.script?.trim() ? scanState(comp.script) : { state: [], derived: [], data: [] };
+  const ownState = [...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data];
+  for (const s of ownState) if (SWIFT_KEYWORDS.has(s) && !swiftNames.has(s)) swiftNames.set(s, s + '_');
+  const fnNames = [...(comp.script ?? '').matchAll(/^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]);
+  const known = new Set([...props, ...ownState]);
+  const stateInit = new Map(facts.state.map((s) => [s.name, safeInit(initialOf(comp.script ?? '', s.name), known, warnings, comp.view)]));
+  const nilable = new Set([
+    ...componentProps(comp.script).filter((p) => /^(null|undefined)$/.test(p.init)).map((p) => p.name),
+    ...facts.state.filter((s) => /^(null|undefined)$/.test(s.init.trim())).map((s) => s.name),
+  ]);
   const ctx: SwiftCtx = {
     warnings,
     file: comp.view,
-    stateNames: new Set(props),
+    stateNames: new Set([...props, ...ownState]),
+    dataNames: new Set(facts.data),
+    derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
     mapBinds: new Set(),
-    components: [],
+    components: components,
     lines: [],
     depth: 3,
     sheet: parseStylesheet([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n')),
@@ -4242,18 +5510,35 @@ function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; sc
     vectors: new Map(),
     navigate: 'onNavigate',
     awaits: [],
+    asyncFns: new Set([...(comp.script ?? '').matchAll(/\basync\s+function\s+([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1])),
+    serverActions: new Set(),
     scriptConsts: new Map(),
     componentProps: new Set(props),
+    stateTypes: new Map(facts.state.map((s) => [s.name, swiftType(stateInit.get(s.name) ?? 'nil')])),
     inline: new Map(),
     inlineBodies: [],
     deferred: [],
-    forms: [],
-    pageAction: null,
+    forms: collectForms(comp.nodes),
+    pageAction: (() => { try { return extractExports(comp.script ?? '').actions[0]?.name ?? null; } catch { return null; } })(),
     cssExtras: swiftCssExtras([globalCss, comp.style].filter((s) => s && s.trim()).join('\n'), warnings),
   };
   emitNodes(comp.nodes, ctx);
   const defaults = new Map(componentProps(comp.script).map((p) => [p.name, swiftLiteral(p.init)]));
   let fields = props.map((p) => `    var ${p}: Any? = ${defaults.get(p) ?? 'nil'}`).join('\n');
+  // The component's own state rides as real @State fields - a counter the
+  // template and the emitted functions both write must survive the click.
+  const ownFields = [
+    ...facts.state.map((s) => `    @State private var ${swName(s.name)}: ${swiftType(stateInit.get(s.name) ?? 'nil')} = ${swiftLiteral(stateInit.get(s.name) ?? 'nil')}`),
+    ...facts.data.map((d) => `    @State private var ${swName(d)}: Any? = nil`),
+  ].join('\n');
+  if (ownFields) fields += (fields ? '\n' : '') + ownFields;
+  // A form field that names no state is still a real, editable field: it
+  // becomes an @State the TextField binds and the action twin posts.
+  const fieldStates = collectForms(comp.nodes)
+    .flatMap((f) => f.fields)
+    .filter((fl) => !props.includes(fl) && !facts.state.some((st) => st.name === fl))
+    .map((fl) => `    @State private var ${swName(fl)}: String = ""`);
+  if (fieldStates.length) fields += (fields ? '\n' : '') + fieldStates.join('\n');
   // Two-way props: the inputs that render a prop get an implicit change closure.
   const twoWay = inputBoundProps(comp.nodes, props);
   for (const p of twoWay) fields += `\n    var ${propChangeHandler(p)}: (Any?) -> Void = { _ in }`;
@@ -4264,19 +5549,49 @@ function renderComponent(comp: { name: string; view: string; nodes: IrNode[]; sc
     fields += `\n    var slot${s.name.charAt(0).toUpperCase()}${s.name.slice(1)}: (_ props: [String: Any]) -> AnyView = { _ in AnyView(EmptyView()) }`;
   }
   const inlineDefs = ctx.inlineBodies.length ? '\n\n' + ctx.inlineBodies.join('\n\n') : '';
+  // A component's {#await} blocks settle exactly like a page's: fields the
+  // branches read, one runner, and the .task kick-off SwiftUI provides.
+  const awaitDecls = ctx.awaits.map((a) => `    @State private var ${a.done}: Bool = false\n    @State private var ${a.value}: Any? = nil\n    @State private var ${a.err}: String? = nil`).join('\n');
+  const lifecycle = componentLifecycle(comp.script, comp.view, [...props, ...ownState, ...fnNames], warnings);
+  const taskBody = [...ctx.awaits.map((a, i) => `await __runAwait${i}()`), ...lifecycle.mount.map((_b, i) => `${lifecycle.mountAsync[i] ? 'await ' : ''}__mount${i}()`)];
+  const awaitTask = taskBody.length ? `\n        .task { ${taskBody.join('; ')} }` : '';
+  const disposeHook = lifecycle.cleanup.length
+    ? `\n        .onDisappear {\n${lifecycle.cleanup.map((_b, i) => `            __dispose${i}()`).join('\n')}\n        }`
+    : '';
+  const lifecycleDefs = lifecycle.mount.map((b, i) => `\n    private func __mount${i}()${lifecycle.mountAsync[i] ? ' async' : ''} {\n${b}\n    }`).join('')
+    + lifecycle.cleanup.map((b, i) => `\n    private func __dispose${i}() {\n${b}\n    }`).join('');
+  const awaitRunners = ctx.awaits.map((a, i) => `
+    private func __runAwait${i}() async {
+${a.fail
+  ? `        ${a.err} = ${JSON.stringify(a.fail)}\n        ${a.done} = true`
+  : `        do {
+            ${a.value} = try await { () async throws -> Any? in
+                return ${a.expr}
+            }()
+            ${a.done} = true
+        } catch {
+            ${a.err} = (error as? NSError)?.localizedDescription ?? "\\(error)"
+            ${a.done} = true
+        }`}
+    }`).join('');
+  const stateTypes = new Map(facts.state.map((s) => [s.name, swiftType(stateInit.get(s.name) ?? 'nil')]));
+  const compFormFields = collectForms(comp.nodes).flatMap((f) => f.fields);
+  const compFns = componentFunctions(comp.script, comp.view, [...props, ...ownState], warnings, nilable, stateTypes, (() => { try { return extractExports(comp.script ?? '').actions.map((a) => a.name); } catch { return []; } })(), compFormFields);
   return `import SwiftUI
 import AVKit
 
 struct ${comp.view}: View {
-${fields}
+    // The host page's route: a component-owned action posts to it.
+    var route: String = ""
+${fields}${awaitDecls ? '\n' + awaitDecls : ''}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
 ${ctx.lines.join('\n')}
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)${awaitTask}${disposeHook}
     }
-${inlineDefs}
+${awaitRunners}${inlineDefs}${lifecycleDefs}${compFns ? '\n' + compFns : ''}
 }
 `;
 }

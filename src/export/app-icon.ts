@@ -17,17 +17,17 @@ const PLACEHOLDER = Buffer.from(
   'base64',
 );
 
-/** R458: the pixel size of an icon, for a packager that refuses a small one. */
+/** The pixel size of an icon, for a packager that refuses a small one. */
 export function iconSize(bytes: Buffer): { w: number; h: number } | null {
   return pngSize(bytes);
 }
 
-/** R459: PNG-based .icns types, by the pixel side they carry. macOS accepts a
+/** PNG-based .icns types, by the pixel side they carry. macOS accepts a
  *  PNG entry as-is, so one picture can serve the whole set - but only when its
  *  side is one of these; anything else needs real downsampling (`tauri icon`). */
 const ICNS_TYPES: Record<number, string> = { 32: 'ic11', 64: 'ic12', 128: 'ic07', 256: 'ic08', 512: 'ic09', 1024: 'ic10' };
 
-/** R459: an .icns container around the PNG, or null when the side has no type. */
+/** An .icns container around the PNG, or null when the side has no type. */
 export function icnsFromPng(png: Buffer): Buffer | null {
   const size = pngSize(png);
   if (!size || size.w !== size.h) return null;
@@ -54,7 +54,7 @@ function pngSize(bytes: Buffer): { w: number; h: number } | null {
  * like nothing, which is a thing the author should be told rather than shown
  * three releases later.
  */
-/** R456: an .ico container around the same PNG - Windows shells and the Tauri /
+/** An .ico container around the same PNG - Windows shells and the Tauri /
  *  Wails bundlers want one, and Vista and later decode a PNG entry natively.
  *  A side of 256 or more is written as 0, which is how ICO spells "256". */
 export function icoFromPng(png: Buffer): Buffer {
@@ -80,7 +80,7 @@ export function appIcon(projectRoot: string, label: string, warnings: string[]):
   try {
     const bytes = fs.readFileSync(file);
     if (bytes.length > 0) {
-      // R455: a store rejects a small icon late (iOS wants exactly 1024, the
+      // A store rejects a small icon late (iOS wants exactly 1024, the
       // others 512 minimum) - say it at export time, while it is still cheap.
       const size = pngSize(bytes);
       if (size && Math.min(size.w, size.h) < 512) {

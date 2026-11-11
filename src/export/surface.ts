@@ -58,6 +58,13 @@ const KIT_FILES: Record<string, string> = {
   wails: '',
   tauri: '',
   zig: '',
+  vue: '',
+  rust: '',
+  'rust-desktop': '',
+  'rust-web': '',
+  'rust-mobile': '',
+  'rust-core': '',
+  'rust-native': '',
 };
 
 /** The verbs the dispatch at the bottom of cli/index.ts answers. */

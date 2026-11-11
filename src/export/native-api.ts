@@ -24,9 +24,76 @@
  */
 
 /** The capabilities a `.rose` script may name. */
-export type NativeCapability = 'camera' | 'geolocation' | 'clipboard-read' | 'clipboard-write' | 'share' | 'scan-code' | 'make-phone-call' | 'vibrate' | 'toast' | 'modal' | 'get-battery' | 'get-network-type' | 'get-system-info' | 'save-image';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
-export const NATIVE_CAPABILITIES: NativeCapability[] = ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'scan-code', 'make-phone-call', 'vibrate', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'];
+export type NativeCapability = 'window' | 'camera' | 'geolocation' | 'clipboard-read' | 'clipboard-write' | 'share' | 'scan-code' | 'make-phone-call' | 'vibrate' | 'toast' | 'modal' | 'get-battery' | 'get-network-type' | 'get-system-info' | 'save-image' | 'keep-awake' | 'check-permission' | 'app-info' | 'request-permission'
+  // The desktop surface: the OS window itself, its clipboard-adjacent system
+  // services and the workspace filesystem. Contracts:
+  //   window-control    -> { maximized, fullscreen, alwaysOnTop, visible } | null
+  //   window-open       -> { ok, opened, route } | null (focuses an existing window)
+  //   window-post       -> true once relayed to every OTHER window (rosezm:window-event)
+  //   window-glass-toggle -> { open } | null: the SYSTEM Liquid Glass sidebar
+  //                        toggle capsule (macOS popover NSVisualEffectView +
+  //                        NSGoLeft/RightTemplate images), NOT a CSS button
+  //   context-menu      -> the id of the clicked item, null when dismissed
+  //   notify            -> true once the system showed the notification
+  //   global-shortcut   -> true while registered (fires rosezm:shortcut events)
+  //   fs-pick-directory -> string[] (the picked folder becomes the workspace root) | null
+  //   fs-pick-file      -> string[] (each picked file is readable) | null
+  //   fs-list           -> [{ name, path, isDir, size, mtime }] | null
+  //   fs-read           -> utf8 string | null
+  //   fs-write          -> true
+  //   fs-mkdir          -> true
+  //   fs-rename         -> true
+  //   fs-remove         -> true (all fs-* scoped to the workspace root)
+  | 'window-control' | 'window-open' | 'window-post' | 'window-glass-toggle' | 'context-menu' | 'notify' | 'global-shortcut'
+  // biometric-auth: the platform authenticator (Face ID / Touch ID / Hello /
+  // fingerprint) through the WebAuthn flow the WebView ships. The contract:
+  //   biometric-auth     -> { verified, rawId } | null (denied/unsupported)
+  //   (the app supplies the challenge - the framework never fakes one)
+  | 'biometric-auth'
+  // secure-store: the encrypted token store. The WebView half encrypts
+  // (PBKDF2 -> AES-GCM) and keeps the ciphertext in IndexedDB; the
+  // native half uses the platform keystore.
+  //   secure-store      -> true | string | null | string[]
+  | 'secure-store'
+  // push: the push skeleton (the token is a CREDENTIAL the app owns and
+  // reports to its own server - the framework ships the flow around it).
+  //   push-subscribe    -> { endpoint, keys } | null
+  //   push-token        -> the endpoint string | null
+  | 'push-subscribe' | 'push-token'
+  // qr-scan: the QR-specific scan. The general
+  // scan-code reads every barcode; qr-scan names the QR format itself so
+  // a login QR (the mutual-scan scenario) never decodes a stray UPC.
+  //   qr-scan            -> the decoded string | null
+  | 'qr-scan'
+  // hot-update: the signed www overlay. The APK's assets
+  // are read-only, so the verified bundle is swapped into Cache Storage.
+  //   hot-update          -> { applied, version, documents } | { applied: false, reason }
+  | 'hot-update'
+  // screen-brightness: the page-content dimmer (a fixed overlay whose
+  // opacity is the "brightness"). The SYSTEM backlight is not reachable
+  // from a WebView - the contract names this honestly in the answer.
+  //   screen-brightness  -> { level 0..1, system: false } | null
+  | 'screen-brightness'
+  | 'fs-pick-directory' | 'fs-pick-file' | 'fs-list' | 'fs-read' | 'fs-write' | 'fs-mkdir' | 'fs-rename' | 'fs-remove'
+  // set-theme-source: the page's manual light/dark also drives nativeTheme, so
+  // the window material (vibrancy / Mica) follows the app's own theme switch.
+  | 'set-theme-source'
+  // window-traffic-lights: the REAL position of the macOS traffic lights
+  // (dip, relative to the window's content area) | null on other platforms.
+  // Pages drawing their own chrome beside the native lights need this to
+  // align - a hardcoded inset drifts with the OS, zoom and window size.
+  | 'window-traffic-lights'
+  // fs-authorize-root: a folder the USER named (a command-line argument, or a
+  // document the OS handed the app) becomes the workspace root - the same
+  // trust the picker asks for, minus the dialog.
+  | 'fs-authorize-root';
+
+export const NATIVE_CAPABILITIES: NativeCapability[] = ['window', 'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'scan-code', 'make-phone-call', 'vibrate', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image', 'keep-awake', 'check-permission', 'app-info', 'request-permission',
+  'window-control', 'window-open', 'window-post', 'window-glass-toggle', 'context-menu', 'notify', 'global-shortcut', 'biometric-auth', 'screen-brightness', 'secure-store', 'push-subscribe', 'push-token', 'qr-scan', 'hot-update',
+  'fs-pick-directory', 'fs-pick-file', 'fs-list', 'fs-read', 'fs-write', 'fs-mkdir', 'fs-rename', 'fs-remove', 'set-theme-source', 'window-traffic-lights', 'fs-authorize-root'];
 
 /** The export registry's target names. Duplicated as a plain union so this
  *  module does not import the registry, which imports every emitter. */
@@ -162,9 +229,11 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   flutter: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
-    dependencies: { camera: 'image_picker', geolocation: 'geolocator', share: 'share_plus', 'make-phone-call': 'url_launcher', 'scan-code': 'mobile_scanner', 'get-battery': 'battery_plus', 'get-network-type': 'connectivity_plus', 'get-system-info': 'device_info_plus', 'save-image': 'gal' },
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image', 'keep-awake', 'app-info', 'check-permission', 'request-permission'],
+    dependencies: { camera: 'image_picker', geolocation: 'geolocator', share: 'share_plus', 'make-phone-call': 'url_launcher', 'scan-code': 'mobile_scanner', 'get-battery': 'battery_plus', 'get-network-type': 'connectivity_plus', 'get-system-info': 'device_info_plus', 'save-image': 'gal', 'keep-awake': 'wakelock_plus' },
     platform: {
+      'check-permission': 'unknown (no permission plugin by default)',
+      'request-permission': 'unknown (no permission plugin by default)',
       camera: 'image_picker',
       geolocation: 'geolocator',
       'clipboard-read': 'Clipboard.getData',
@@ -177,14 +246,18 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'get-network-type': 'connectivity_plus (a package)',
       'get-system-info': 'device_info_plus (a package)',
       'save-image': 'gal (a package)',
+      'keep-awake': 'wakelock_plus (a package)',
       toast: 'SnackBar (no package)',
       modal: 'showDialog (no package)'
     },
   },
   arkts: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image', 'keep-awake', 'app-info', 'check-permission', 'request-permission', 'qr-scan'],
     platform: {
+      'qr-scan': 'scanBarcode.launchScanner (QR_CODE)',
+      'check-permission': 'abilityManager.queryPermissionByName',
+      'request-permission': 'abilityManager.requestPermissionsFromUser',
       camera: '@ohos.multimedia.camera / photoAccessHelper',
       'get-battery': '@ohos.batteryInfo (sync property)',
       'get-network-type': '@ohos.telephony.data (sync)',
@@ -198,7 +271,8 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'clipboard-write': '@ohos.pasteboard',
       share: '@ohos.app.ability.wantAgent',
       'make-phone-call': 'call.makeCall (TelephonyKit)',
-      vibrate: '@ohos.vibrator (VibratePreset)'
+      vibrate: '@ohos.vibrator (VibratePreset)',
+      'keep-awake': 'window.setWindowKeepScreenOn (via roseSetWindow in EntryAbility)'
     },
     manifest: {
       camera: ['ohos.permission.CAMERA'],
@@ -208,8 +282,11 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   android: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'toast', 'modal', 'scan-code', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'toast', 'modal', 'scan-code', 'get-battery', 'get-network-type', 'get-system-info', 'save-image', 'keep-awake', 'app-info', 'check-permission', 'request-permission', 'qr-scan'],
     platform: {
+      'qr-scan': 'ZXing SCAN intent (QR_CODE_MODE)',
+      'check-permission': 'Context.checkSelfPermission',
+      'request-permission': 'Activity.requestPermissions',
       camera: 'ActivityResultContracts.TakePicture',
       toast: 'Toast.makeText',
       modal: 'AlertDialog (needs an Activity Context)',
@@ -222,6 +299,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'get-network-type': 'ConnectivityManager (sync)',
       'get-system-info': 'Build (sync)',
       'save-image': 'MediaStore (API 29+, no permission)',
+      'keep-awake': 'FLAG_KEEP_SCREEN_ON on the Activity window',
       vibrate: 'Vibrator (VibratorManager)',
       'scan-code': 'ML Kit Barcode Scanning (the RoseApp scan bridge)',
     },
@@ -235,8 +313,10 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   xcode: {
     helper: 'roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'vibrate', 'scan-code', 'toast', 'modal', 'get-battery', 'get-network-type', 'get-system-info', 'save-image', 'keep-awake', 'app-info', 'check-permission', 'request-permission'],
     platform: {
+      'check-permission': 'AVCaptureDevice/PHPhotoLibrary authorizationStatus',
+      'request-permission': 'AVCaptureDevice.requestAccess / PHPhotoLibrary.requestAuthorization',
       camera: 'UIImagePickerController',
       toast: 'no first-party toast (a label overlay works)',
       modal: 'UIAlertController (the RoseKit modal bridge)',
@@ -251,6 +331,7 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       'save-image': 'UIImageWriteToSavedPhotosAlbum (photo-add usage)',
       vibrate: 'UIImpactFeedbackGenerator',
       'scan-code': 'DataScannerViewController (pushed as a full-screen cover)',
+      'keep-awake': 'UIApplication.isIdleTimerDisabled',
     },
     // Info.plist usage descriptions, named by KEY: iOS does not deny the
     // request without one, it terminates the process - the app crashes the
@@ -267,7 +348,9 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // on the other side of contextIsolation.
   electron: {
     helper: 'useNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery', 'save-image', 'keep-awake', 'check-permission', 'app-info', 'request-permission',
+      'window-control', 'window-open', 'window-post', 'window-glass-toggle', 'context-menu', 'notify', 'global-shortcut', 'biometric-auth', 'screen-brightness', 'secure-store', 'push-subscribe', 'push-token', 'qr-scan', 'hot-update', 'set-theme-source', 'window-traffic-lights',
+      'fs-pick-directory', 'fs-pick-file', 'fs-list', 'fs-read', 'fs-write', 'fs-mkdir', 'fs-rename', 'fs-remove', 'fs-authorize-root'],
     platform: {
       camera: 'navigator.mediaDevices.getUserMedia',
       geolocation: 'navigator.geolocation',
@@ -277,11 +360,31 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
       vibrate: 'navigator.vibrate',
       'make-phone-call': 'ipcRenderer.invoke + shell.openExternal(tel:)',
       toast: 'a DOM toast element (no native chrome needed)',
-      modal: 'a DOM modal dialog (no native chrome needed)',
+      modal: 'dialog.showMessageBox in the main process (the system dialog)',
       'get-network-type': 'navigator.onLine',
-      'get-system-info': 'navigator.userAgent',
+      'get-system-info': 'navigator.platform (the real desktop platform)',
       'get-battery': 'navigator.getBattery',
       'save-image': 'a Save As dialog in the main process',
+      'keep-awake': 'navigator.wakeLock.request(screen)',
+      'check-permission': 'navigator.permissions.query (the browser\'s own answer)',
+      'set-theme-source': 'nativeTheme.themeSource via ipcRenderer (vibrancy/Mica follows the app theme)',
+      'window-traffic-lights': 'BrowserWindow.getTrafficLightPosition() (the REAL macOS light position)',
+      'window-control': 'BrowserWindow minimize/maximize/close/fullscreen/always-on-top',
+      'window-open': 'a second BrowserWindow over the same static server',
+      'window-glass-toggle': 'native NSVisualEffectView glass capsule (named system template images)',
+      'window-post': 'ipcMain relay to every other BrowserWindow (CustomEvent in the page)',
+      'context-menu': 'Menu.buildFromTemplate + Menu.popup (the OS context menu)',
+      notify: 'Notification in the main process',
+      'global-shortcut': 'globalShortcut.register (the OS shortcut table)',
+      'fs-pick-directory': 'dialog.showOpenDialog(openDirectory) - sets the workspace root',
+      'fs-pick-file': 'dialog.showOpenDialog(openFile, multiSelections)',
+      'fs-list': 'fs.readdir + stat under the workspace root',
+      'fs-read': 'fs.readFileSync (utf8) under the workspace root',
+      'fs-write': 'fs.writeFileSync under the workspace root',
+      'fs-mkdir': 'fs.mkdirSync(recursive) under the workspace root',
+      'fs-rename': 'fs.renameSync under the workspace root',
+      'fs-remove': 'fs.rmSync(recursive) under the workspace root',
+      'fs-authorize-root': 'a user-named folder becomes the workspace root (no dialog)',
     },
   },
   // Wired through the kit: the emitted rosezm.py defines rose_native(...) with
@@ -289,8 +392,11 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // expands its useNative call to it.
   python: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image', 'app-info', 'check-permission', 'request-permission', 'keep-awake'],
     platform: {
+      'keep-awake': 'ctypes SetThreadExecutionState / caffeinate / xset',
+      'check-permission': 'unknown (no runtime permission model)',
+      'request-permission': 'unknown (no runtime permission model)',
       camera: 'tkinter.filedialog',
       toast: 'tkinter message label / Toplevel (a window, the Tk way)',
       modal: 'tkinter.messagebox (stdlib)',
@@ -307,8 +413,12 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   dotnet: {
     helper: 'RoseKit.RoseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image'],
+    capabilities: ['window', 'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'get-battery', 'save-image', 'app-info', 'check-permission', 'request-permission', 'keep-awake'],
     platform: {
+      'keep-awake': 'PInvoke SetThreadExecutionState / caffeinate / xset',
+      'check-permission': 'unknown (no runtime permission model)',
+      'request-permission': 'unknown (no runtime permission model)',
+      window: 'WPF Window / ToolWindow / Window.ShowDialog',
       camera: 'OpenFileDialog',
       toast: 'a WPF Popup overlay (no system toast)',
       modal: 'MessageBox.Show',
@@ -325,8 +435,11 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   },
   java: {
     helper: 'RoseKit.roseNative',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image', 'app-info', 'check-permission', 'request-permission', 'keep-awake'],
     platform: {
+      'keep-awake': 'AWT Robot periodic pointer nudge (JDK has no idle API)',
+      'check-permission': 'unknown (no runtime permission model)',
+      'request-permission': 'unknown (no runtime permission model)',
       camera: 'no capture API (java.awt.Robot / third-party webcam lib)',
       toast: 'a JWindow overlay (no system toast)',
       modal: 'JOptionPane (stdlib)',
@@ -345,8 +458,11 @@ export const NATIVE_TARGETS: Record<NativeTarget, NativeTargetSupport> = {
   // useNative call to it.
   cpp: {
     helper: 'rose_native',
-    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image'],
+    capabilities: ['camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'make-phone-call', 'toast', 'modal', 'get-system-info', 'get-network-type', 'save-image', 'app-info', 'check-permission', 'request-permission', 'keep-awake'],
     platform: {
+      'keep-awake': 'QProcess xset / caffeinate / SetThreadExecutionState',
+      'check-permission': 'unknown (no runtime permission model)',
+      'request-permission': 'unknown (no runtime permission model)',
       camera: 'QFileDialog',
       toast: 'a QLabel overlay (no system toast)',
       modal: 'QMessageBox (Qt)',
@@ -383,6 +499,57 @@ export function nativeUsage(scripts: Array<string | null | undefined>): NativeCa
   return NATIVE_CAPABILITIES.filter((c) => seen.has(c));
 }
 
+/**
+ * The capabilities a project REALLY uses - the pages' own scripts plus every
+ * local module those pages import, transitively.
+ *
+ * The old scan read the .rose files only. A page that keeps its system calls
+ * in a helper module (the normal shape: `bridge.ts` wrapping useNative) then
+ * wired NOTHING: the preload had no branch for the capability, the call
+ * answered null, and the app silently lost its filesystem, its windows and its
+ * dialogs - with no warning anywhere (dodovim-desktop 2026-11-04).
+ *
+ * The walk resolves relative specifiers the way the bundler will (extension
+ * -less, .ts/.js/.mjs variants, directory index) and ignores package
+ * specifiers: a capability inside a dependency is not the app's own call.
+ */
+export function projectNativeUsage(projectRoot: string, entryFiles: string[]): NativeCapability[] {
+  const scripts: string[] = [];
+  const seen = new Set<string>();
+  const queue: string[] = [...entryFiles];
+  const IMPORT_RE = /(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g;
+  const CANDIDATES = ['', '.ts', '.tsx', '.mts', '.js', '.mjs', '.jsx', '/index.ts', '/index.js'];
+  while (queue.length > 0) {
+    const file = queue.shift() as string;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    let src = '';
+    try {
+      src = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    scripts.push(src);
+    for (const m of src.matchAll(IMPORT_RE)) {
+      const spec = m[1];
+      if (!spec.startsWith('.')) continue;
+      const base = path.resolve(path.dirname(file), spec);
+      for (const suffix of CANDIDATES) {
+        const candidate = base + suffix;
+        try {
+          if (fs.statSync(candidate).isFile()) {
+            queue.push(candidate);
+            break;
+          }
+        } catch {
+          /* try the next spelling */
+        }
+      }
+    }
+  }
+  return nativeUsage(scripts);
+}
+
 /** The packages this target needs for the capabilities a project used. */
 export function nativeDependencies(target: NativeTarget, used: Iterable<NativeCapability>): string[] {
   const deps = NATIVE_TARGETS[target].dependencies ?? {};
@@ -400,6 +567,27 @@ export function nativeManifestEntries(target: NativeTarget, used: Iterable<Nativ
   const out: string[] = [];
   for (const cap of used) {
     for (const entry of entries[cap] ?? []) if (!out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * The Android permissions the WebView shells need for the capabilities a
+ * project actually uses. A permission nobody asked for is a permission the
+ * store review asks about - so the list is derived from the project's own
+ * useNative calls, not from a fixed set.
+ */
+export const SHELL_PERMISSIONS: Partial<Record<NativeCapability, string[]>> = {
+  camera: ['android.permission.CAMERA'],
+  geolocation: ['android.permission.ACCESS_FINE_LOCATION', 'android.permission.ACCESS_COARSE_LOCATION'],
+  'clipboard-read': ['android.permission.READ_CLIPBOARD_IN_BACKGROUND'],
+};
+
+/** The permissions the shells need for the capabilities a project used. */
+export function shellPermissions(used: Iterable<NativeCapability>): string[] {
+  const out: string[] = [];
+  for (const cap of used) {
+    for (const entry of SHELL_PERMISSIONS[cap] ?? []) if (!out.includes(entry)) out.push(entry);
   }
   return out;
 }

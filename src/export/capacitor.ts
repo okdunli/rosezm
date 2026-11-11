@@ -25,14 +25,66 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { scanComponentFiles } from '../compiler/index.js';
-import { appIdentity } from './app-identity.js';
+import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
+import { RoseError } from '../compiler/errors.js';
+import { appBuildNumber, appIdentity, appLinksFiles, shellMessage } from './app-identity.js';
+import { writeDeployScaffold } from './deploy-scaffold.js';
+import { keepOnlyExcept } from './fs-util.js';
+import { injectBackBridge } from './back-bridge.js';
+import { injectErrorBridge } from './error-bridge.js';
+import { injectSplashBridge } from './splash-bridge.js';
+import { injectTransitionBridge } from './transition-bridge.js';
+import { injectOfflineBridge } from './offline-bridge.js';
+import { injectProgressBridge } from './progress-bridge.js';
+import { injectClipboardBridge } from './clipboard-bridge.js';
+import { injectResumeBridge } from './resume-bridge.js';
+import { injectViewportBridge } from './viewport-bridge.js';
+import { injectLinkBridge } from './link-bridge.js';
+import { injectThemeBridge } from './theme-bridge.js';
+import { writeBridgeCatalog } from './bridge-catalog.js';
+import { injectHistoryBridge } from './history-bridge.js';
+import { injectWatchdogBridge } from './watchdog-bridge.js';
+import { injectTabbarBridge } from './tabbar-bridge.js';
+import { injectStorageBridge } from './storage-bridge.js';
+import { injectSelectionBridge } from './selection-bridge.js';
+import { injectDebugProxyBridge } from './debug-proxy-bridge.js';
+import { injectUploadBridge } from './upload-bridge.js';
+import { injectSecureStoreBridge } from './secure-store-bridge.js';
+import { injectPushBridge } from './push-bridge.js';
+import { injectHotUpdateBridge } from './hot-update-bridge.js';
+import { nativeUsage, shellPermissions } from './native-api.js';
+import { appIcon } from './app-icon.js';
+import { SHELL_BRIDGE_CAPABILITIES, shellDocGate, writeNativeBridge, writeSmokeSpec } from './desktop-shell.js';
 
+
+/** The versionName/versionCode the store reads: Capacitor's `cap add` template
+ *  pins "1.0"/1 regardless of the app version, so every re-export iterated the
+ *  same unchanged APK. Rewritten when the native project exists (the re-export
+ *  path); the first add reads the DEPLOY.md step. */
+export function capVersionPatch(version: string): { name: string; code: number } {
+  const [maj = '0', min = '0', pat = '0'] = version.split('.');
+  return { name: version, code: Number(maj) * 10000 + Number(min) * 100 + Number(pat) };
+}
+
+export function rewriteAndroidVersion(out: string, version: string, warnings: string[], target: string): void {
+  const gradle = path.join(out, 'android', 'app', 'build.gradle');
+  if (!fs.existsSync(gradle)) return;
+  const { name, code } = capVersionPatch(version);
+  let src = fs.readFileSync(gradle, 'utf8');
+  const before = src;
+  src = src.replace(/versionCode\s+\d+/, `versionCode ${code}`);
+  src = src.replace(/versionName\s+"[^"]*"/, `versionName "${name}"`);
+  if (src !== before) {
+    fs.writeFileSync(gradle, src, 'utf8');
+    warnings.push(`${target}: android versionName/versionCode rewritten to ${name}/${code} (from rosezm.app.json)`);
+  }
+}
 export interface EmitCapacitorOptions {
   projectRoot: string;
   outDir: string;
   apiBase?: string;
   warnings: string[];
+  force?: boolean;
 }
 
 async function copyTree(from: string, to: string): Promise<void> {
@@ -57,13 +109,20 @@ async function walkIndex(dir: string, prefix = ''): Promise<string[]> {
   return out;
 }
 
-export async function emitCapacitor(opts: EmitCapacitorOptions): Promise<{ pages: string[]; components: string[] }> {
+export async function emitCapacitor(opts: EmitCapacitorOptions): Promise<{ pages: string[]; components: string[]; wwwDocuments?: number; bridgeInjected?: number; capabilities?: { requested: string[]; gaps: string[] } }> {
   const out = path.join(opts.outDir, 'capacitor');
   const app = appIdentity(opts.projectRoot);
   let pages: string[] = [];
+  let wwwDocuments: number | undefined;
+  let bridgeInjected: number | undefined;
   let components: string[] = [];
-  await fs.promises.rm(out, { recursive: true, force: true });
-  await fs.promises.mkdir(out, { recursive: true });
+  // Only the parts this exporter OWNS are replaced. `npx cap add` writes
+  // android/ and ios/ INTO this directory - wiping the tree (as the desktop
+  // shells do) would delete the user's native project on every re-export:
+  // their keystore config, their icons, every hand edit. node_modules stays for
+  // the same reason: reinstalling @capacitor for a text change is not a cost a
+  // re-export should impose.
+  await keepOnlyExcept(out, ['android', 'ios', 'node_modules']);
 
   // A WebView has no server: unlike the Electron shell (which carries the prod
   // server), Capacitor can only show files that already exist. So this target
@@ -75,13 +134,148 @@ export async function emitCapacitor(opts: EmitCapacitorOptions): Promise<{ pages
     await copyTree(dist, site);
     pages = (await walkIndex(dist)).sort();
     components = (await scanComponentFiles(opts.projectRoot)).map((f) => path.basename(f, '.rose'));
-  } else {
+  } else if (opts.force) {
+    // --force: the caller knows www is empty (a gated app's later overlay, or
+    // a test) - say it loudly, but produce the tree.
     await fs.promises.mkdir(site, { recursive: true });
+    console.error(`[rosezm] capacitor: WARNING - www/ is EMPTY (--force was given; the APK will show a white screen until www/ carries documents)`);
     opts.warnings.push('capacitor: the project has no built dist/ - run `rosezm build` (or export with --build) so the WebView has documents to show');
     components = (await scanComponentFiles(opts.projectRoot)).map((f) => path.basename(f, '.rose'));
+  } else {
+    // BUG 4: an empty www is a white-screen APK in the user's hand - a
+    // warning scrolls away, a hard failure does not. The gated-app case is
+    // the deliberate --force above.
+    throw new RoseError('E-SHELL-EMPTY-WWW', 'capacitor: the project has no built dist/index.html - the export would be an empty, white-screen shell (run `rosezm build` first, or export with --build, or pass --force to export the empty shell anyway)', { file: 'dist/index.html' });
+  }
+  await injectBackBridge(site, { exitNote: shellMessage(app, 'exitNote') });
+  // The error collector: a WebView app has no server log, so an uncaught
+  // exception would only be visible with a debugger attached.
+  await injectErrorBridge(site);
+  // The splash handshake: the splash stays until the
+  // page's first painted frame (or a 3s safety timer) hides it.
+  await injectSplashBridge(site);
+  // The page-transition policy: the web View Transition
+  // owns the animation by default; 'none' paints instantly so a native
+  // animation is unopposed.
+  await injectTransitionBridge(site, app.pageTransitions ?? 'web');
+  // The offline-start policy: opt-in per project, a
+  // Service Worker answering navigation requests cache-first so a baked
+  // route paints its first frame with the network unreachable.
+  if (app.offline?.serviceWorker === true) await injectOfflineBridge(site);
+  // The optional HTML-loading progress bar: default
+  // off; when on, milestones drive it and the first-frame event ends it.
+  if (app.showLoadProgress === true) await injectProgressBridge(site);
+  // Clipboard hygiene: optional auto-clear after N
+  // seconds, guarded by a read-back so it never wipes the user's own copy.
+  if (app.clipboardClearSeconds && app.clipboardClearSeconds > 0) await injectClipboardBridge(site, app.clipboardClearSeconds);
+  // Resume-after-kill: the page keeps its place when
+  // the WebView is backgrounded, and a killed process is resumed from a
+  // small snapshot on the next launch.
+  await injectResumeBridge(site);
+  // Foldable / hinge layout: the WebView sometimes
+  // swallows the window resize, so the CSS breakpoints never react.
+  await injectViewportBridge(site);
+  // The external-link policy: a _blank link in a WebView does nothing at
+  // all unless the app decides what should happen (system / ignore /
+  // internal) - the project sets it in rosezm.app.json.
+  await injectLinkBridge(site, app.externalLinks ?? 'system');
+  await injectThemeBridge(site, opts.projectRoot);
+  // Official samples: a catalogue of ONLY the bridges
+  // actually present in this export, with copy-paste snippets.
+  // Long-press route history: optional; the shell
+  // raises rosezm:back-longpress and the page shows its own routes.
+  if (app.longPressHistory === true) await injectHistoryBridge(site);
+  // First-frame watchdog: a crash that never
+  // painted is recovered with one bounded reload of the same route.
+  await injectWatchdogBridge(site);
+  // Double-tap a tab to its home: a declarative
+  // data-rosezm-tab / data-home convention, no guessing routes.
+  await injectTabbarBridge(site);
+  // Storage persistence: ask the host to exempt this
+  // origin from eviction and report the honest decision.
+  await injectStorageBridge(site);
+  // Touch long-press drag selection: a cancelable
+  // convention built on real caret points, never a guessed range.
+  await injectSelectionBridge(site);
+  // Debug-build packet capture: declared in app.json,
+  // active ONLY when the host marks the running build debuggable.
+  if (app.debugProxy) await injectDebugProxyBridge(site, { host: app.debugProxy.host, port: app.debugProxy.port, header: 'X-Rosezm-Target' });
+  // The file picker contract: ships only when a baked
+  // page carries input[type=file]; the Android WebView gap is answered
+  // with the host wiring documented beside the bridge.
+  await injectUploadBridge(site, app.name);
+  await writeBridgeCatalog(site);
+
+  // useNative: the WebView answers the capability contract through its own
+  // browser APIs (the same branches the desktop shells ship). The dynamic half
+  // is already baked into the build, so no fetch rewrite rides along.
+  const shellNative = nativeUsage(await Promise.all([...(await scanRoseFiles(opts.projectRoot)), ...(await scanComponentFiles(opts.projectRoot))].map((f) => fs.promises.readFile(f, 'utf8'))));
+  // The encrypted token store: the WebView half of
+  // secure-store - PBKDF2 -> AES-GCM over IndexedDB. It ships only when
+  // a page asks for the capability.
+  if (shellNative.includes('secure-store')) await injectSecureStoreBridge(site);
+  // The push skeleton: the Web Push flow plus the
+  // service worker the push events land in. The token itself is a
+  // credential the app reports to its own server.
+  if (shellNative.includes('push-subscribe') || shellNative.includes('push-token')) await injectPushBridge(site);
+  // The signed www overlay: verify the bundle, then
+  // atomically swap the cached documents. Assets stay read-only.
+  if (shellNative.includes('hot-update')) await injectHotUpdateBridge(site, app.name);
+  await writeNativeBridge(site, shellNative, app.allowedOrigins ?? [], { id: app.id, name: app.name, version: app.version, build: appBuildNumber(app.version) });
+  for (const gap of shellNative.filter((c) => !SHELL_BRIDGE_CAPABILITIES.has(c))) {
+    opts.warnings.push(`capacitor: useNative('${gap}') has no shell bridge branch - the WebView answers the contract's null at runtime`);
+  }
+  // The export gate: every www document carries the bridge tag; a straggler
+  // is named, and the manifest reports the injection (BUG 79/80).
+  const docGate = shellDocGate(site);
+  for (const name of docGate.untagged) opts.warnings.push(`capacitor: ${name} carries no rosezm-native.js tag - the shell bridge would not load there`);
+  wwwDocuments = docGate.documents;
+  bridgeInjected = docGate.injected;
+  // The App Links / Universal Links association files: the site hosts them
+  // at /.well-known/ - the browser verifies the app before opening https
+  // links in it. Exported here so the web team uploads exactly these.
+  const links = appLinksFiles(app);
+  if (links.assetlinks) {
+    fs.mkdirSync(path.join(site, '.well-known'), { recursive: true });
+    fs.writeFileSync(path.join(site, '.well-known', 'assetlinks.json'), links.assetlinks, 'utf8');
+  }
+  if (links.aasa) {
+    fs.mkdirSync(path.join(site, '.well-known'), { recursive: true });
+    fs.writeFileSync(path.join(site, '.well-known', 'apple-app-site-association'), links.aasa, 'utf8');
   }
 
-  const config = {
+
+  // An immersive declaration draws the WebView under the status bar: without
+  // viewport-fit=cover the safe-area insets resolve to zero and the env()
+  // padding the app wrote does nothing.
+  if (app.statusBar?.immersive && fs.existsSync(site)) {
+    // Every baked document gains viewport-fit=cover: the WebView draws under
+    // the status bar, so the safe-area insets the app padds with are real.
+    const htmlWalk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, entry.name);
+        if (entry.isDirectory()) { htmlWalk(p); continue; }
+        if (!entry.name.endsWith('.html')) continue;
+        const html = fs.readFileSync(p, 'utf8');
+        const fixed = html.replace('initial-scale=1.0', 'initial-scale=1.0, viewport-fit=cover');
+        if (fixed !== html) fs.writeFileSync(p, fixed);
+      }
+    };
+    htmlWalk(site);
+  }
+
+  // The declared splash images land in www: the shell paints the declared
+  // background colour natively, and the document can reference the images.
+  if (app.splash?.image) {
+    const src = path.join(opts.projectRoot, app.splash.image);
+    if (fs.existsSync(src)) await fs.promises.copyFile(src, path.join(site, 'splash' + path.extname(src)));
+  }
+  if (app.splash?.imageDark) {
+    const src = path.join(opts.projectRoot, app.splash.imageDark);
+    if (fs.existsSync(src)) await fs.promises.copyFile(src, path.join(site, 'splash-dark' + path.extname(src)));
+  }
+
+  const config: Record<string, unknown> = {
     appId: app.id,
     appName: app.name,
     webDir: 'www',
@@ -94,7 +288,93 @@ export async function emitCapacitor(opts: EmitCapacitorOptions): Promise<{ pages
       androidScheme: 'https',
     },
   };
+  // Remote debugging: 'auto' (the default) omits the key so
+  // Capacitor's own behavior stands (debug builds inspectable, release not);
+  // 'on'/'off' pin it for every build type.
+  if (app.webviewDebug === 'on' || app.webviewDebug === 'off') {
+    config['android'] = { ...(config['android'] as Record<string, unknown> | undefined), webContentsDebuggingEnabled: app.webviewDebug === 'on' };
+  }
+  if (app.pageTransitions === 'none') {
+    // The host shell reads this to know the web layer owns nothing: a
+    // native Activity animation here is unopposed.
+    config['android'] = { ...(config['android'] as Record<string, unknown> | undefined), transitionPolicy: 'native' };
+  }
+  // The cold-start look: the official SplashScreen plugin paints the declared
+  // colour before the first document lands (the image, if declared, is copied
+  // into www and shown by the splash screen of the native project).
+  const plugins: Record<string, unknown> = {};
+  if (app.splash?.backgroundColor) {
+    plugins['SplashScreen'] = {
+      backgroundColor: app.splash.backgroundColor,
+      // The dark variants: the native splash paints them when the system is
+      // dark - a light-only declaration is unreadable on a dark phone.
+      ...(app.splash.backgroundColorDark ? { backgroundColorDark: app.splash.backgroundColorDark } : {}),
+      ...(app.splash.image ? { splashScreenImage: 'splash' + path.extname(app.splash.image) } : {}),
+      ...(app.splash.imageDark ? { splashScreenImageDark: 'splash-dark' + path.extname(app.splash.imageDark) } : {}),
+      launchShowDuration: 0,
+      // The splash-to-first-frame handshake: the JS bridge
+      // (www/rosezm-splash.js) hides the splash when the page has actually
+      // painted, instead of a timer that leaves a white flash behind.
+      launchAutoHide: false,
+    };
+  }
+  // The status bar: the official plugin reads its initial style from the
+  // config, and an immersive declaration lets the WebView draw under it.
+  if (app.statusBar) {
+    const bar: Record<string, unknown> = {};
+    if (app.statusBar.style) bar['style'] = app.statusBar.style === 'dark' ? 'Dark' : 'Light';
+    if (app.statusBar.styleDark) bar['styleDark'] = app.statusBar.styleDark === 'dark' ? 'Dark' : 'Light';
+    if (app.statusBar.immersive !== undefined) bar['overlaysWebView'] = app.statusBar.immersive;
+    if (Object.keys(bar).length) plugins['StatusBar'] = bar;
+  }
+  // The keyboard resize mode: the official Keyboard plugin reads it from the
+  // config.
+  if (app.keyboard?.resize) {
+    plugins['Keyboard'] = { resize: app.keyboard.resize };
+  }
+  if (Object.keys(plugins).length) config['plugins'] = plugins;
+  // The permissions the project's own useNative calls need. Capacitor adds
+  // them through its official plugins - each plugin carries its own Android
+  // permission, so the dependency and the plugin entry are what the CLI
+  // turns into a manifest line. A capability nobody used adds no plugin.
+  const shellPerms = shellPermissions(shellNative);
+  const pluginDeps: Record<string, string> = {};
+  // The error collector writes its log into the app's data dir through the
+  // official Filesystem plugin - a WebView app has no server log, so this is
+  // where a support bundle looks first.
+  pluginDeps['@capacitor/filesystem'] = '^6.0.1';
+  plugins['Filesystem'] = { ...(plugins['Filesystem'] ?? {}) };
+  if (shellPerms.length) {
+    if (shellNative.includes('camera')) { pluginDeps['@capacitor/camera'] = '^6.1.0'; plugins['Camera'] = { ...(plugins['Camera'] ?? {}) }; }
+    if (shellNative.includes('geolocation')) { pluginDeps['@capacitor/geolocation'] = '^6.1.0'; plugins['Geolocation'] = { ...(plugins['Geolocation'] ?? {}) }; }
+  }
+  if (Object.keys(plugins).length) config['plugins'] = plugins;
+  // The deep-link scheme: the CLI turns this into the native intent-filter
+  // (a myapp://blog/7 link opens the app on /blog/7).
+  if (app.scheme) config['urlScheme'] = app.scheme;
+  // The screen orientation the shell locks to (auto = the device decides).
+  if (app.orientation) config['orientation'] = app.orientation;
+  // The localized display name: the Android launcher reads it from the
+  // string resources, so each locale gets its own values folder (the
+  // capacitor CLI copies resources/ into the native project on sync).
+  if (app.nameLocalizations) {
+    const locs = app.nameLocalizations;
+    const writeStrings = (dir: string, value: string) => {
+      fs.mkdirSync(path.join(out, dir), { recursive: true });
+      fs.writeFileSync(path.join(out, dir, 'strings.xml'), '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="app_name">' + value.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</string>\n    <string name="title_activity_main">' + value.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</string>\n</resources>\n', 'utf8');
+    };
+    writeStrings('resources/values', locs[Object.keys(locs)[0]] ?? app.name);
+    for (const [locale, value] of Object.entries(locs)) writeStrings('resources/values-' + locale.replace(/-/g, '_'), value);
+  }
   await fs.promises.writeFile(path.join(out, 'capacitor.config.json'), JSON.stringify(config, null, 2) + '\n', 'utf8');
+
+  // The launcher icon: the project's own picture (public/icon.png) in the
+  // @capacitor/assets convention, so `npx @capacitor/assets generate` lays
+  // out the whole density set instead of the template's placeholder rose.
+  const capIcon = appIcon(opts.projectRoot, 'capacitor', opts.warnings);
+  fs.mkdirSync(path.join(out, 'resources'), { recursive: true });
+  fs.writeFileSync(path.join(out, 'resources', 'icon.png'), capIcon);
+  fs.writeFileSync(path.join(out, 'resources', 'icon-only.png'), capIcon);
 
   const pkg = {
     name: app.slug,
@@ -108,7 +388,7 @@ export async function emitCapacitor(opts: EmitCapacitorOptions): Promise<{ pages
       'open:android': 'cap open android',
       'open:ios': 'cap open ios',
     },
-    dependencies: { '@capacitor/core': '^6.1.0' },
+    dependencies: { '@capacitor/core': '^6.1.0', '@capacitor/app': '^6.0.3', '@capacitor/keyboard': '^6.0.0', ...pluginDeps },
     devDependencies: {
       '@capacitor/cli': '^6.1.0',
       '@capacitor/android': '^6.1.0',
@@ -134,6 +414,8 @@ A store-ready wrapper around the built rosezm site. ${apiLine}
 npm install
 npx cap add android   # needs the Android SDK; generates android/
 npx cap add ios       # needs Xcode; generates ios/
+# then set the store version once (Capacitor's template pins "1.0"):
+#   android/app/build.gradle -> versionCode / versionName (see rosezm.app.json)
 \`\`\`
 
 ## The edit loop
@@ -162,6 +444,13 @@ cd ios && xcodebuild -workspace App.xcworkspace -scheme App -configuration Relea
 Signing is the platform's own: a keystore for Android, a provisioning profile
 for iOS. Nothing in this export signs for you.
 
+## The Android back button
+
+\`www/rosezm-back.js\` (tagged into every document) turns the hardware back
+button into app behavior: the app can intercept the \`rosezm:back\` event
+(close a dialog, a drawer) and \`preventDefault()\`; otherwise it walks the
+SPA history; at the start route it exits through the Capacitor App plugin.
+
 ## Why the site is a directory of files
 
 rosezm serves one self-contained document per route, so \`www/index.html\` is a
@@ -170,5 +459,8 @@ links to. There is no client-side router to warm up and no hydration pass: the
 WebView paints the document the build wrote.
 `, 'utf8');
 
-  return { pages, components };
+  rewriteAndroidVersion(out, app.version, opts.warnings, 'capacitor');
+  await writeDeployScaffold('capacitor', out, opts.warnings);
+  await writeSmokeSpec(out, app.id);
+  return { pages, components, wwwDocuments, bridgeInjected, capabilities: { requested: shellNative, gaps: shellNative.filter((c) => !SHELL_BRIDGE_CAPABILITIES.has(c)) } };
 }

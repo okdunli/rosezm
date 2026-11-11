@@ -20,7 +20,8 @@ import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { parseRose, collectSlots, splitSlotChildren, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode, type AttrValue , pageTitle} from './ir.js';
+import { parseRose, collectSlots, splitSlotChildren, substituteSlotProps, substituteParams, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode, type Attr as IrAttr, type AttrValue , pageTitle} from './ir.js';
+import { keepOnlyExcept } from './fs-util.js';
 import { normalizeHandler as normalizeInlineHandler, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
 import { inlineFontFaces, kvDeclarations, kvCallable, bakeContent, rewriteThrowNew, renderWarningSection, callifyBareReads, rewriteNullish } from './state-ops.js';
@@ -42,7 +43,7 @@ interface Dialect {
 }
 
 /** The full directive name: `wx` + if -> `wx:if`, `s-` + if -> `s-if`.
- *  R257: the colon moved into this helper because SWAN spells its
+ * the colon moved into this helper because SWAN spells its
  *  directives with a hyphen, so every call site can keep saying `:if`. */
 function directiveOf(prefix: string, name: string): string {
   return prefix.endsWith('-') ? `${prefix}${name}` : `${prefix}:${name}`;
@@ -52,7 +53,7 @@ export const DIALECTS: Record<MiniProgramTarget, Dialect> = {
   weapp: { dir: 'weapp', tpl: 'wxml', style: 'wxss', prefix: 'wx', js: 'js' },
   qq: { dir: 'qq', tpl: 'qml', style: 'qss', prefix: 'qq', js: 'js' },
   alipay: { dir: 'alipay', tpl: 'axml', style: 'acss', prefix: 'a', js: 'js' },
-  // R257: the SWAN directive is spelled with a hyphen (`s-if`/`s-for`), like
+  // The SWAN directive is spelled with a hyphen (`s-if`/`s-for`), like
   // wx:/tt: - the colon form is not the SWAN grammar, so the control blocks
   // were dead attributes and the page rendered flat.
   baidu: { dir: 'baidu', tpl: 'swan', style: 'css', prefix: 's-', js: 'js' },
@@ -73,10 +74,19 @@ const TAG_MAP: Record<string, string> = {
   picker: 'picker', 'picker-view': 'picker-view', 'picker-view-column': 'picker-view-column',
   video: 'video', audio: 'audio', canvas: 'canvas', slot: 'slot', table: 'view',
   thead: 'view', tbody: 'view', tr: 'view', td: 'view', th: 'view', caption: 'text', iframe: 'web-view',
+  // WXML's own components, passed through verbatim: <progress value max> and
+  // friends are native views, not the page's own .rose components - treating
+  // them as components warned "no exported component provides it" and dropped
+  // the element.
+  progress: 'progress', switch: 'switch', slider: 'slider', swiper: 'swiper',
+  'swiper-item': 'swiper-item', 'scroll-view': 'scroll-view', 'rich-text': 'rich-text',
+  'cover-view': 'cover-view', 'cover-image': 'cover-image', 'movable-area': 'movable-area',
+  'movable-view': 'movable-view', navigator: 'navigator', 'web-view': 'web-view',
+  camera: 'camera', map: 'map', 'page': 'view',
 };
 
 /**
- * R258: the tags whose HTML meaning the mini program erases and must give
+ * The tags whose HTML meaning the mini program erases and must give
  * back. TAG_MAP rewrites h1-h6/p/strong/em into <text> and ul/li into <view>,
  * so the product has no heading and no paragraph to style. These carry the
  * original name as a class (rose-h1), which is what the default typography
@@ -92,9 +102,9 @@ const TYPOGRAPHIC_TAGS = new Set([
 /** HTML event -> mini-program event suffix. */
 const EVENT_MAP: Record<string, string> = {
   click: 'tap', tap: 'tap', submit: 'submit', input: 'input', change: 'change',
-  // 小程序开放能力事件（open-type 按钮）原样透传：chooseavatar 是头像填写、
-  // contact 客服、getuserinfo 授权……它们不是 DOM 事件，但按同名 bind 事件
-  // 输出才不会把官方能力静默丢掉。
+  // Open-capability events (open-type buttons) pass through under their own
+  // names - chooseavatar, contact, getuserinfo. They are not DOM events, but
+  // dropping them would silently lose an official capability.
   chooseavatar: 'chooseavatar', getuserinfo: 'getuserinfo', contact: 'contact', error: 'error', load: 'load',
   focus: 'focus', blur: 'blur', confirm: 'confirm', longpress: 'longpress', touchstart: 'touchstart',
   touchmove: 'touchmove', touchend: 'touchend',
@@ -287,13 +297,16 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     });
   }
 
-  await fs.promises.rm(out, { recursive: true, force: true });
+  // The IDE's own output: miniprogram_npm (built npm) and
+  // project.private.config.json, which is one developer's local settings and
+  // is meant to stay out of the shared repo - never regenerated here.
+  await keepOnlyExcept(out, ['miniprogram_npm', 'project.private.config.json']);
   await fs.promises.mkdir(path.join(out, 'utils'), { recursive: true });
   await fs.promises.writeFile(path.join(out, 'utils', 'rosezm.js'), RUNTIME_JS, 'utf8');
   // A WeChat-Cloud project ships its cloudfunctions/ + services/ + utils/;
   // the exported package carries them so the mini program is the whole app.
   const cloudFound = await copyCloudAssets(root, out, warnings);
-  // R256: the exported package must only ever require() modules it ships - the
+  // The exported package must only ever require() modules it ships - the
   // cloud bootstrap needs the real cloud resources, not just any src/ tree, so
   // the copy step now decides whether the emitted app.js may take the cloud
   // shape. An explicit --cloud without them degrades loudly instead of
@@ -304,7 +317,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     warnings.push(`${dialect.dir}: --cloud requested but the project ships no services/user.js - emitted the plain HTTP bootstrap`);
     opts.cloud = false;
   }
-  // R256: the cloud notice fires only for real cloud projects now - it used to
+  // The cloud notice fires only for real cloud projects now - it used to
   // fire for every export because src/ flipped the cloud branch on - and it
   // names the dialect instead of a hardcoded "weapp".
   if (cloudFound.cloud && opts.cloud) {
@@ -344,10 +357,15 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
 
   const usingComponents = new Map<string, string>();
   const compMap = new Map<string, ComponentFile>();
+  // The whole map FIRST: a component that renders another one resolves the
+  // inner tag against it, and a map built while the components are written
+  // only knows the ones written before it.
   for (const comp of comps) {
     const tag = camelToKebab(comp.name);
     usingComponents.set(tag, `/components/${comp.name}/${comp.name}`);
     compMap.set(comp.name, comp);
+  }
+  for (const comp of comps) {
     await writeComponent(out, root, dialect, opts.target, comp, compMap, warnings, globalCss);
   }
 
@@ -355,8 +373,8 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
   // taps `location.href = '/postDetail/' + id`; WeChat can only navigateTo a
   // real package path (pages/postDetail-param-id/postDetail-param-id), and the
   // dynamic dirs are named after the segment, so the kit resolves through this
-  // map instead of failing three navigations in a row and doing nothing (the
-  // reporter's "点击卡片进不去详情页").
+  // map instead of failing three navigations in a row and doing nothing, which
+  // is how "tapping a card never opens the detail page" was reported.
   const routeMap: Record<string, string> = {};
   for (const p of pages) routeMap[p.route] = `pages/${p.name}/${p.name}`;
   // rosezm.mp.json, read once: the tab bar (native tabBar in app.json) and the
@@ -509,7 +527,7 @@ export async function emitMiniProgram(opts: EmitMiniProgramOptions): Promise<{ p
     await fs.promises.mkdir(path.join(out, 'data'), { recursive: true });
     await fs.promises.writeFile(path.join(out, 'data', 'seed.json'), JSON.stringify(opts.seed), 'utf8');
   }
-  // R257: the tag table turns h1-h6/p/strong/em into <text> and ul/li into
+  // The tag table turns h1-h6/p/strong/em into <text> and ul/li into
   // <view>, so the browser's default element typography (heading sizes and
   // weights, paragraph spacing, bullet lists) has no owner in the package -
   // titles rendered like body text. The shell stylesheet carries only
@@ -761,7 +779,7 @@ async function copyCloudAssets(root: string, out: string, warnings: string[]): P
   const cfDir = path.join(root, 'cloudfunctions');
   const svcDir = path.join(root, 'services');
   const utilDir = path.join(root, 'utils');
-  // R256: the cloud flag must mean "the module a cloud app.js requires really
+  // The cloud flag must mean "the module a cloud app.js requires really
   // shipped" - the emitted bootstrap hard-requires ./services/user, so that
   // module's presence is the gate. A plain project's src/ tree used to flip it
   // on, and app.js then required './services/user' from a package that had no
@@ -828,7 +846,7 @@ async function copyCloudAssets(root: string, out: string, warnings: string[]): P
 
 function renderReadme(target: string, pageCount: number, compCount: number, apiBase: string, warnings: string[]): string {
   const IDE = target === 'weapp' ? 'WeChat DevTools' : target === 'qq' ? 'QQ DevTools' : target === 'alipay' ? 'Alipay DevTools' : target === 'baidu' ? 'Baidu DevTools' : 'ByteDance DevTools';
-  // R256: the template extension is per dialect (.wxml/.qml/.axml/.swan/.ttml) -
+  // The template extension is per dialect (.wxml/.qml/.axml/.swan/.ttml) -
   // the old hardcoded .wxml told alipay/baidu/toutiao developers to look for a
   // file the export never writes.
   const tplExt = DIALECTS[target as MiniProgramTarget].tpl;
@@ -919,12 +937,15 @@ class EmitContext {
   inlineLoops = new Map<string, string[]>();
   /** The each-variable names in scope, innermost last. */
   loopStack: string[] = [];
+  /** The {#each} item variable -> the items expression as authored, so a
+   *  row-field two-way binding can spell the write path `items[index].field`. */
+  loopItems: Map<string, string> = new Map();
   /** A named script function bound to an event: original name -> adapter. */
   namedHandlers = new Map<string, string>();
-  bindHandlers: Array<{ name: string; kind: 'value' | 'checked' | 'radio' | 'checkboxGroup' | 'checkboxBool' | 'picker' | 'formGet' | 'toggleOpen'; state: string; values?: string[]; trigger?: string; action?: string }> = [];
-  /** R452: the `<details>` panels this template folds: data flag -> initial open. */
+  bindHandlers: Array<{ name: string; kind: 'value' | 'checked' | 'radio' | 'checkboxGroup' | 'checkboxBool' | 'picker' | 'formGet' | 'toggleOpen'; state: string; values?: string[]; trigger?: string; action?: string; chain?: string; row?: boolean }> = [];
+  /** The `<details>` panels this template folds: data flag -> initial open. */
   openFlags: Array<{ name: string; open: boolean }> = [];
-  /** R454: Enter-to-submit adapters: generated name -> the script function it wraps. */
+  /** Enter-to-submit adapters: generated name -> the script function it wraps. */
   keyHandlers = new Map<string, string>();
   /** Options discovered for a checkbox group: state -> values. */
   groupOptions = new Map<string, string[]>();
@@ -942,10 +963,10 @@ class EmitContext {
   componentProps = new Set<string>();
   /** Two-way prop change events: handler name -> { state, event }. */
   propChanges: Array<{ name: string; state: string; event: string }> = [];
-  /** R258: the page's script really calls the native helper (useNative ->
+  /** The page's script really calls the native helper (useNative ->
    *  __rosezmNative). Importing it into a page that never asks for it left a
    *  dangling name in 26 of Breeze's 26 pages - dead weight in every bundle. */
-  /** R258: the kit helpers this page's script really references. Importing
+  /** The kit helpers this page's script really references. Importing
    *  one the page never calls leaves a dangling name in every bundle (26 of
    *  Breeze's 26 pages carried __rosezmNative); NOT importing one the page
    *  does call is worse - the first tap hits an undeclared name. The list is
@@ -965,8 +986,8 @@ class EmitContext {
   boundaryStack: string[] = [];
   /** The `{#defer}` blocks: a flag that starts false and a hold in ms. */
   deferred: Array<{ name: string; hold: number }> = [];
-  /** R244: the selectors that carry a `:hover` half, so the element can ask for
-   *  the synthetic hover class (WXSS has no `:hover`). R257: seeded with
+  /** The selectors that carry a `:hover` half, so the element can ask for
+   * the synthetic hover class (WXSS has no `:hover`). seeded with
    *  `a` - the shell stylesheet's own `a:hover` rule ships in every
    *  package, and it is exactly the press state a classless <a> asks for. */
   hoverSelectors = new Set<string>(['a']);
@@ -1013,9 +1034,9 @@ async function writePage(
   ctx.pageAction = facts.actions[0] ?? null;
   ctx.contentBaked = contentBaked;
   ctx.scriptConsts = scriptConstsFor(page.script, ctx.stateNames);
-  // R244: before emitting, collect which selectors have a `:hover` half, so the
+  // Before emitting, collect which selectors have a `:hover` half, so the
   // element can carry the hover-class WXSS actually applies.
-  // R271: `:active` halves join the same set (the same press channel).
+  // `:active` halves join the same set (the same press channel).
   for (const m of (style ?? '').matchAll(/([.\w-]+):hover\b/g)) ctx.hoverSelectors.add(m[1]);
   for (const m of (style ?? '').matchAll(/([.\w-]+):active\b/g)) ctx.hoverSelectors.add(m[1]);
   const template = emitNodes(nodes, ctx, dialect, usingComponents, compFiles);
@@ -1033,8 +1054,7 @@ async function writePage(
   // Pull-to-refresh is opt-in: the page exports an `onPullDownRefresh` handler
   // (a browser has no such gesture, so the web build never needed the flag).
   // Without `enablePullDownRefresh` in the page json the platform never fires
-  // the gesture at all - the drag does nothing, which is exactly "首页和圈子
-  // 和消息页下拉无法刷新".
+  // the gesture at all: the drag does nothing, with no error anywhere.
   const pageJson: Record<string, unknown> = {
     navigationBarTitleText: page.title || undefined,
     usingComponents: Object.keys(usedComps).length ? usedComps : undefined,
@@ -1073,7 +1093,7 @@ export function filterShellStyles(css: string): string {
     // browser page and WRONG for a mini program: app.wxss is global, so EVERY
     // <button> in the app - the comment send key, the like/collect keys, the
     // bottom action bar - got a stray horizontal margin and padding, and its
-    // row wrapped onto a second line ("按钮跑到第二行、都错位了"). The original
+    // row wrapped onto a second line. The original
     // mini program has no such base rule: its controls are flex children
     // styled per page. The platform also already lays its own default button
     // box, so a second opinion only fights it - form controls are therefore
@@ -1084,11 +1104,11 @@ export function filterShellStyles(css: string): string {
       .replace(/(^|[\s,>+~])a(?=[\s,{:]|$)/g, '$1navigator')
       .replace(/(^|[\s,>+~])nav(?=[\s,{:]|$)/g, '$1view');
     const px = body.replace(/(-?[\d.]+)rem\b/g, (_m, n: string) => `${Math.round(Number(n) * 16 * 10) / 10}px`);
-    // R244: WXSS (and every sibling dialect) has no `:hover` - the press state is a
+    // WXSS (and every sibling dialect) has no `:hover` - the press state is a
     // `hover-class` attribute on the element. Rewrite the selector onto the
     // synthetic class the emitter puts in that attribute, or the rule is dead.
-    // R271: `:active` rides the same channel (its own synthetic class).
-    // R257: a tag-keyed half (`navigator:hover`) rewrites onto the same
+    // `:active` rides the same channel (its own synthetic class).
+    // A tag-keyed half (`navigator:hover`) rewrites onto the same
     // synthetic channel keyed by the tag - the classless <a> the emitter
     // stamps carries exactly that class in its hover-class.
     const withHover = mapped
@@ -1100,7 +1120,7 @@ export function filterShellStyles(css: string): string {
 }
 
 /**
- * R257: the element typography the browser stylesheet provides for free.
+ * The element typography the browser stylesheet provides for free.
  * TAG_MAP rewrites h1-h6/p/strong/em into <text> and ul/li/dt/dd into
  * <view>, so without these app-level rules a heading, a paragraph and a
  * list item all rendered identically. Sizes/weights/spacing mirror the
@@ -1109,8 +1129,8 @@ export function filterShellStyles(css: string): string {
  * list-style to inherit) and the marker indents with the item.
  */
 const ELEMENT_TYPOGRAPHY_CSS = `
-/* R257/R258: default element typography - the user-agent rules TAG_MAP erases.
-   R258: these rules target the SEMANTIC CLASS the emitter puts on every mapped
+/* /default element typography - the user-agent rules TAG_MAP erases.
+   These rules target the SEMANTIC CLASS the emitter puts on every mapped
    element (rose-h1, rose-p, ...). A bare h1 selector matched NOTHING in the
    product: TAG_MAP rewrites h1 into <text>, so the stylesheet had no <h1> to
    style (Breeze: 0 across 26 pages). The class rides the element, so the rule
@@ -1137,7 +1157,7 @@ const ELEMENT_TYPOGRAPHY_CSS = `
 `;
 
 /**
- * R257: the event-attribute spelling per template dialect. WeChat/QQ/Baidu/
+ * The event-attribute spelling per template dialect. WeChat/QQ/Baidu/
  * Toutiao bind with `bindtap`-style attributes; Alipay's AXML listens on
  * `onTap`-style ones - a `bindtap` there is an unknown attribute, so every
  * handler was dead on that dialect.
@@ -1146,12 +1166,12 @@ function eventAttrOf(prefix: string, event: string): string {
   return prefix === 'a' ? `on${event[0].toUpperCase()}${event.slice(1)}` : `bind${event}`;
 }
 
-/** R244: the `hover-class` value for a selector - one synthetic class per rule. */
+/** The `hover-class` value for a selector - one synthetic class per rule. */
 export function hoverClassOf(selector: string): string {
   return `__h${selector.replace(/[^\w]/g, '_')}`;
 }
 
-/** R271: the `:active` synthetic class - same hover-class channel, its own key
+/** The `:active` synthetic class - same hover-class channel, its own key
  *  so hover and active halves never collide on one element. */
 export function activeClassOf(selector: string): string {
   return `__a${selector.replace(/[^\w]/g, '_')}`;
@@ -1163,32 +1183,46 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
   const ctx = new EmitContext(warnings, comp.file);
   ctx.target = target;
   ctx.componentProps = new Set([...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
-  // R259: the component's script facts ($state fields, functions) feed the
+  // The component's script facts ($state fields, functions) feed the
   // data/methods the emitted Component() declares - the page path scans its
   // script the same way before emitting.
   const facts = scanScript(comp.script, warnings, comp.file);
   ctx.stateNames = new Set(facts.state.map((s) => s.name));
-  // R244: same hover-class collection as the page path.
+  // The component's own exported action: its submit button posts through it.
+  ctx.pageAction = facts.actions[0] ?? null;
+  // Same hover-class collection as the page path.
   for (const m of (comp.style ?? '').matchAll(/([.\w-]+):hover\b/g)) ctx.hoverSelectors.add(m[1]);
-  // R271: `:active` halves join the same set.
+  // `:active` halves join the same set.
   for (const m of (comp.style ?? '').matchAll(/([.\w-]+):active\b/g)) ctx.hoverSelectors.add(m[1]);
   const usingComponents = new Map<string, string>();
+  // The nested components this one renders: the map the platform reads
+  // from the component json to find them.
+  for (const [name, cf] of compFiles ?? new Map()) usingComponents.set(camelToKebab(name), `/components/${name}/${name}`);
   const template = emitNodes(comp.nodes, ctx, dialect, usingComponents, compFiles);
   const props = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?(?:=\s*([^;\n]+))?/g)].map((m) => ({ name: m[1], init: (m[2] ?? '').trim() }));
   const scopedTemplate = `<view class="${scopeClass(comp.scope)}">\n${template}\n</view>`;
   await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.tpl), scopedTemplate + '\n', 'utf8');
-  await fs.promises.writeFile(path.join(dir, comp.name + '.json'), JSON.stringify({ component: true }, null, 2) + '\n', 'utf8');
+  // The component's own usingComponents map: the nested tags the template
+  // emitted (inner elements) resolve through it - without it the platform
+  // renders an unknown element.
+  const usedComps: Record<string, string> = {};
+  for (const tag of ctx.usedComponents) {
+    const target = usingComponents.get(tag);
+    if (target) usedComps[tag] = target;
+  }
+  const compJson = { component: true, ...(Object.keys(usedComps).length ? { usingComponents: usedComps } : {}) };
+  await fs.promises.writeFile(path.join(dir, comp.name + '.json'), JSON.stringify(compJson, null, 2) + '\n', 'utf8');
   // A custom component is style-isolated: app.<style> never reaches inside it,
   // so the theme has to be written here too - unscoped, ahead of the component's
   // own rules, the same way the app sheet carries it.
   const compCss = (globalCss ? globalCss + '\n' : '') + resolveCssVars(inlineFonts(scopeCss(comp.style ?? '', comp.scope), root, warnings, comp.file), warnings, comp.file);
   await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.style), compCss, 'utf8');
   const propsObj = props.map((p) => `${p.name}: ${propertyDeclaration(p.init)}`).join(',\n    ');
-  // R259: the component file is the component's own <script>, not a shell -
+  // The component file is the component's own <script>, not a shell -
   // properties carry the props, data the $state fields the template renders,
   // methods the named handlers and inline arrows the template binds - and the
   // kit helpers the body really calls are imported on demand (the page path
-  // grew this in R258; the component path shipped nothing at all).
+  // grew this in ; the component path shipped nothing at all).
   const compStateNames = new Set(facts.state.map((s) => s.name));
   const compDataEntries: string[] = [];
   for (const s of facts.state) {
@@ -1210,7 +1244,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
       ctx.warnings.push(`${ctx.file}: an inline handler (${code.slice(0, 40)}...) is not translated (${ir.reason ?? 'empty'})`);
       return `  function ${name}(e) { /* rosezm: handler not translated */ }`;
     }
-    // R259: an each-variable read inside a component's inline handler rides
+    // An each-variable read inside a component's inline handler rides
     // the dataset channel (ctx.loopStack -> data-<name> -> __loop prelude),
     // the same wiring the page path gives its own inline handlers.
     const loops = ctx.inlineLoops.get(name) ?? [];
@@ -1219,17 +1253,25 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
   });
   const namedFns = [...ctx.namedHandlers.entries()].map(([original, adapter]) =>
     `  function ${adapter}(e) { return ${original}(__domEvent(e)); }`);
-  // R454: a keydown Enter handler arrives as bindconfirm, whose event carries no
+  // A keydown Enter handler arrives as bindconfirm, whose event carries no
   // key; the adapter puts the key back before the page's own handler sees it.
   const keyFns = [...ctx.keyHandlers.entries()].map(([adapter, original]) =>
     `  function ${adapter}(e) { const ev = __domEvent(e); ev.key = 'Enter'; return ${original}(ev); }`);
-  const { body: compBody } = await transformScript(comp.script ?? '', facts, ctx);
+  const { body: compBody, names: compFnNamesList } = await transformScript(comp.script ?? '', facts, ctx);
   const compKitImports = ['__rosezmNative', '__rosezmConfirm', '__rosezmAlert', '__rosezmPrompt', '__rosezmOpen']
     .filter((h) => new RegExp(`\\b${h}\\s*\\(`).test(compBody));
   const compKitRequire = `const { roseThrow, getApiBase${compKitImports.length ? ', ' + compKitImports.join(', ') : ''} } = require('../../utils/rosezm.js');`;
   const compDefs = [
     '    const __comp = this;',
     '    const state = this.data;',
+    '    // A component has no page instance of its own: the action channel is',
+    "    // the host page's __runAction (the POST + patch back onto the page).",
+    '    const __action = function (n, e) {',
+    '      var pages = getCurrentPages();',
+    '      var pg = pages[pages.length - 1];',
+    '      if (pg && pg.__runAction) return pg.__runAction(n, e);',
+    '      return Promise.resolve();',
+    '    };',
     '    const __computed = {};',
     '    const __effects = [];',
     '    const __setState = function (k, v) { __comp.setData({ [k]: v }); };',
@@ -1254,6 +1296,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     ...[...ctx.computed.entries()].map(([field, code]) =>
       `  __computed.${field} = function () { return (${rewriteRunes(rewriteStateReads(code, compStateNames))}); };`),
     '    return {',
+    ...compFnNamesList.map((n) => `      ${n}: ${n},`),
     ...[...ctx.inlineHandlers.values(), ...ctx.namedHandlers.values()].map((n) => `      ${n}: ${n},`),
     ...[...ctx.keyHandlers.keys()].map((n) => `      ${n}: ${n},`),
     '      __computed: __computed,',
@@ -1261,6 +1304,12 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     '    };',
   ];
   const compMethods = [
+    // The defs' named functions bridge here: a WXML handler attribute
+    // (bindsubmit="submit") resolves against Component methods, and the
+    // member forwards to the definitions factory's closure.
+    ...compFnNamesList.map((n) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(__domEvent(e)); },`),
+    ...[...ctx.namedHandlers].map(([n]) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(__domEvent(e)); },`),
+    ...[...ctx.inlineHandlers].map(([n]) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(e); },`),
     ...ctx.bindHandlers.map((b) => {
       if (b.trigger && b.kind === 'checkboxBool') {
         return `    ${b.name}: function (e) { var v = (e.detail.value || []).length > 0; this.setData({ ${b.state}: v }); this.triggerEvent(${JSON.stringify(b.trigger)}, v); },`;
@@ -1282,11 +1331,11 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
       if (b.trigger) {
         return `    ${b.name}: function (e) { this.setData({ ${b.state}: e.detail.value }); this.triggerEvent(${JSON.stringify(b.trigger)}, e.detail.value); },`;
       }
-      if (b.kind === 'value' || b.kind === 'radio') return `    ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
+      if (b.kind === 'value' || b.kind === 'radio') return `    ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value);${b.chain ? ` this.${b.chain}(e);` : ''} },`;
       if (b.kind === 'toggleOpen') return `    ${b.name}: function (e) { this.setData({ ${b.state}: !this.data.${b.state} }); },`;
       return `    ${b.name}: function (e) {},`;
     }),
-    // R259: named handlers and inline arrows bound with on:xxx live in the
+    // Named handlers and inline arrows bound with on:xxx live in the
     // definitions closure (state scope + the dataset prelude); these thin
     // forwards are what the WXML bindings reach.
     ...[...ctx.namedHandlers.values()].map((n) => `    ${n}: function (e) { return this.__rosezmDefs.${n}(__domEvent(e)); },`),
@@ -1302,7 +1351,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     '      if (Object.keys(patch).length) this.setData(patch);',
     '    },',
   ].join('\n');
-  // R259: the require rides ahead of Component() - a component that calls the
+  // The require rides ahead of Component() - a component that calls the
   // kit needs the helpers its own body names.
   await fs.promises.writeFile(path.join(dir, comp.name + '.' + dialect.js), [
     compKitRequire,
@@ -1314,7 +1363,7 @@ async function writeComponent(out: string, root: string, dialect: Dialect, targe
     '  data: {',
     ...compDataEntries,
     '  },',
-    // R259: the definitions factory runs once at attach, so the methods
+    // The definitions factory runs once at attach, so the methods
     // share one state/helper scope exactly as a page's definitions do.
     '  lifetimes: {',
     '    attached() {',
@@ -1437,7 +1486,9 @@ function emitNode(node: IrNode, ctx: EmitContext, dialect: Dialect, usingCompone
       const keyOf = rawKey.match(new RegExp(`^${itemVar}\\.(\\w+)$`));
       const keyAttr = rawKey ? ` ${directiveOf(dialect.prefix, 'key')}="${keyOf ? keyOf[1] : rawKey}"` : '';
       ctx.loopStack.push(itemVar, indexVar);
+      ctx.loopItems.set(itemVar, exprOf(node.items, ctx));
       const eachInner = emitNodes(node.children, ctx, dialect, usingComponents, compFiles);
+      ctx.loopItems.delete(itemVar);
       ctx.loopStack.pop();
       ctx.loopStack.pop();
       return `<block ${directiveOf(dialect.prefix, 'for')}="{{${exprOf(node.items, ctx)}}}" ${directiveOf(dialect.prefix, 'for-item')}="${itemVar}" ${directiveOf(dialect.prefix, 'for-index')}="${indexVar}"${keyAttr}>${eachInner}</block>`;
@@ -1509,7 +1560,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     if (url && svgShapes.has(url)) return emitVectorCanvas(url, ctx);
   }
-  // R452: <details>/<summary> as a page-data fold - the header toggles the flag
+  // <details>/<summary> as a page-data fold - the header toggles the flag
   // and the body is hidden while closed, exactly like the browser.
   if (node.tag.toLowerCase() === 'details' && !isComponent) {
     const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
@@ -1603,9 +1654,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
       ctx.warnings.push(`${ctx.file}: <${node.tag}> has no mini-program equivalent - emitted as <view>`);
     }
   }
-  // R258: TAG_MAP rewrites h1-h6/p/strong/em into <text> and ul/li into
+  // TAG_MAP rewrites h1-h6/p/strong/em into <text> and ul/li into
   // <view>, so a stylesheet that targets the HTML tag matches NOTHING in the
-  // product - the default typography layer shipped with R257 was dead CSS
+  // product - the default typography layer shipped with was dead CSS
   // (Breeze: 0 <h1> across 26 pages, every h1{} rule unreachable). The
   // semantic name rides along as a class, so `h1 { font-size: 32px }` reaches
   // the <text> that came from <h1> - and the AUTHOR's own `h1 {}` rule keeps
@@ -1613,9 +1664,8 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
   const semanticTag = !isComponent && TYPOGRAPHIC_TAGS.has(node.tag.toLowerCase()) ? node.tag.toLowerCase() : '';
   // A container tag mapped to `text` cannot hold elements: promote it to `view`.
   if (tag === 'text' && node.children.some((c) => c.kind === 'element' || c.kind === 'if' || c.kind === 'each')) tag = 'view';
-  // CSS 手绘/遮罩图标（class 含 `ico `/`li `）依赖 ::before/::after 或
-  // mask-image，<text> 组件两者都不渲染 —— 一律升为 <view>（display:inline-block
-  // 由图标基类自己声明）。
+  // A CSS-drawn or mask-image icon (.ico/.li classes) needs ::before/::after or
+  // mask-image, neither of which <text> renders - promote it to <view>.
   if (tag === 'text' && node.tag.toLowerCase() === 'span' && node.attrs.some((a) => a.name === 'class' && ((a.value.kind === 'text' && /(^|\s)(ico|li)(-\w+)*(\s|$)/.test(a.value.text)) || (a.value.kind === 'expr' && /['"](ico|li)['"]|\bico\b|\bli\b/.test(a.value.code))))) tag = 'view';
 
   // `<select bind:value>` is a picker: its `value` is an INDEX, so the page keeps
@@ -1696,11 +1746,36 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: EmitContex
       return `<checkbox-group ${eventAttrOf(dialect.prefix, 'change')}="${handler}"><checkbox value="${escapeAttr(value)}" checked="${checkedAttr}" color="#e91e63"></checkbox></checkbox-group>`;
     }
     if (type === 'checkbox' && checkedState) {
+      // A member-path binding whose root is an {#each} row variable writes
+      // the ROW FIELD through the items state: `item.done` inside the loop
+      // becomes `items[index].done` - WXML can read it and the kit's __set
+      // can write the path immutably.
+      let state = checkedState;
+      if (checkedState.includes('.')) {
+        const rootVar = checkedState.split('.')[0];
+        const loopIdx = ctx.loopStack.indexOf(rootVar);
+        if (loopIdx >= 0 && loopIdx % 2 === 0) {
+          const indexVar = ctx.loopStack[loopIdx + 1];
+          const itemsExpr = ctx.loopItems?.get(rootVar);
+          if (itemsExpr) {
+            // WXML's own subscript spelling: a data path with a variable
+            // index is `items[index].done`, not `items.index.done`.
+            state = `${itemsExpr}[${indexVar}].${checkedState.split('.').slice(1).join('.')}`;
+          }
+        }
+      }
       const handler = `__cb${ctx.bindHandlers.length}`;
-      ctx.bindHandlers.push({ name: handler, kind: 'checkboxBool', state: checkedState, ...(ctx.componentProps.has(checkedState) ? { trigger: `${checkedState}change` } : {}) });
-      return `<checkbox-group ${eventAttrOf(dialect.prefix, 'change')}="${handler}"><checkbox checked="{{${checkedState}}}" color="#e91e63"></checkbox></checkbox-group>`;
+      // A row-field bind carries its loop index through the dataset channel:
+      // the handler reads data-__rowidx (WXML interpolates it per row) and
+      // spells the write path with the concrete index.
+      const isRowBind = state.includes('[');
+      // The loop's index variable: the stack holds [item, index] pairs.
+      const rowIdxVar = isRowBind ? (ctx.loopStack[ctx.loopStack.indexOf(checkedState.split('.')[0]) + 1] ?? 'index') : '';
+      const rowIdxAttr = isRowBind ? ` data-__rowidx="{{${rowIdxVar}}}"` : '';
+      ctx.bindHandlers.push({ name: handler, kind: 'checkboxBool', state, row: isRowBind, ...(ctx.componentProps.has(checkedState) ? { trigger: `${checkedState}change` } : {}) });
+      return `<checkbox-group${rowIdxAttr} ${eventAttrOf(dialect.prefix, 'change')}="${handler}"><checkbox checked="{{${state}}}" color="#e91e63"></checkbox></checkbox-group>`;
     }
-    // R447: a date input is the platform's own calendar sheet. The state keeps
+    // A date input is the platform's own calendar sheet. The state keeps
     // the ISO day the web input writes, so nothing downstream changes.
     if (type === 'date') {
       const bindValue = node.attrs.find((a) => a.name === 'bind:value');
@@ -1782,7 +1857,7 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
   const pushStyleExpr = (code: string): void => {
     const entries = objectEntriesOf(code);
     if (!entries) {
-      // R292: a style that CONCATENATES strings cannot ride a mustache -
+      // A style that CONCATENATES strings cannot ride a mustache -
       // WXML's data binding has no string concatenation. The expression is
       // split into its literal text and its dynamic parts instead, and the
       // result is the one form WXML understands: `prop: {{value}}suffix`.
@@ -1817,14 +1892,21 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
   if (node.tag.toLowerCase() === 'tr' && !node.attrs.some((a) => a.name.toLowerCase() === 'style')) {
     styles.push('display:flex');
   }
+  // Attrs the bind:value branch folded into its own composed handler: the
+  // generic on: branch must not emit a SECOND event attr (WXML duplicates
+  // bindinput and one of the two is lost).
+  const chained = new Set<IrAttr>();
   for (const attr of node.attrs) {
     const name = attr.name;
     const low = name.toLowerCase();
     if (low.startsWith('on:')) {
+      // A bind:value on the same element already folded this handler into its
+      // composed __bN (a second bindinput would be a lost attr).
+      if (chained.has(attr)) continue;
       const evt = low.slice(3).replace(/\|.*$/, '');
       const mapped = EVENT_MAP[evt];
       if (!mapped) {
-        // R454: a mini-program input has no keydown - Enter arrives as the
+        // A mini-program input has no keydown - Enter arrives as the
         // confirm event, which carries the value but no key. A named handler is
         // wrapped by an adapter that puts `key = 'Enter'` back before it runs.
         const named = attr.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(attr.value.code.trim());
@@ -1902,11 +1984,22 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
         ctx.warnings.push(`${ctx.file}: bind:${kind}={${code}} is not a plain state name - the binding is dropped`);
         continue;
       }
-      const handlerName = `__b${ctx.bindHandlers.length}`;
-      ctx.bindHandlers.push({ name: handlerName, kind, state: code });
+      const bindHandler = `__b${ctx.bindHandlers.length}`;
+      // A coexisting on:input folds into this handler: two bindinput attrs on
+      // one tag lose one of the two. The user handler runs after the write,
+      // exactly as the web runtime fires both.
+      let chain: string | undefined;
+      if (kind === 'value') {
+        const extra = node.attrs.find((a) => a !== attr && !chained.has(a) && (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+        if (extra && extra.value.kind === 'expr') {
+          chain = handlerName(extra.value.code.trim(), ctx);
+          chained.add(extra);
+        }
+      }
+      ctx.bindHandlers.push({ name: bindHandler, kind, state: code, chain });
       out.push(kind === 'value' ? `value="{{${code}}}"` : `checked="{{${code}}}"`);
-      // R257: alipay spells these events on* too.
-      out.push(kind === 'value' ? `${eventAttrOf(dialect.prefix, 'input')}="${handlerName}"` : `${eventAttrOf(dialect.prefix, 'change')}="${handlerName}"`);
+      // Alipay spells these events on* too.
+      out.push(kind === 'value' ? `${eventAttrOf(dialect.prefix, 'input')}="${bindHandler}"` : `${eventAttrOf(dialect.prefix, 'change')}="${bindHandler}"`);
       continue;
     }
     if (low.startsWith('bind:')) {
@@ -1924,8 +2017,8 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
     // ...): the handler reads e.currentTarget.dataset.<name>, and WeChat maps
     // data-index -> dataset.index automatically. They used to fall through the
     // attr tail and vanish, so every dataset-read tap arrived with an EMPTY
-    // dataset - the handler guarded on !post and silently did nothing, which
-    // is exactly "点赞/卡片/筛选全都没反应". Static values ride verbatim,
+    // dataset - the handler guarded on !post and silently did nothing, so
+    // every tap looked dead. Static values ride verbatim,
     // dynamic ones compile to {{...}} bindings.
     if (low.startsWith('data-')) {
       const dataName = name.slice(5);
@@ -1991,7 +2084,7 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       continue;
     }
     if (low === 'for' || low === 'rows') continue;
-    // R257: an <img width height> is a real size request. <image> defaults to
+    // An <img width height> is a real size request. <image> defaults to
     // filling its box, so dropping the numbers made every sized icon render
     // full-screen. They ride the inline style (the one place the platform
     // honours per-element sizing); px and rem both, rem at 16 like the
@@ -2018,8 +2111,9 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
     // form would render and do nothing. Bind it to the page's server action,
     // which is what the form was always going to call.
     if (node.tag.toLowerCase() === 'form' && (low === 'method' || low === 'action') && ctx.pageAction) {
-      if (!node.attrs.some((a) => a.name.toLowerCase().startsWith('on:'))) {
-        out.push(`${eventAttrOf(dialect.prefix, 'submit')}="${ctx.pageAction}"`);
+      const submitAttr = `${eventAttrOf(dialect.prefix, 'submit')}="${ctx.pageAction}"`;
+      if (!node.attrs.some((a) => a.name.toLowerCase().startsWith('on:')) && !out.some((x) => x === submitAttr)) {
+        out.push(submitAttr);
       }
       continue;
     }
@@ -2045,7 +2139,8 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
     }
     if (node.tag.toLowerCase() === 'input' && low === 'type') {
       const text = attr.value.kind === 'text' ? attr.value.text : '';
-      // WeChat input types: text/number/idcard/digit/password + nickname/safe-password (官方资料填写能力)。
+      // WeChat input types: text/number/idcard/digit/password, plus nickname and
+      // safe-password for the platform's own profile-filling flow.
       const MP_INPUT_TYPES = new Set(['text', 'number', 'idcard', 'digit', 'password', 'nickname', 'safe-password']);
       const mapped = MP_INPUT_TYPES.has(text) ? text : 'text';
       if (text && text !== 'text' && mapped === 'text') ctx.warnings.push(`${ctx.file}: input type="${text}" becomes text in a mini program`);
@@ -2081,9 +2176,9 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
       ].filter(Boolean);
       out.push(`class="{{${parts.join(' + ')}}}"`);
     }
-    // R244: WXSS has no `:hover`, so the press state rides the hover-class
+    // WXSS has no `:hover`, so the press state rides the hover-class
     // attribute - one class per selector that declared a hover half.
-    // R271: `:active` halves join the same attribute - the platform's one
+    // `:active` halves join the same attribute - the platform's one
     // press signal IS hover-class, so the active class rides along.
     const hovers = classes.filter((c) => ctx.hoverSelectors.has('.' + c)).map((c) => hoverClassOf('.' + c));
     const actives = classes.filter((c) => ctx.hoverSelectors.has('.' + c)).map((c) => activeClassOf('.' + c));
@@ -2091,7 +2186,7 @@ function emitAttrs(node: Extract<IrNode, { kind: 'element' }> , ctx: EmitContext
     if (press.length) out.push(`hover-class="${escapeAttr(press.join(' '))}"`);
   } else if ((tag === 'navigator' || tag === 'button')
       && (ctx.hoverSelectors.has(node.tag.toLowerCase()) || ctx.hoverSelectors.has(tag))) {
-    // R257: a classless <a>/<button> used to get no hover-class at all -
+    // A classless <a>/<button> used to get no hover-class at all -
     // the shell styles `a:hover`/nav links, but the attribute channel only
     // looked at static class names, so the shell's own rules were dead
     // code on every link that carries no class. The element borrows the
@@ -2142,7 +2237,7 @@ function mixedExpr(parts: Array<{ kind: 'text'; value: string } | { kind: 'expr'
 }
 
 /**
- * R292: split a style expression that CONCATENATES strings into the shape
+ * Split a style expression that CONCATENATES strings into the shape
  * WXML can evaluate: literal text around mustaches.
  *
  * WXML's data binding has no string concatenation. `{{'animation-delay: ' +
@@ -2259,7 +2354,7 @@ function splitConcatStyle(code: string): string | null {
  *  for names the script declared as state - `weather()` is a function call and
  *  is hoisted instead of silently resolving to `undefined`. */
 /**
- * R283 (BUG.md AU family, mini-program side): the mini JS engines run on the
+ * the mini JS engines run on the
  * platform's base library, whose ES level varies - a template literal, an
  * optional chain or `??` reaching the page JS verbatim compiles in devtools
  * but dies on older baselib versions with a bare SyntaxError naming no line
@@ -2307,7 +2402,7 @@ function rewriteMiniModern(code: string): string {
   return out;
 }
 function exprOf(code: string, ctx: EmitContext): string {
-  // R283: the mini baselib's ES level varies - lower the three modern shapes
+  // The mini baselib's ES level varies - lower the three modern shapes
   // (template literal, optional chain, ??) before anything else sees them.
   const trimmed = rewriteMiniModern(code.trim()
     .replace(/\$t\s*\(\s*(['"])([^'"]*)\1\s*\)/g, "'$2'"));
@@ -2353,7 +2448,7 @@ function isWxmlSafe(code: string, scriptConsts?: Map<string, string>): boolean {
   if (/=>|`|\bnew\b|\$|\.\.\.|\?\./.test(code)) return false;
   if (/[A-Za-z_$][\w$]*\s*\(/.test(code)) return false;
   if (/[{};]/.test(code)) return false;
-  // R188: a mustache resolves against page DATA, and a module bind is not page
+  // A mustache resolves against page DATA, and a module bind is not page
   // data - it is a `const` in the page's JS closure. `{{store.likes + likes}}`
   // would render `undefined + null` in the view while the JS scope has the real
   // value. Hoist it so the closure supplies it.
@@ -2415,7 +2510,7 @@ function escapeAttr(s: string): string {
 /**
  * Scope a page/component's CSS and make its `@font-face` rules loadable.
  *
- * R257: rem values convert to px here, the way filterShellStyles already
+ * Rem values convert to px here, the way filterShellStyles already
  * does for the shell's own sheet - a page's `padding: 0.75rem 1rem` used
  * to reach the package verbatim, the platform rejected the whole
  * declaration, and the box lost its padding entirely.
@@ -2435,7 +2530,7 @@ function inlineFonts(css: string, root: string, warnings: string[], file: string
 }
 
 /**
- * R292: the mini-program's WXSS engine does NOT resolve CSS custom
+ * The mini-program's WXSS engine does NOT resolve CSS custom
  * properties. `page { --primary: #ff8c00 }` and `:root { --x: 1 }` are
  * dropped on the floor, and every `var(--x)` then resolves to nothing - which
  * the platform reports as `unsupported property: font-size: undefinedpx`
@@ -2494,15 +2589,15 @@ export function scopeCss(css: string, scope: string): string {
     // what the original app's wxss does too.
     if (s === 'page') return s;
     if (s.startsWith('page ') || s.startsWith('page:')) return s;
-    // R244: WXSS has no `:hover` - the press state is a hover-class attribute.
+    // WXSS has no `:hover` - the press state is a hover-class attribute.
     // Rewrite the selector onto the class the emitter puts there, or it is dead.
-    // R271: the same is true of `:active` - the view layer never styles it, and
+    // The same is true of `:active` - the view layer never styles it, and
     // the platform's ONE press signal IS hover-class (a finger down is both
     // hover and active on touch). It rides the same synthetic-class pair.
     const withHover = s
       .replace(/([.\w-]+):active\b/g, (_m, sel: string) => `${sel}.${activeClassOf(sel)}`)
       .replace(/([.\w-]+):hover\b/g, (_m, sel: string) => `${sel}.${hoverClassOf(sel)}`);
-    // R258: an element selector cannot survive the mapping - the product has
+    // An element selector cannot survive the mapping - the product has
     // no <h1>, no <p>, no <li>: TAG_MAP rewrote them into <text>/<view>. The
     // emitter now puts the semantic name on the element as a class, so the
     // author's own `h1 { color: red }` reaches the <text> it came from.
@@ -2539,7 +2634,7 @@ export function scopeCss(css: string, scope: string): string {
         const declared = /^@(?:-[\w]+-)?keyframes\b/.test(sel) || /^@font-face\b/.test(sel);
         out.push(`${sel} {${declared ? block : scopeCss(block, scope).trimEnd()}}`);
       } else if (sel) {
-        // R257: rem -> px for the declarations too (16px root, shell convention).
+        // Rem -> px for the declarations too (16px root, shell convention).
         const px = block.replace(/(-?[\d.]+)rem\b/g, (_m, n: string) => `${Math.round(Number(n) * 16 * 10) / 10}px`);
         out.push(`${sel.split(',').map(scopeOne).join(', ')} {${px}}`);
       }
@@ -2606,7 +2701,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
   // scope (module consts, imports, the state object) still exists. They are a
   // second place a template expression can reach a rune (`{#if $actionError()}`),
   // so they need the same rune pass the script body gets.
-  // R201: a `$derived` field is hoisted through the SAME channel, under its own
+  // A `$derived` field is hoisted through the SAME channel, under its own
   // name. WXML cannot call a getter, so `{{sq}}` can only read `data.sq` - and
   // `data` only changes through `setData`. Until now the field was seeded null
   // and nothing ever wrote it, so every `{sq}` on a mini-program page rendered
@@ -2647,7 +2742,7 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
   });
   const namedFns = [...ctx.namedHandlers.entries()].map(([original, adapter]) =>
     `  function ${adapter}(e) { return ${original}(__domEvent(e)); }`);
-  // R454: same Enter adapter as the component path.
+  // Same Enter adapter as the component path.
   const keyFns = [...ctx.keyHandlers.entries()].map(([adapter, original]) =>
     `  function ${adapter}(e) { const ev = __domEvent(e); ev.key = 'Enter'; return ${original}(ev); }`);
   const deferredFns = deferred.map((d) => `  __data[${JSON.stringify(d.name)}] = (${d.init});`);
@@ -2669,10 +2764,15 @@ async function buildPageJs(page: PageFile, facts: ScriptFacts, ctx: EmitContext,
   const bindEntries = [...propChangeEntries, ...ctx.bindHandlers.map((b) => {
     if (b.kind === 'formGet') return `  ${b.name}: function (e) { __rosezmNavigate(${JSON.stringify(b.action ?? '')}, (e && e.detail && e.detail.value) || {}); },`;
     if (b.trigger) return `  ${b.name}: function (e) { this.setData({ ${b.state}: e.detail.value }); this.triggerEvent(${JSON.stringify(b.trigger)}, e.detail.value); },`;
-    if (b.kind === 'value') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
+    if (b.kind === 'value') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value);${b.chain ? ` this.${b.chain}(e);` : ''} },`;
     if (b.kind === 'toggleOpen') return `  ${b.name}: function (e) { this.setData({ ${b.state}: !this.data.${b.state} }); },`;
     if (b.kind === 'radio') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, e.detail.value); },`;
     if (b.kind === 'picker') return `  ${b.name}: function (e) { var index = Number(e.detail.value) || 0; this.__set(${JSON.stringify(b.state)}, ${JSON.stringify(b.values)}[index]); this.setData({ __sel_${b.state}: index }); },`;
+    if (b.kind === 'checkboxBool' && b.row) {
+      // The row index rides the dataset; the write path gets the concrete
+      // number, and the kit's dotted-key setter replaces the row immutably.
+      return `  ${b.name}: function (e) { var ds = e.currentTarget.dataset || {}; var idx = Number(ds.__rowidx != null ? ds.__rowidx : ds.rowidx); var path = ${JSON.stringify(b.state)}.replace('[index]', '[' + idx + ']'); this.__set(path, (e.detail.value || []).length > 0); },`;
+    }
     if (b.kind === 'checkboxBool') return `  ${b.name}: function (e) { this.__set(${JSON.stringify(b.state)}, (e.detail.value || []).length > 0); },`;
     const values = JSON.stringify(b.values ?? []);
     return [
@@ -2890,7 +2990,7 @@ function matchParen(src: string, open: number): number {
 function rewriteStateReads(code: string, stateNames: Set<string>): string {
   const called = code.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (whole, name: string) =>
     stateNames.has(name) ? `state.${name}` : whole);
-  // R200: a template or a folded write can carry the read BARE (`if (show)`,
+  // A template or a folded write can carry the read BARE (`if (show)`,
   // `!show`) - the web build callifies those and the export IR does not, so a
   // bare name reaches the shipped page as a global the mini program never
   // defines: a runtime ReferenceError, not a compile error, so no gate sees it.
@@ -2951,6 +3051,10 @@ async function transformScript(script: string, facts: ScriptFacts, ctx: EmitCont
     // behaviour) is what made every cloud-backed page render empty. A bare
     // package specifier still has no resolver and is warned about.
     .replace(/^\s*import\s+([\s\S]*?)\s+from\s*['"](\.[^'"]*)['"]\s*;?\s*$/gm, (m, what, spec) => {
+      // A .rose component is not a JS module: the mini program references it
+      // through the json usingComponents map, so the import is dropped (a
+      // require('./Inner.rose') would load nothing and break the file).
+      if (/\.rose$/.test(spec)) return '';
       const bind = String(what).trim();
       const req = "require(" + JSON.stringify(spec) + ")";
       const ns = bind.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
@@ -3005,9 +3109,9 @@ async function transformScript(script: string, facts: ScriptFacts, ctx: EmitCont
     file: ctx.file,
     warn: (m) => ctx.warnings.push(m),
   }).code;
-  // R258: the rewrite is what turns useNative(...) into the kit helper, so
+  // The rewrite is what turns useNative(...) into the kit helper, so
   // AFTER it the page's script says whether the helper is needed at all.
-  // R258: the rewrite is what turns useNative(...)/confirm(...)/alert(...) into
+  // The rewrite is what turns useNative(...)/confirm(...)/alert(...) into
   // the kit helpers, so AFTER it the page's script names the ones it needs.
   ctx.kitImports = ['__rosezmNative', '__rosezmConfirm', '__rosezmAlert', '__rosezmPrompt', '__rosezmOpen']
     .filter((h) => new RegExp(`\\b${h}\\s*\\(`).test(code));
@@ -3133,7 +3237,7 @@ function __rosezmConfirm(message) {
   if (!api) return Promise.resolve(typeof confirm === 'function' ? confirm(message) : false);
   return new Promise(function (resolve) {
     api.showModal({
-      title: '提示',
+      title: 'Notice',
       content: String(message),
       success: function (res) { resolve(!!(res && res.confirm)); },
       fail: function () { resolve(false); },
@@ -3162,7 +3266,7 @@ function __rosezmOpen(url, target) {
     return;
   }
   if (typeof wx !== 'undefined' && wx.setClipboardData) {
-    wx.setClipboardData({ data: src, success: function () { wx.showToast({ title: '链接已复制', icon: 'none' }); } });
+    wx.setClipboardData({ data: src, success: function () { wx.showToast({ title: 'Link copied', icon: 'none' }); } });
   }
 }
 function __rosezmPrompt(message, defaultValue) {
@@ -3170,7 +3274,7 @@ function __rosezmPrompt(message, defaultValue) {
   if (!api) return Promise.resolve(typeof prompt === 'function' ? prompt(message, defaultValue) : null);
   return new Promise(function (resolve) {
     wx.showModal({
-      title: '输入',
+      title: 'Input',
       content: String(message),
       editable: true,
       placeholderText: String(defaultValue || ''),
@@ -3625,8 +3729,41 @@ function rosePage(definitions, def) {
       self.__effectDirty = false;
     }
   };
+  // (defined once, above): the immutable path write the dotted keys use.
+  const __setPath = function (owner, path, value) {
+    if (!path.length) return value;
+    const head = path[0];
+    const rest = path.slice(1);
+    if (Array.isArray(owner)) {
+      const i = Number(head);
+      if (!Number.isInteger(i) || i < 0 || i >= owner.length) return owner;
+      const next = owner.slice();
+      next[i] = __setPath(next[i], rest, value);
+      return next;
+    }
+    if (owner !== null && typeof owner === 'object') {
+      const next = Object.assign({}, owner);
+      next[head] = __setPath(next[head], rest, value);
+      return next;
+    }
+    return owner;
+  };
   page.__set = function (key, value) {
     if (typeof value === 'function') value = value(this.data[key]);
+    // A dotted key - a two-way binding on a member path, or an {#each} row
+    // field (items.0.done) - writes the FIELD of the state the path names:
+    // the owner is replaced by a copy, so the new identity reaches setData
+    // and the row re-renders.
+    if (key.indexOf('.') !== -1) {
+      const parts = key.split('.');
+      const root = parts.shift();
+      const cur = this.data[root];
+      if (parts.length && cur !== null && typeof cur === 'object') {
+        const next = __setPath(cur, parts, value);
+        this.__set(root, next);
+        return;
+      }
+    }
     // An effect that re-writes what it just read is a stable loop only if the
     // write settles: a primitive that did not change is not a change, and
     // firing setData (plus the whole recompute pass) for it would recurse.

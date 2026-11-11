@@ -22,14 +22,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { extractAppLifecycle } from './miniprogram.js';
+import { keepOnlyExcept } from './fs-util.js';
 import { SHELL_STYLES } from '../cli/shell.js';
 import { appIdentity } from './app-identity.js';
+import { bakeShellDocuments, stageBuiltSite } from './desktop-shell.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
+import { buildArkTsCompatReport, renderArkTsCompatSection } from './arkts-compat.js';
 import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , pageTitle} from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify } from './style-engine.js';
-import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, type HandlerDialect } from './handler-ir.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, unsupportedForTarget, listMarkerOf, type StyleModel, type StyleSubject, type StyleSheet, type Len, type Align, type Justify , filterDowngradesFor,} from './style-engine.js';
+import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, refusesEventUse, stripTsTypes, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, type FormInfo } from './state-ops.js';
+import { bakeRouteStates, rewritePromiseExprs, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteNullish, rewriteLoweredLogicalAssign, rewriteInitializer, rewriteMemberReads, rewriteSpreadWrites, rewriteMapperSets, rewriteArrayMutations, rewriteDirectSetValue, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteTernaryTruth, callifyBareReads, collectForms, formFieldKey, isSubmitButton, persistKeys, customFontFamilies, fontFaces, kvDeclarations, kvCallable, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent, coerceStringConcat, effectBodies, type FormInfo, rewriteOptionalIndex, rewriteLocalArrow, spellArrowParams } from './state-ops.js';
 import { translateExpr, type ExprDialect } from './expr-ir.js';
 import { nativeUsage, nativeManifestEntries, rewriteNativeCalls, literalOptions, type NativeCapability } from './native-api.js';
 
@@ -40,6 +43,9 @@ export interface EmitArkTsOptions {
   warnings: string[];
   /** The site's own stylesheet - its theme, tokens and chrome - merged under each page's own <style>. */
   globalCss?: string;
+  /** Ship the web build alongside the native pages, behind a Web component
+   *  page: the hybrid mode for DOM-heavy surfaces the native route stubs. */
+  webview?: boolean;
 }
 
 const TEXT_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'strong', 'em', 'b', 'i', 'small', 'code', 'pre', 'label', 'legend', 'blockquote', 'time', 'mark', 'q', 's', 'u', 'sub', 'sup', 'abbr', 'cite', 'caption', 'td', 'th']);
@@ -145,7 +151,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     });
   }
 
-  // R479: one rename map for the whole export, from the state declarations.
+  // One rename map for the whole export, from the state declarations.
   arkNames = new Map<string, string>();
   for (const p of pages) {
     for (const m of (p.script ?? '').matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$(?:state|persist|kv|data|derived)\b/g)) {
@@ -162,7 +168,9 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
     components.push({ name, struct: structName(name), nodes: parsed.nodes, script: parsed.script, style: parsed.style ?? '', slots: collectSlots(parsed.nodes) });
   }
 
-  await fs.promises.rm(out, { recursive: true, force: true });
+  // oh_modules (resolved dependencies) and build/ (DevEco's incremental
+  // output) belong to the IDE, not to the exporter.
+  await keepOnlyExcept(out, ['oh_modules', 'build']);
   await fs.promises.mkdir(path.join(etsRoot, 'pages'), { recursive: true });
   await fs.promises.mkdir(path.join(etsRoot, 'components'), { recursive: true });
   await fs.promises.mkdir(path.join(etsRoot, 'kit'), { recursive: true });
@@ -176,7 +184,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const { media, vectors } = await copyMedia(root, pkgRoot, pages.map((p) => p.nodes), warnings);
 
   const allCss = [globalCss, ...pages.map((p) => p.style ?? ''), ...components.map((c) => c.style ?? ''), SHELL_STYLES].join('\n');
-  // R476: a background-image in a <style> block is copied like an <img> src.
+  // A background-image in a <style> block is copied like an <img> src.
   for (const m of allCss.matchAll(/url\(\s*(['"]?)(\/[^'")]+)\1\s*\)/gi)) {
     const url = m[2];
     if (media.has(url)) continue;
@@ -199,12 +207,12 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const content = bakeContent(root);
   // useNative(...): the permissions and the kit helper this project needs.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
-  // R256: the emitted pages/components call whatever kit helpers the translation
+  // The emitted pages/components call whatever kit helpers the translation
   // needs (roseThrow, roseHtmlSpans, roseMap, ...), but the fixed import block
   // named only roseData/roseAction/roseKv - TS2304 on 7 pages. The import list
   // is now completed from the kit's own export table, so a helper the kit grows
   // is picked up without a hardcoded list rotting beside it.
-  const kitSource = renderKit(opts.apiBase ?? '', content, native, pages.map((p) => ({ route: p.route, url: 'pages/' + p.struct })), bakeRouteStates(root));
+  const kitSource = renderKit(opts.apiBase ?? '', content, native, pages.map((p) => ({ route: p.route, url: 'pages/' + p.struct })), bakeRouteStates(root), { id: app.id, name: app.name, version: app.version });
   const kitExports = kitExportNames(kitSource);
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseKit.ets'), kitSource, 'utf8');
 
@@ -215,7 +223,7 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   const compStyleRows: string[] = [];
   const pageTagRows: string[] = [];
   const compTagRows: string[] = [];
-  // R470: the dark half of every sheet, one set per scope.
+  // The dark half of every sheet, one set per scope.
   const pageDarkRows: string[] = [];
   const compDarkRows: string[] = [];
   const pageDarkTagRows: string[] = [];
@@ -225,14 +233,14 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   // only style table and every row in it is scoped, so a theme rule that rode in
   // one scope only would miss all the others.
   for (const page of pages) {
-    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, page.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, page.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, page.struct, allFonts, warnings);
     if (rows) pageStyleRows.push(rows);
     if (tagRows) pageTagRows.push(tagRows);
     if (darkRows) { pageDarkRows.push(darkRows); arkDarkRules++; }
     if (darkTagRows) { pageDarkTagRows.push(darkTagRows); arkDarkRules++; }
   }
   for (const comp of components) {
-    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, comp.struct, allFonts);
+    const { rows, tagRows, darkRows, darkTagRows } = compileArkStyles(arkSheetPipeline([globalCss, comp.style ?? '', SHELL_STYLES].filter((s) => s && s.trim()).join('\n')).css, comp.struct, allFonts, warnings);
     if (rows) compStyleRows.push(rows);
     if (tagRows) compTagRows.push(tagRows);
     if (darkRows) { compDarkRows.push(darkRows); arkDarkRules++; }
@@ -242,20 +250,42 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(etsRoot, 'kit', 'RoseModifier.ets'), renderRoseModifier(), 'utf8');
 
   for (const comp of components) {
-    const compSrc = renderComponent(comp, fontMap, warnings, kitExports, globalCss);
+    const compSrc = renderComponent(comp, fontMap, warnings, kitExports, globalCss, components);
     await fs.promises.writeFile(path.join(etsRoot, 'components', comp.struct + '.ets'), compSrc, 'utf8');
   }
   for (const page of pages) {
     const pageSrc = renderPage(page, components, media, vectors, fontMap, warnings, content, kitExports, globalCss);
-    // R256: the kit import rides a slot because only the finished body knows
+    // The kit import rides a slot because only the finished body knows
     // which helpers the page calls - the placeholder is filled from the final
     // artifact, so nothing can be forgotten. roseData/roseAction/roseKv are
     // already named by the fixed header above, so they stay excluded.
     await fs.promises.writeFile(path.join(etsRoot, 'pages', page.struct + '.ets'), pageSrc.replace(KIT_IMPORT_SLOT, kitImportLine(pageSrc, kitExports, new Set(['roseData', 'roseAction', 'roseKv']))), 'utf8');
   }
-  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(app.scheme, appArkts), 'utf8');
+  await fs.promises.writeFile(path.join(etsRoot, 'entryability', 'EntryAbility.ets'), renderAbility(app.scheme, appArkts, native.includes('keep-awake')), 'utf8');
+  const pageSrcs = pages.map((p) => `pages/${p.struct}`);
+  if (opts.webview) {
+    // The hybrid mode: the web build rides in rawfile/web/, and one Web
+    // component page hosts it - a DOM-heavy surface (an editor, a
+    // contenteditable grid) keeps full fidelity while the native pages stay
+    // native. API calls run against the same ROSE_API_BASE the kit uses.
+    const webRoot = path.join(pkgRoot, 'resources', 'rawfile', 'web');
+    await stageBuiltSite(opts.projectRoot, webRoot, 'arkts-web', warnings);
+    // buildProject writes bundles, not documents: bake the routes the server
+    // bundle can render (the desktop shells' own baking), so the Web component
+    // opens on real content instead of a blank file.
+    await bakeShellDocuments(await scanRoseFiles(opts.projectRoot), webRoot, 'arkts-web', warnings);
+    // The Node half is dead weight on a device: server.js/prod.mjs are the
+    // server bundles, headers.json/broken.json/package.json are build-owned
+    // metadata. A WebView needs documents, client.js and the public tree only.
+    for (const name of ['server.js', 'prod.mjs', 'headers.json', 'broken.json', 'package.json']) {
+      await fs.promises.rm(path.join(webRoot, name), { force: true });
+    }
+    pageSrcs.push('pages/WebHome');
+    await fs.promises.writeFile(path.join(etsRoot, 'pages', 'WebHome.ets'), renderWebHome(), 'utf8');
+    warnings.push('arkts: the web build ships in rawfile/web - the WebHome page hosts it; api calls go to ROSE_API_BASE');
+  }
   await fs.promises.writeFile(path.join(pkgRoot, 'resources', 'base', 'profile', 'main_pages.json'), JSON.stringify({
-    src: pages.map((p) => `pages/${p.struct}`),
+    src: pageSrcs,
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(pkgRoot, 'resources', 'base', 'element', 'string.json'), JSON.stringify({
     string: [{ name: 'module_desc', value: `${app.name} app` }, { name: 'EntryAbility_desc', value: app.name }, { name: 'EntryAbility_label', value: app.name }, { name: 'app_name', value: app.name }],
@@ -305,7 +335,18 @@ export async function emitArkTs(opts: EmitArkTsOptions): Promise<{ pages: string
   }, null, 2) + '\n', 'utf8');
   await fs.promises.writeFile(path.join(out, 'entry', 'hvigorfile.ts'), "export { hapTasks } from '@ohos/hvigor-ohos-plugin';\n", 'utf8');
   await fs.promises.writeFile(path.join(out, 'entry', 'oh-package.json5'), JSON.stringify({ name: 'entry', version: '1.0.0', description: 'rosezm entry module', main: '', author: '', license: 'MIT', dependencies: {} }, null, 2) + '\n', 'utf8');
-  await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
+  // The compatibility contract: a machine-readable gap
+  // list AND a human table in the README. The warnings below are only what
+  // this export hit; the table is the full framework-level contract a
+  // porting team needs before any page uses the missing API.
+  const compat = buildArkTsCompatReport(warnings);
+  await fs.promises.writeFile(path.join(out, 'arkts-compat.json'), JSON.stringify(compat, null, 2) + '\n', 'utf8');
+  await fs.promises.writeFile(
+    path.join(out, 'README.md'),
+    renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings, opts.webview === true)
+      + renderArkTsCompatSection(compat),
+    'utf8',
+  );
 
   return { pages: pages.map((p) => `entry/src/main/ets/pages/${p.struct}.ets`), components: components.map((c) => `entry/src/main/ets/components/${c.struct}.ets`) };
 }
@@ -895,12 +936,12 @@ function arkSheetPipeline(css: string): { css: string; extras: ArkCssExtras; str
 function arkBoxMods(m: StyleModel): string[] {
   const mods: string[] = [];
   if (m.background) mods.push(`.backgroundColor('${arkColor(m.background)}')`);
-  // R487: the static chain never carried a background picture - only the runtime
+  // The static chain never carried a background picture - only the runtime
   // modifier did, so a page with plain classes rendered the hero empty.
   if (m.backgroundImage) {
     const local = arkMedia.get(m.backgroundImage);
     const src = local ? `$r('app.media.${local}')` : JSON.stringify(m.backgroundImage);
-    // R487: cover/contain/auto are ArkUI's own ImageSize values.
+    // Cover/contain/auto are ArkUI's own ImageSize values.
     const size = m.backgroundSize === 'contain' ? 'Contain' : m.backgroundSize === 'auto' ? 'Auto' : 'Cover';
     mods.push(`.backgroundImage(${src}, ImageRepeat.NoRepeat).backgroundImageSize(ImageSize.${size})`);
   }
@@ -921,7 +962,7 @@ function arkBoxMods(m: StyleModel): string[] {
     const style = m.borderStyle === 'dashed' ? 'BorderStyle.Dashed' : m.borderStyle === 'dotted' ? 'BorderStyle.Dotted' : 'BorderStyle.Solid';
     mods.push(`.border({ width: { top: ${w[0]}, right: ${w[1]}, bottom: ${w[2]}, left: ${w[3]} }, color: '${arkColor(m.borderColor ?? '#e0e0e0')}', style: ${style} })`);
   }
-  // R488: the CSS transform, three ArkUI attributes.
+  // The CSS transform, three ArkUI attributes.
   if (m.translateX !== undefined || m.translateY !== undefined) mods.push(`.translate({ x: ${m.translateX ?? 0}, y: ${m.translateY ?? 0} })`);
   if (m.rotate !== undefined) mods.push(`.rotate({ angle: ${m.rotate} })`);
   if (m.scale !== undefined) mods.push(`.scale({ x: ${m.scale}, y: ${m.scale} })`);
@@ -934,7 +975,7 @@ function arkBoxMods(m: StyleModel): string[] {
   if (m.shadow) mods.push(`.shadow({ radius: ${m.shadow.blur}, color: '${arkColor(m.shadow.color)}', offsetX: ${m.shadow.x}, offsetY: ${m.shadow.y} })`);
   if (m.width) mods.push(`.width(${arkLen(m.width)})`);
   if (m.height) mods.push(`.height(${arkLen(m.height)})`);
-  // R420: ArkUI has a native aspectRatio on every component.
+  // ArkUI has a native aspectRatio on every component.
   if (m.aspectRatio !== undefined) mods.push(`.aspectRatio(${m.aspectRatio})`);
   if (m.minWidth || m.maxWidth || m.minHeight || m.maxHeight) {
     const entries = [
@@ -947,10 +988,16 @@ function arkBoxMods(m: StyleModel): string[] {
   }
   if (m.opacity !== undefined) mods.push(`.opacity(${m.opacity})`);
   if (m.overflow === 'hidden') mods.push('.clip(true)');
+  // pointer-events: none - the box stops taking the pointer.
+  if (m.noPointer) mods.push('.enabled(false)');
+  // user-select: none - the text stops being selectable.
+  if (m.noSelect) mods.push('.enableTextSelection(false)');
+  // word-break: break-all - a long word breaks anywhere.
+  if (m.breakWord) mods.push('.wordBreak(WordBreak.BREAK_ALL)');
   if (m.display === 'none') mods.push('.visibility(Visibility.None)');
   if (m.grow !== undefined && m.grow > 0) mods.push(`.layoutWeight(${m.grow})`);
   if (m.alignSelf) mods.push(`.alignSelf(ItemAlign.${arkAlignOf(m.alignSelf)})`);
-  // R224: position takes the element out of the flow. ArkUI's .position offsets
+  // Position takes the element out of the flow. ArkUI's .position offsets
   // it from its parent's top-left; right/bottom are not expressible there, so a
   // declaration that can only be stated as right/bottom is left in flow rather
   // than misplaced. .zIndex rides the same out-of-flow box.
@@ -972,14 +1019,20 @@ function arkTextMods(m: StyleModel, fonts: Set<string>): string[] {
   // unregistered name would fall back silently, so it stays out (warned once).
   if (m.fontFamily && fonts.has(m.fontFamily)) mods.push(`.fontFamily(${JSON.stringify(m.fontFamily)})`);
   if (m.letterSpacing !== undefined) mods.push(`.letterSpacing(${m.letterSpacing})`);
+  if (m.tabularNums) mods.push(`.fontFeature('"tnum" on')`);
   if (m.lineHeight !== undefined && m.fontSize) mods.push(`.lineHeight(${Math.round(m.fontSize * m.lineHeight)})`);
   if (m.textAlign) mods.push(`.textAlign(TextAlign.${m.textAlign === 'center' ? 'Center' : m.textAlign === 'right' ? 'End' : m.textAlign === 'justify' ? 'Justify' : 'Start'})`);
   if (m.textTransform) mods.push(`.textCase(TextCase.${m.textTransform === 'uppercase' ? 'UpperCase' : m.textTransform === 'lowercase' ? 'LowerCase' : 'Normal'})`);
   if (m.underline) mods.push('.decoration({ type: TextDecorationType.Underline })');
   if (m.strike) mods.push('.decoration({ type: TextDecorationType.LineThrough })');
-  // R415: one line + ellipsis - ArkUI's textOverflow needs maxLines set.
+  // One line + ellipsis - ArkUI's textOverflow needs maxLines set.
   if (m.ellipsis) mods.push('.maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })');
   else if (m.nowrap) mods.push('.maxLines(1)');
+  // The shadow the glyphs cast (CSS text-shadow) - ArkUI's own textShadow.
+  if (m.textShadow) {
+    const sh = m.textShadow;
+    mods.push(`.textShadow({ radius: ${sh.blur}, color: '${arkColor(sh.color)}', offsetX: ${sh.x}, offsetY: ${sh.y} })`);
+  }
   return mods;
 }
 
@@ -998,11 +1051,23 @@ function modifierOf(m: StyleModel, fonts: Set<string>): string[] {
  * Element/tag rules (button {}, a {}) fold into the tag table so roseResolve can
  * apply them without a selector engine - the same precedence the other targets keep.
  */
-function compileArkStyles(css: string, scope: string, fonts: Set<string>): { rows: string; tagRows: string; darkRows: string; darkTagRows: string } {
+function compileArkStyles(css: string, scope: string, fonts: Set<string>, warnings?: string[]): { rows: string; tagRows: string; darkRows: string; darkTagRows: string } {
   const sheet = parseStylesheet(css);
+  // The model carries a few properties ArkUI cannot paint - the report says
+  // which, for THIS target, instead of the declaration vanishing.
+  const unsupported = unsupportedForTarget('arkts', sheet);
+  if (unsupported.length && warnings) {
+    warnings.push(`arkts: these declarations have no ArkUI equivalent - dropped: ${unsupported.join(', ')}`);
+  }
+  // The filter/collapse downgrade lines: what the CSS asked and what
+  // THIS target draws (or does not) - named by selector, never silent.
+  const downgrades = warnings ? filterDowngradesFor('arkts', sheet) : [];
+  for (const line of downgrades) {
+    warnings!.push('arkts: ' + line);
+  }
   const classes = new Map<string, StyleModel>();
   const tags = new Map<string, StyleModel>();
-  // R470: the prefers-color-scheme dark half, its own tables.
+  // The prefers-color-scheme dark half, its own tables.
   const darkClasses = new Map<string, StyleModel>();
   const darkTags = new Map<string, StyleModel>();
   for (const rule of sheet.rules) {
@@ -1025,7 +1090,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
       classes.set(key, mergeModels(classes.get(key) ?? null, rule.model));
     }
   }
-  // R476: the table rows ASSIGN to the holder. They used to paste the chained
+  // The table rows ASSIGN to the holder. They used to paste the chained
   // modifiers (.backgroundColor(...)) inside `(it: RoseModifier) => { ... }`,
   // which is not valid ArkTS - every generated RoseStyles.ets failed to compile.
   const mods = (m: StyleModel): string => {
@@ -1046,12 +1111,23 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
     if (m.radius) out.push(`it.radius = ${m.radius[0]};`);
     if (m.borderWidth && m.borderWidth.some((w) => w > 0)) out.push(`it.borderWidth = ${Math.max(...m.borderWidth)};`);
     if (m.borderColor) out.push(`it.borderColor = '${arkColor(m.borderColor)}';`);
+    // The properties that used to be dropped on the floor.
+    if (m.textShadow) {
+      const sh = m.textShadow;
+      out.push(`it.textShadowRadius = ${sh.blur};`);
+      out.push(`it.textShadowX = ${sh.x};`);
+      out.push(`it.textShadowY = ${sh.y};`);
+      out.push(`it.textShadowColor = '${arkColor(sh.color)}';`);
+    }
+    if (m.noPointer) out.push('it.noPointer = true;');
+    if (m.noSelect) out.push('it.noSelect = true;');
+    if (m.breakWord) out.push('it.breakWord = true;');
     return out.join(' ');
   };
-  // R243: a `:hover` half becomes a synthetic class the element asks for while its
+  // A `:hover` half becomes a synthetic class the element asks for while its
   // pointer flag is set. The key mirrors the flag the emitter derives from the
   // element, so the two agree without the emitter feeding this table back.
-  // R260 FIX: the flag derives from the CLASS LIST only - the old form mixed the
+  // FIX: the flag derives from the CLASS LIST only - the old form mixed the
   // rule's own tag in, which disagreed with the element's real tag for any
   // .class:hover rule on a non-div element (the table keyed '__h_div_btn' while
   // the element looked up '__h_button_btn'), so the runtime lookup missed the
@@ -1063,7 +1139,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
     const flag = `__h_${last.classes.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
     classes.set(`__hover_${flag}`, rule.hover);
   }
-  // R260: the `:focus` half, same shape with ArkUI's onFocus/onBlur - a half
+  // The `:focus` half, same shape with ArkUI's onFocus/onBlur - a half
   // that only recolors the border borrows the base row's border width.
   for (const rule of sheet.rules) {
     if (rule.media && !arkMediaMatches(rule.media)) continue;
@@ -1075,7 +1151,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
     const adopt = rule.focus.borderColor && !rule.focus.borderWidth ? { ...rule.focus, borderWidth: (base ?? rule.model).borderWidth } : rule.focus;
     classes.set(`__focus_${flag}`, adopt);
   }
-  // R270: the `:active` half, same shape with ArkUI's onTouch Down/Up - a half
+  // The `:active` half, same shape with ArkUI's onTouch Down/Up - a half
   // that only recolors the border borrows the base row's border width.
   for (const rule of sheet.rules) {
     if (rule.media && !arkMediaMatches(rule.media)) continue;
@@ -1094,7 +1170,7 @@ function compileArkStyles(css: string, scope: string, fonts: Set<string>): { row
   return { rows, tagRows, darkRows, darkTagRows };
 }
 
-/** R470: a text node inherits its colour from the nearest classed ancestor. With
+/** A text node inherits its colour from the nearest classed ancestor. With
  *  a dark half present that colour must resolve at runtime, so the static one is
  *  dropped and the ancestor's roseModifier carries it - the closest a tree
  *  without CSS inheritance gets to the browser's cascade. */
@@ -1109,7 +1185,7 @@ function textModsFor(ctx: ArkCtx): string {
 /** The text properties a container passes down - CSS inheritance, made explicit. */
 function textCarry(m: StyleModel): StyleModel {
   const out: StyleModel = {};
-  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'textAlign', 'textTransform', 'underline', 'strike', 'nowrap', 'ellipsis'] as Array<keyof StyleModel>) {
+  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'tabularNums', 'textAlign', 'textTransform', 'underline', 'strike', 'nowrap', 'ellipsis'] as Array<keyof StyleModel>) {
     const v = m[k];
     if (v !== undefined) (out as Record<string, unknown>)[k] = v;
   }
@@ -1145,7 +1221,7 @@ function arkContainer(m: StyleModel, tag: string): { open: string; layout: strin
   return { open: `Column(${gap ? `{ ${gap.slice(2)} }` : ''})`, layout };
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], pages: Array<{ route: string; url: string }> = [], bakedAll: Record<string, unknown> = {}): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], pages: Array<{ route: string; url: string }> = [], bakedAll: Record<string, unknown> = {}, appInfo: { id: string; name: string; version: string } = { id: '', name: '', version: '' }): string {
   // Only the routes this app carries, and never a name the object literal would
   // have to escape: the table is JSON, so it is emitted as JSON.
   const baked = Object.fromEntries(Object.entries(bakedAll).filter(([route]) => pages.some((p) => p.route === route)));
@@ -1175,19 +1251,31 @@ export function roseContentGet(coll: string, slug: string): Object | null {
   const nativeImports = [
     native.includes('clipboard-read') || native.includes('clipboard-write') ? "import { pasteboard } from '@kit.BasicServicesKit';" : '',
     native.includes('camera') || native.includes('save-image') ? "import { photoAccessHelper } from '@kit.MediaLibraryKit';" : '',
+    native.includes('camera') ? "import { cameraPicker } from '@kit.CameraKit';" : '',
     native.includes('save-image') ? "import { fileIo as fs } from '@kit.CoreFileKit';" : '',
     native.includes('geolocation') ? "import { geoLocationManager } from '@kit.LocationKit';" : '',
     native.includes('share') ? "import { systemShare } from '@kit.ShareKit';\nimport { uniformTypeDescriptor as utd } from '@kit.ArkData';\nimport { common } from '@kit.AbilityKit';" : '',
     native.includes('make-phone-call') ? "import { call } from '@kit.TelephonyKit';" : '',
     native.includes('vibrate') ? "import vibrator from '@ohos.vibrator';" : '',
-    native.includes('scan-code') ? "import { scanBarcode } from '@kit.ScanKit';" : '',
+    native.includes('scan-code') || native.includes('qr-scan') ? "import { scanBarcode } from '@kit.ScanKit';" : '',
     native.includes('toast') || native.includes('modal') ? "import { promptAction } from '@kit.ArkUI';" : '',
     native.includes('get-battery') ? "import batteryInfo from '@ohos.batteryInfo';" : '',
     native.includes('get-network-type') ? "import { radio } from '@kit.TelephonyKit';" : '',
     native.includes('get-system-info') ? "import deviceInfo from '@ohos.deviceInfo';" : '',
+    native.includes('app-info') ? "import bundleManager from '@ohos.bundle.bundleManager';" : '',
+    native.includes('check-permission') || native.includes('request-permission') ? "import abilityManager from '@ohos.ability.abilityManager';" : '',
+    native.includes('keep-awake') ? "import window from '@ohos.window';" : '',
   ].filter(Boolean).join('\n');
   const nativeBranches = [
     native.includes('camera') ? `    if (capability === 'camera') {
+      // The source decides the picker: 'camera' opens the
+      // camera, 'gallery' (the default here) the photo library.
+      const source = String(options['source'] ?? 'gallery');
+      if (source === 'camera') {
+        const picker = new cameraPicker.CameraPicker();
+        const shot = await picker.pick();
+        return shot && shot.result ? shot.result[0].uri : null;
+      }
       const picker = new photoAccessHelper.PhotoViewPicker();
       const result = await picker.select({ MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: 1 });
       return result.photoUris.length > 0 ? result.photoUris[0] : null;
@@ -1254,6 +1342,13 @@ export function roseContentGet(coll: string, slug: string): Object | null {
       vibrator.startVibration({ count: 1, duration: ms }, { id: 0, usage: vibrator.EffectUsageType.UNKNOWN });
       return true;
     }` : '',
+    native.includes('keep-awake') ? `    if (capability === 'keep-awake') {
+      // setWindowKeepScreenOn is the platform's own "screen on while visible":
+      // no permission, and the system resets it when the app leaves.
+      if (!roseWindow) return false;
+      roseWindow.setWindowKeepScreenOn(options['on'] != false);
+      return true;
+    }` : '',
     native.includes('toast') ? `    if (capability === 'toast') {
       promptAction.showToast({ message: String(options['title'] ?? ''), duration: typeof options['duration'] === 'number' ? options['duration'] : 2000 });
       return true;
@@ -1266,6 +1361,26 @@ export function roseContentGet(coll: string, slug: string): Object | null {
       });
       return answer.index === 1;
     }` : '',
+    native.includes('check-permission') ? `    if (capability === 'check-permission') {
+      // The ability's own permission answer: "granted" / "denied" /
+      // "not-determined" - the JS spelling, the platform's answer.
+      const name = String(options['name'] ?? '');
+      const bundle = ${JSON.stringify(appInfo.id)};
+      const perm = await abilityManager.queryPermissionByName(bundle, name);
+      const state = perm.authStatus === 0 ? 'granted' : (perm.authStatus === 1 ? 'denied' : 'not-determined');
+      return { 'name': name, 'state': state } as Record<string, Object>;
+    }` : '',
+    native.includes('request-permission') ? `    if (capability === 'request-permission') {
+      // The one request function: the system dialog IS the request and the
+      // answer is the permission's state afterwards. A refused dialog
+      // answers 'denied' - never a crash.
+      const name = String(options['name'] ?? '');
+      const bundle = ${JSON.stringify(appInfo.id)};
+      const atManager = abilityManager.getAbilityManager();
+      const req = await atManager.requestPermissionsFromUser(bundle, [name]);
+      const state = req.authResults[0] === 0 ? 'granted' : 'denied';
+      return { 'name': name, 'state': state } as Record<string, Object>;
+    }` : '',
     native.includes('get-battery') ? `    if (capability === 'get-battery') {
       // @ohos.batteryInfo is a sync property bag - the one-call contract fits.
       return { 'level': batteryInfo.batterySOC, 'charging': batteryInfo.chargingStatus === batteryInfo.BatteryChargeState.ENABLE } as Record<string, Object>;
@@ -1277,6 +1392,32 @@ export function roseContentGet(coll: string, slug: string): Object | null {
     native.includes('get-system-info') ? `    if (capability === 'get-system-info') {
       return { 'platform': 'harmonyos', 'system': deviceInfo.marketName } as Record<string, Object>;
     }` : '',
+    native.includes('app-info') ? `    if (capability === 'app-info') {
+      // The identity the export baked into the app.json5 bundle: the page's
+      // about screen reads it, no guessing. The version rides the bake (the
+      // export wrote app.json5 from the same rosezm.app.json); the bundle
+      // manager fills the build code the store assigns.
+      let build = 0;
+      try {
+        const info = await bundleManager.getBundleInfoForSelf(0);
+        build = info.versionCode;
+      } catch (e) { build = 0; }
+      return {
+        'id': ${JSON.stringify(appInfo.id)},
+        'version': ${JSON.stringify(appInfo.version)},
+        'build': build,
+        'platform': 'harmonyos',
+        'os': deviceInfo.marketName,
+        'device': deviceInfo.productModel
+      } as Record<string, Object>;
+    }` : '',
+      native.includes('qr-scan') ? `    if (capability === 'qr-scan') {
+      // The QR-specific scan: the system scanner pinned to the QR format
+      // (a login QR never decodes a stray UPC).
+      const options: scanBarcode.ScanOptions = { scanTypes: [scanBarcode.ScanType.QR_CODE], enableMultiMode: false };
+      const result = await scanBarcode.launchScanner(options);
+      return result ? result.originalValue : null;
+    }` : '',
       native.includes('scan-code') ? `    if (capability === 'scan-code') {
       // The system scanner UI: one call, the OS renders the viewfinder and
       // returns the decoded string. No camera pipeline of our own.
@@ -1287,7 +1428,15 @@ export function roseContentGet(coll: string, slug: string): Object | null {
   ].filter(Boolean).join('\n');
   const nativeKit = native.length ? `
 ${nativeImports}
+${native.includes('keep-awake') ? `
+let roseWindow: window.Window | null = null;
 
+/** EntryAbility hands the main window over in onWindowStageCreate - the one
+ *  place a keep-awake call can reach the real window. */
+export function roseSetWindow(w: window.Window | null): void {
+  roseWindow = w;
+}
+` : ''}
 /// The device capabilities a page asked for through useNative(...). One
 /// function because each platform API is shaped its own way, needs its own
 /// permission ask, and returns its own value type.
@@ -1472,10 +1621,129 @@ export async function roseData(route: string): Promise<Record<string, Object>> {
   }
 }
 
+/// The web's fetch, in the kit's currency: a map with ok and status plus the
+/// decoded JSON body, so a page reads .ok / .json() the way it does off a
+/// Response. A missing server is ok=false, never a throw.
+export async function roseFetch(url: string, method: string = 'GET', body: string = ''): Promise<Record<string, Object>> {
+  const target = url.indexOf('http') === 0 ? url : ROSE_API_BASE + url;
+  const out: Record<string, Object> = { ok: false, status: 0 };
+  const header: Record<string, string> = {};
+  if (roseCookie.length > 0) header['cookie'] = roseCookie;
+  if (body.length > 0) header['content-type'] = 'application/x-www-form-urlencoded';
+  const client = http.createHttp();
+  try {
+    const response = await client.request(target, {
+      method: method === 'POST' ? http.RequestMethod.POST : http.RequestMethod.GET,
+      header: header,
+      extraData: body.length > 0 ? body : undefined,
+      expectDataType: http.HttpDataType.OBJECT,
+      connectTimeout: 8000,
+      readTimeout: 8000,
+    });
+    const setCookie = roseHeader(response.header, 'set-cookie');
+    if (setCookie.length > 0) roseCookie = setCookie;
+    const code = Number(response.responseCode);
+    out['ok'] = code >= 200 && code < 300;
+    out['status'] = code;
+    // The request asked for OBJECT data, so the result is already a map - no
+    // typeof here, which ArkTS does not allow.
+    const payload = response.result as Record<string, Object>;
+    if (payload !== null && payload !== undefined) {
+      Object.keys(payload).forEach((key: string) => { out[key] = payload[key]; });
+    }
+  } catch (error) {
+    // A missing server is a data-less screen, not a crash.
+  } finally {
+    client.destroy();
+  }
+  return out;
+}
+
 /// The {#await} reject branch: it always throws, so the catch arm renders.
 export function roseThrow(message: Object): Object {
   throw new Error(String(message));
 }
+
+/// The synthetic event a field's change callback hands a named page handler:
+/// the web passes the DOM event, the kit wraps the incoming text so the
+/// handler's \`e.target.value\` read finds it.
+export function roseEvent(value: Object): { target: { value: Object } } {
+  return { target: { value: value } };
+}
+
+/// A named handler's \`e.target.value\` read against the kit's synthetic event.
+export function roseEventValue(e: Object): Object {
+  return roseGet(roseGet(e, 'target'), 'value') ?? '';
+}
+
+/// The JS sleep idiom (new Promise + setTimeout) spelled once, so an async
+/// page body awaits a real delay instead of leaking a Promise constructor
+/// into page source.
+export function roseDelay(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/// The immutable path write a member-path two-way binding uses: replace the
+/// owner with a copy that carries the new value at the path - the identity
+/// changes, the @State sees the new object, the UI rebuilds.
+export function roseSetPath(owner: Object, path: string[], value: Object): Object {
+  if (path.length === 0) return value;
+  const head = path[0];
+  const rest = path.slice(1);
+  if (owner instanceof Array) {
+    const idx = parseInt(head, 10);
+    if (isNaN(idx) || idx < 0 || idx >= owner.length) return owner;
+    const next: Object[] = owner.slice();
+    next[idx] = roseSetPath(next[idx], rest, value);
+    return next;
+  }
+  if (owner instanceof Map) {
+    const next = new Map<Object, Object>(owner as Map<Object, Object>);
+    next.set(head, roseSetPath(next.get(head), rest, value));
+    return next;
+  }
+  const rec = owner as Record<string, Object>;
+  if (rec && rec instanceof Object) {
+    const next: Record<string, Object> = {};
+    const keys = Object.keys(rec);
+    for (const k of keys) next[k] = rec[k];
+    next[head] = roseSetPath(rec[head], rest, value);
+    return next;
+  }
+  return owner;
+}
+
+/// A member-path read off a row: walk the path, null on any miss.
+export function rosePathOf(owner: Object, path: string[]): Object {
+  let cur: Object = owner;
+  for (const seg of path) {
+    if (cur instanceof Array) {
+      const i = parseInt(seg, 10);
+      cur = (isNaN(i) || i < 0 || i >= cur.length) ? null : cur[i];
+    } else if (cur instanceof Map) {
+      cur = (cur as Map<Object, Object>).get(seg) ?? null;
+    } else {
+      const rec = cur as Record<string, Object>;
+      cur = (rec && rec instanceof Object) ? (rec[seg] ?? null) : null;
+    }
+    if (cur === null || cur === undefined) return null;
+  }
+  return cur;
+}
+
+/// Replace one row AT INDEX inside a copied array, applying the field through
+/// the kit's immutable path setter - the @State identity changes and the
+/// ForEach re-renders exactly that row.
+export function roseSetRow(items: Object, index: number, path: string[], value: Object): Object {
+  if (!(items instanceof Array)) return items;
+  if (index < 0 || index >= items.length) return items;
+  const next: Object[] = items.slice();
+  next[index] = roseSetPath(next[index], path, value);
+  return next;
+}
+
 export function roseBool(value: Object): boolean {
   // ArkTS has no typeof operator: a boolean is recognised by instanceof, and
   // anything else is truthy unless it is null/undefined.
@@ -1483,13 +1751,13 @@ export function roseBool(value: Object): boolean {
   return value !== null && value !== undefined;
 }
 
-/// R445: the ISO day a date input writes, from the picker's 0-based month.
+/// The ISO day a date input writes, from the picker's 0-based month.
 export function roseIsoDay(year: number, month: number, day: number): string {
   const pad = (n: number): string => (n < 10 ? '0' + n : '' + n);
   return year + '-' + pad(month + 1) + '-' + pad(day);
 }
 
-/// R445: the Date a picker opens on, from the state's ISO day (today when the
+/// The Date a picker opens on, from the state's ISO day (today when the
 /// state is still empty).
 export function roseDateOf(iso: string): Date {
   return iso.length >= 10 ? new Date(iso.substring(0, 10)) : new Date();
@@ -1511,7 +1779,7 @@ export function roseGet(container: Object | null, key: string): Object | null {
   return v === undefined ? null : v;
 }
 
-/** R284: xs[i] over an untyped list - a bounds-safe index read. */
+/** Xs[i] over an untyped list - a bounds-safe index read. */
 export function roseIndex(value: Object, index: Object): Object {
   const items = roseListOf(value);
   // ArkTS lints against typeof narrowing - Number() accepts the number case
@@ -1521,14 +1789,14 @@ export function roseIndex(value: Object, index: Object): Object {
   return items[i];
 }
 
-/** R287: xs.find(pred) - the first element the predicate accepts, else null. */
+/** Xs.find(pred) - the first element the predicate accepts, else null. */
 export function roseFind(value: Object, pred: (item: Object) => boolean): Object {
   const items = roseListOf(value);
   for (const item of items) { if (pred(item)) return item; }
   return null;
 }
 
-/** R288: xs.slice(a[, b]) - the sub-list from a to b (b omitted = to end). */
+/** Xs.slice(a[, b]) - the sub-list from a to b (b omitted = to end). */
 export function roseSlice(value: Object, from: Object, to: Object): Object {
   const items = roseListOf(value);
   const a = Math.max(0, Number(from));
@@ -1536,27 +1804,27 @@ export function roseSlice(value: Object, from: Object, to: Object): Object {
   if (a >= b) return [];
   return items.slice(a, b);
 }
-/** R287: xs.some(pred) - does any element pass. */
+/** Xs.some(pred) - does any element pass. */
 export function roseAny(value: Object, pred: (item: Object) => boolean): boolean {
   const items = roseListOf(value);
   for (const item of items) { if (pred(item)) return true; }
   return false;
 }
 
-/** R291: xs.every(pred) - does every element pass (the mirror of roseAny). */
+/** Xs.every(pred) - does every element pass (the mirror of roseAny). */
 export function roseEvery(value: Object, pred: (item: Object) => boolean): boolean {
   const items = roseListOf(value);
   for (const item of items) { if (!pred(item)) return false; }
   return true;
 }
 
-/** R291: xs.indexOf(item) - the first index, or -1. A string searches text. */
+/** Xs.indexOf(item) - the first index, or -1. A string searches text. */
 export function roseIndexOf(value: Object, item: Object): number {
   if (value instanceof String) return value.indexOf(String(item));
   return roseListOf(value).indexOf(item);
 }
 
-/** R291: s.split(sep) - the string broken into a list of its parts. An empty
+/** S.split(sep) - the string broken into a list of its parts. An empty
  *  separator is JS's character split, which String.split('') also spells. */
 export function roseSplit(value: Object, sep: string): Object[] {
   const parts = String(value).split(sep);
@@ -1565,7 +1833,7 @@ export function roseSplit(value: Object, sep: string): Object[] {
   return out;
 }
 
-/** R291: the string methods on an untyped value - the receiver is an Object,
+/** The string methods on an untyped value - the receiver is an Object,
  *  so the native String method needs the text first. */
 export function roseStartsWith(value: Object, prefix: string): boolean {
   return String(value).startsWith(prefix);
@@ -1701,10 +1969,28 @@ export interface rosezmSpan {
   bold: boolean;
   italic: boolean;
   link: boolean;
+  /** The colour the span carries: <font color="#...">, or a
+   *  style="color: ..." on <span> - a styled ::marker glyph reads as both. */
+  color?: string;
+  /** The pixel size a style="font-size: Npx" on <span> asked for. */
+  size?: number;
+  /** The numeric weight a style="font-weight: N" on <span> asked for. */
+  weight?: number;
 }
 
 /** Trusted markup renders as markup: the inline HTML subset a content
  *  page uses becomes styled spans a ForEach can render, never escaped text. */
+/** Peel surrounding quotes off an attribute value without a regex literal
+ *  (a bare quote inside /.../ reads as a string opener to a scanner). */
+function stripQuotes(v: string): string {
+  let out = "";
+  for (let i = 0; i < v.length; i++) {
+    const ch = v[i];
+    if (ch !== '"' && ch !== "'") out += ch;
+  }
+  return out.trim();
+}
+
 export function roseHtmlSpans(html: string): rosezmSpan[] {
   const entities: Record<string, string> = {
     "amp": "&", "lt": "<", "gt": ">", "quot": "\\"", "nbsp": " ",
@@ -1730,9 +2016,16 @@ export function roseHtmlSpans(html: string): rosezmSpan[] {
   let bold = false;
   let italic = false;
   let link = false;
+  let color = "";
+  let size = 0;
+  let weight = 0;
   const flush = (): void => {
     if (buffer.length === 0) return;
-    spans.push({ text: buffer, bold: bold, italic: italic, link: link });
+    const span: rosezmSpan = { text: buffer, bold: bold, italic: italic, link: link };
+    if (color) span.color = color;
+    if (size > 0) span.size = size;
+    if (weight >= 100) span.weight = weight;
+    spans.push(span);
     buffer = "";
   };
   let i = 0;
@@ -1754,6 +2047,25 @@ export function roseHtmlSpans(html: string): rosezmSpan[] {
     else if (tag === "/i" || tag === "/em") { italic = false; }
     else if (tag === "a" || tag.indexOf("a ") === 0) { link = true; }
     else if (tag === "/a") { link = false; }
+    else if (tag === "font") {
+      // A bare quote inside a regex literal reads as a string delimiter to a
+      // delimiter scanner, so the value is peeled apart by characters: split
+      // on "=" and trim the quotes off the tail.
+      const at = tag.indexOf("color=");
+      if (at >= 0) color = stripQuotes(tag.substring(at + 6).split(" ")[0]);
+    }
+    else if (tag === "/font") { color = ""; }
+    else if (tag === "span") {
+      const m = /color:\\s*([^;]*)/.exec(tag);
+      if (m) color = m[1].trim();
+      // font-size rides the same style attribute; the px tail is peeled here
+      // because the value is a string until this point.
+      const fz = /font-size:\\s*([0-9.]+)px/.exec(tag);
+      if (fz) size = Number(fz[1]);
+      const fw = /font-weight:\\s*([0-9]+)/.exec(tag);
+      if (fw) weight = Number(fw[1]) || 0;
+    }
+    else if (tag === "/span") { color = ""; size = 0; weight = 0; }
     i = gt + 1;
   }
   flush();
@@ -1763,7 +2075,7 @@ ${nativeKit}`;
 }
 
 /**
- * R256: the symbols RoseKit exports, split by import kind. The pages' import
+ * The symbols RoseKit exports, split by import kind. The pages' import
  * block is completed from this table (not a hardcoded list), so a helper the
  * kit grows is picked up on the next export instead of surfacing as TS2304.
  */
@@ -1794,14 +2106,14 @@ function kitImportLine(body: string, kitExports: { values: Set<string>; types: S
  *  import is derived from the final artifact - nothing can be forgotten. */
 const KIT_IMPORT_SLOT = '__rosezm_KIT_IMPORT__';
 
-/** R470: how many dark rows this export compiled - 0 keeps the static path. */
+/** How many dark rows this export compiled - 0 keeps the static path. */
 let arkDarkRules = 0;
-/** R476: media resource name of every copied picture, by URL. */
+/** Media resource name of every copied picture, by URL. */
 let arkMedia = new Map<string, string>();
 
-/** R479: ArkTS (TypeScript) reserved words a state must not be called. */
+/** ArkTS (TypeScript) reserved words a state must not be called. */
 const ARK_KEYWORDS = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield', 'implements', 'await', 'as']);
-/** R479: names the page struct itself declares - a state with one would collide. */
+/** Names the page struct itself declares - a state with one would collide. */
 const ARK_MEMBERS = new Set(['build', 'aboutToAppear', 'aboutToDisappear', 'loadData']);
 let arkNames = new Map<string, string>();
 
@@ -1850,7 +2162,7 @@ export const roseTagStyles: Record<string, (it: RoseModifier) => void> = {
 ${tagRows}
 };
 
-/// R470: the prefers-color-scheme dark half. roseDark comes from AppStorage,
+/// The prefers-color-scheme dark half. roseDark comes from AppStorage,
 /// which EntryAbility keeps in sync with the system configuration; the page's
 /// @StorageLink makes a flip rebuild it.
 export const roseDarkStyles: Record<string, (it: RoseModifier) => void> = {
@@ -1906,11 +2218,21 @@ export function roseModifier(tag: string, classes: string[], scope: string, prop
       if (m.margin.length) instance.margin({ top: m.margin[0], right: m.margin[1], bottom: m.margin[2], left: m.margin[3] });
       if (m.radius) instance.borderRadius(m.radius);
       if (m.borderWidth) instance.border({ width: m.borderWidth, color: m.borderColor || '#e0e0e0' });
-      // R476: the CSS background picture.
+      // The CSS background picture.
       if (m.image) {
         instance.backgroundImage(m.image, ImageRepeat.NoRepeat);
         instance.backgroundImageSize(m.imageFit === 'contain' ? ImageSize.Contain : m.imageFit === 'auto' ? ImageSize.Auto : ImageSize.Cover);
       }
+      // The shadow the glyphs cast (CSS text-shadow).
+      if (m.textShadowRadius) {
+        instance.textShadow({ radius: m.textShadowRadius, color: m.textShadowColor || '#00000040', offsetX: m.textShadowX, offsetY: m.textShadowY });
+      }
+      // pointer-events: none - the box stops taking the pointer.
+      if (m.noPointer) instance.enabled(false);
+      // user-select: none - the text stops being selectable.
+      if (m.noSelect) instance.enableTextSelection(false);
+      // word-break: break-all - a long word breaks anywhere.
+      if (m.breakWord) instance.wordBreak(WordBreak.BREAK_ALL);
     }
   };
 }
@@ -1936,6 +2258,17 @@ export class RoseModifier {
   radius: number = 0;
   borderWidth: number = 0;
   borderColor: string = '';
+  /// The shadow the glyphs cast (CSS text-shadow).
+  textShadowRadius: number = 0;
+  textShadowColor: string = '';
+  textShadowX: number = 0;
+  textShadowY: number = 0;
+  /// pointer-events: none - the box stops taking the pointer.
+  noPointer: boolean = false;
+  /// user-select: none - the text stops being selectable.
+  noSelect: boolean = false;
+  /// word-break: break-all - a long word breaks anywhere.
+  breakWord: boolean = false;
   apply(prop: string, value: string): void {
     switch (prop) {
       case 'background': case 'background-color': this.backgroundColor = value; break;
@@ -1951,25 +2284,220 @@ export class RoseModifier {
       case 'border-color': this.borderColor = value; break;
       case 'background-image': this.image = value; break;
       case 'background-image-fit': this.imageFit = value; break;
+      case 'text-shadow': {
+        // 0 1px 2px with a colour - the offsets and the blur, then the colour.
+        const nums = value.match(/-?[0-9.]+px/g) || [];
+        this.textShadowX = nums[0] ? parseFloat(nums[0]) : 0;
+        this.textShadowY = nums[1] ? parseFloat(nums[1]) : 0;
+        this.textShadowRadius = nums[2] ? parseFloat(nums[2]) : 0;
+        // The colour: a hex or an rgb run. No regex - a bracket inside a
+        // character class confuses the delimiter check the emitted files pass.
+        let color = '';
+        const hex = /#[0-9a-fA-F]{3,8}/.exec(value);
+        if (hex) color = hex[0];
+        else if (value.indexOf('rgb') >= 0) {
+          // The run runs to the first closing bracket - spelled by its code
+          // point, so the emitted file's own delimiter check stays happy.
+          const start = value.indexOf('rgb');
+          const close = String.fromCharCode(41);
+          const end = value.indexOf(close, start);
+          if (end > start) color = value.slice(start, end + 1);
+        }
+        this.textShadowColor = color;
+        break;
+      }
+      case 'pointer-events': this.noPointer = value.trim() === 'none'; break;
+      case 'user-select': this.noSelect = value.trim() === 'none'; break;
+      case 'word-break': this.breakWord = /break-all/i.test(value); break;
     }
   }
 }
 `;
 }
 
-function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, fontMap: Map<string, string>, warnings: string[], kitExports: { values: Set<string>; types: Set<string> }, globalCss: string): string {
+/**
+ * `return { ok: 'saved' }` is code on the web and an untyped object literal on
+ * ArkTS, which only accepts a literal that corresponds to a declared interface.
+ * Lift the shape into one interface per async member and type the returned
+ * promise with it, so a sibling's `await save()` reads `r.ok` as a real field.
+ */
+function arkAsyncResultType(rawScript: string, struct: string, member: string, body: string): { iface: string; decl: string } | null {
+  const literals = arkReturnedLiterals(body);
+  if (!literals.length) return null;
+  const declared = arkDeclaredFields(rawScript, member);
+  const returns = arkFnReturnTypes(rawScript);
+  const fields = new Map<string, string>();
+  for (const literal of literals) {
+    for (const part of splitArkEntries(literal)) {
+      const m = /^\s*([A-Za-z_$][\w$]*|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*:\s*([\s\S]+?)\s*$/.exec(part);
+      if (!m) continue;
+      const key = m[1].replace(/^['"]|['"]$/g, '');
+      if (!fields.has(key)) fields.set(key, declared.get(key) ?? arkLiteralType(m[2], returns));
+    }
+  }
+  if (!fields.size) return null;
+  const iface = `${struct}${member.charAt(0).toUpperCase()}${member.slice(1)}Result`;
+  const rows = [...fields].map(([key, type]) => `  ${key}: ${type};`);
+  return { iface, decl: `interface ${iface} {\n${rows.join('\n')}\n}` };
+}
+
+/** The object literals a member returns directly - a callback's return is not one. */
+function arkReturnedLiterals(body: string): string[] {
+  const out: string[] = [];
+  const frames: boolean[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      for (i++; i < body.length && body[i] !== ch; i++) if (body[i] === '\\') i++;
+      continue;
+    }
+    if (ch === '{') {
+      // A brace that opens a nested function body marks everything inside it
+      // as that function's own returns, not this member's.
+      frames.push(/(?:=>|\bfunction\b[^{};]*)$/.test(body.slice(0, i).trimEnd()));
+      continue;
+    }
+    if (ch === '}') { frames.pop(); continue; }
+    if (frames.some(Boolean) || !body.startsWith('return', i)) continue;
+    if (/[\w$]/.test(body[i - 1] ?? '') || /[\w$]/.test(body[i + 6] ?? '')) continue;
+    let j = i + 6;
+    while (j < body.length && /\s/.test(body[j])) j++;
+    if (body[j] !== '{') continue;
+    const close = matchParen(body, j);
+    if (close < 0) continue;
+    out.push(body.slice(j + 1, close));
+    i = close;
+  }
+  return out;
+}
+
+/** A `Promise<{ a: string }>` / `Promise<Shape>` annotation's field types, keyed by name. */
+function arkDeclaredFields(rawScript: string, member: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const m = new RegExp(`function\\s+${escapeRe(member)}\\s*\\(`).exec(rawScript);
+  if (!m) return out;
+  const open = m.index + m[0].length - 1;
+  const close = matchParen(rawScript, open);
+  if (close < 0) return out;
+  const head = /^\s*:\s*Promise\s*</.exec(rawScript.slice(close + 1));
+  if (!head) return out;
+  const lt = close + 1 + head[0].length - 1;
+  const gt = matchAngle(rawScript, lt);
+  if (gt < 0) return out;
+  return arkTypeFields(rawScript, rawScript.slice(lt + 1, gt).trim());
+}
+
+/** The fields of an object type written inline or named by a script interface/type. */
+function arkTypeFields(rawScript: string, type: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const inline = /^\{([\s\S]*)\}$/.exec(type);
+  const named = inline ? null : new RegExp(`(?:interface|type)\\s+${escapeRe(type)}\\s*(?:=\\s*|(?:extends\\s+[^{]+)?)\\{`).exec(rawScript);
+  const body = inline ? inline[1] : named ? rawScript.slice(named.index + named[0].length - 1) : null;
+  if (body === null) return out;
+  const close = inline ? body.length : matchParen(body, 0);
+  if (close < 0) return out;
+  for (const part of splitArkEntries(body.slice(0, close))) {
+    const fm = /^\s*([A-Za-z_$][\w$]*|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*\??\s*:\s*([\s\S]+?)\s*$/.exec(part);
+    if (!fm) continue;
+    out.set(fm[1].replace(/^['"]|['"]$/g, ''), arkFieldType(fm[2]));
+  }
+  return out;
+}
+
+/** Declared return types of a script's functions, so a literal's helper call types too. */
+function arkFnReturnTypes(rawScript: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of rawScript.matchAll(/(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const close = matchParen(rawScript, m.index + m[0].length - 1);
+    if (close < 0) continue;
+    const t = /^\s*:\s*([^;{\n]+?)\s*\{/.exec(rawScript.slice(close + 1));
+    if (!t) continue;
+    out.set(m[1], arkFieldType(t[1]));
+  }
+  return out;
+}
+
+function matchAngle(src: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      for (i++; i < src.length && src[i] !== ch; i++) if (src[i] === '\\') i++;
+      continue;
+    }
+    if (ch === '=' && src[i + 1] === '>') { i++; continue; }
+    if (ch === '<') depth++;
+    else if (ch === '>') { depth--; if (depth === 0) return i; }
+    else if (ch === '{' || ch === '(' || ch === '[') {
+      const close = matchParen(src, i);
+      if (close < 0) return -1;
+      i = close;
+    }
+  }
+  return -1;
+}
+
+/** Object literal entries / declared field list split on the top-level separators. */
+function splitArkEntries(src: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if ((ch === ',' || ch === ';') && depth === 0) { out.push(src.slice(start, i)); start = i + 1; }
+  }
+  out.push(src.slice(start));
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+function arkFieldType(type: string): string {
+  const t = type.trim();
+  if (/^(?:string|number|boolean|Object)$/.test(t)) return t;
+  const generic = /^(?:Array|ReadonlyArray)\s*<([\s\S]+)>$/.exec(t);
+  if (generic) return `Array<${arkFieldType(generic[1])}>`;
+  if (t.endsWith('[]')) return `Array<${arkFieldType(t.slice(0, -2))}>`;
+  const record = /^Record\s*<[^,]+,\s*([\s\S]+)>$/.exec(t);
+  if (record) return `Record<string, ${arkFieldType(record[1])}>`;
+  return 'Object';
+}
+
+function arkLiteralType(expr: string, known: Map<string, string> = new Map()): string {
+  const e = expr.trim();
+  if (/^['"`]/.test(e)) return 'string';
+  if (/^-?\d+(?:\.\d+)?$/.test(e)) return 'number';
+  if (e === 'true' || e === 'false') return 'boolean';
+  const call = /^(?:this\.)?([A-Za-z_$][\w$]*)\(\s*\)$/.exec(e);
+  if (call && known.has(call[1])) return known.get(call[1]) as string;
+  return 'Object';
+}
+
+function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, fontMap: Map<string, string>, warnings: string[], kitExports: { values: Set<string>; types: Set<string> }, globalCss: string, components: Array<{ name: string; struct: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = []): string {
   const propNames = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
   const pip = arkSheetPipeline([globalCss, comp.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
   const sheet = parseStylesheet(pip.css);
   for (const w of sheet.warnings) warnings.push(`arkts: component ${comp.name}: ${w}`);
+  // The template emits before the function scan below runs, so the component's
+  // own function names are collected here for the bare `on:input={fn}` branch.
+  const compFnNames = new Set<string>([...(comp.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
+  const compActionName = (() => { try { return extractExports(comp.script ?? '').actions[0]?.name ?? null; } catch { return null; } })();
   const ctx: ArkCtx = {
     warnings,
     file: comp.name,
-    forms: [],
-    pageAction: null,
+    forms: collectForms(comp.nodes),
+    pageAction: compActionName,
     stateNames: new Set(propNames),
+    fnNames: compFnNames,
     mapBinds: new Set(),
-    components: [],
+    components: components,
     lines: [],
     depth: 1,
     media: new Map(),
@@ -1982,6 +2510,7 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     loopVars: new Set(),
     slotBuilders: [],
     awaits: [],
+    component: true,
     deferred: [],
     hoverStates: [],
     detailsStates: [],
@@ -1994,6 +2523,14 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     structural: pip.structural,
     scope: comp.struct,
   };
+  // The component's own $state becomes @State fields, the same way a page's
+  // does; the names join stateNames so the template's reads resolve to them.
+  const compScript = comp.script ?? '';
+  const ownFacts = scanState(compScript);
+  for (const s of ownFacts.state) ctx.stateNames.add(s.name);
+  // The derived names join stateNames too: the template's bare reads spell
+  // this.<name> through the same etsExpr path, and the getter below answers.
+  for (const d of ownFacts.derived) ctx.stateNames.add(d.name);
   emitNodes(comp.nodes, ctx);
   const propDefaults = new Map([...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^;\n]+)/g)].map((m) => [m[1], m[2].trim()]));
   let fields = propNames.map((p) => `  @Prop ${p}: Object = ${propDefaults.has(p) ? tsLiteral(propDefaults.get(p) as string) : "''"};`).join('\n');
@@ -2009,36 +2546,236 @@ function renderComponent(comp: { name: string; struct: string; nodes: IrNode[]; 
     fields += '\n  @Prop __roseScope: Record<string, Object> = {};';
   }
   const body = ctx.lines.join('\n');
-  // R457: a component's own flags (hover halves, <details> folds) need @State
+  // A component struct is a real instance on this target, so the page
+  // lifecycle machinery applies verbatim: onMount bodies run once in
+  // aboutToAppear, onCleanup bodies join the __disposeN chain aboutToDisappear
+  // calls. The component's own $state is declared as @State fields below, so
+  // the bodies read and write them through this.<name>.
+  const mountCut = cutLifecycleCalls(compScript, 'onMount');
+  const cleanCut = cutLifecycleCalls(mountCut.code, 'onCleanup');
+  // The component's script functions become struct members, the same loop a
+  // page runs over its script: the template's on:click={fn} handlers emit
+  // this.fn() calls that only compile when the member exists. The scan runs on
+  // the esbuild-normalized script - the raw block is indented, so a
+  // line-anchored `^function` match never fires on it.
+  const compFns = new Map<string, { ok: boolean }>();
+  const compFnState = [...propNames, ...ownFacts.state.map((s) => s.name), ...ownFacts.derived.map((d) => d.name), ...ownFacts.data];
+  let compFnMethods: string[] = [];
+  const resultIfaces: string[] = [];
+  {
+    let fnCode = cleanCut.code.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
+    try {
+      fnCode = transformSync(fnCode, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+    } catch {
+      warnings.push(`arkts: component ${comp.name}: the script did not parse as TypeScript - its functions are scanned from the raw block`);
+    }
+    for (const name of [...ownFacts.state.map((s) => s.name), ...ownFacts.derived.map((d) => d.name), ...ownFacts.data]) {
+      const re = new RegExp(`\\b(?:let|const|var)\\s+${escapeRe(name)}\\s*(?::[^=;\\n]*)?=\\s*\\$(?:state|derived|data|persist|kv)\\b(?:<[^>]*>)?\\s*\\(`);
+      const m = re.exec(fnCode);
+      if (!m) continue;
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(fnCode, open);
+      if (close < 0) continue;
+      fnCode = fnCode.slice(0, m.index) + fnCode.slice(close + 1).replace(/^;/, '');
+    }
+    fnCode = fnCode
+      .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
+      .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+    for (const m of fnCode.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)) compFnNames.add(m[1]);
+    const compActionList = (() => {
+      try { return extractExports(compScript).actions.map((a) => a.name); } catch { return []; }
+    })();
+    for (const m of fnCode.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
+      const name = m[1];
+      if (name.startsWith('__')) continue;
+      if (compActionList.includes(name)) {
+        // A server action's body is server-only code (it reads FormData and
+        // module state the client does not carry): the twin POSTs through the
+        // kit's roseAction and seeds this struct's @State fields from the
+        // patch - the page-level twin's shape. The route rides the host
+        // page's, which the call site passes to the 'route' prop.
+        const apply = compFnState.filter((st) => ownFacts.state.some((s) => s.name === st))
+          .map((st) => `    if (patch['${arName(st)}'] !== undefined) this.${arName(st)} = patch['${arName(st)}'];`).join('\n');
+        compFns.set(name, { ok: true });
+        // Every form field posts: its value lives in the @State the bound
+        // TextInput writes, so the action's form.get reads it.
+        const fieldPayload = collectForms(comp.nodes).flatMap((f) => f.fields)
+          .map((fl) => `'${fl}': this.${arName(fl)}`).join(', ');
+        const fieldsArg = fieldPayload ? `, { ${fieldPayload} }` : '';
+        compFnMethods.push(`  async ${name}(): Promise<Record<string, Object>> {
+    const patch = await roseAction(route, '${name}'${fieldsArg});
+    if (!patch) return patch;
+${apply}
+    return patch;
+  }`);
+        continue;
+      }
+      const open = m.index + m[0].length - 1;
+      const close = matchParen(fnCode, open);
+      if (close < 0) continue;
+      const isAsync = m[0].includes('async');
+      let fnBody = translateBody(fnCode.slice(open + 1, close), comp.name, compFnState, warnings, [], isAsync, compFnNames, name);
+      // A sibling component function is a member: the call needs `this.` - for
+      // the sync members too, where translateBody's async-only pass never runs.
+      // A function-typed prop is a field the same way, so its calls resolve
+      // through the receiver too (`onLike(n)` -> `this.onLike(n)`).
+      for (const fn of compFnNames) fnBody = fnBody.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+      for (const p of propNames) if (!compFnNames.has(p)) fnBody = fnBody.replace(new RegExp(`(?<![\\w$.])${escapeRe(p)}\\s*\\(`, 'g'), `this.${p}(`);
+      // A bare read of a prop or the component's own state must reach the field
+      // (`this.count`): a method body has no bare identifier in scope, the way
+      // the template's reads already resolve through this.<name>.
+      fnBody = arRename(callifyBareReads(fnBody, (n) => compFnState.includes(n), (n) => `this.${arName(n)}`));
+      compFns.set(name, { ok: !/is a stub/.test(fnBody) });
+      const params = m[2].split(',').map((p) => p.trim()).filter(Boolean).map((p) => {
+        const [rawName, rawType] = p.split(':').map((x) => x.trim());
+        const type = rawType && /^(string|number|boolean|Object|Record)/.test(rawType) ? rawType : 'Object';
+        return `${rawName}: ${type}`;
+      }).join(', ');
+      const returnsValue = /(^|[^$\w])return\b(?!\s*(?:;|\}|$))[^\n;]*[^\s;{)]/.test(fnBody);
+      const returnsBare = /(^|[^$\w])return\s*(;|\}|$)/.test(fnBody);
+      // An async member returning an object literal needs a declared type for
+      // that literal; without one ArkTS refuses the return outright.
+      const result = isAsync ? arkAsyncResultType(compScript, comp.struct, name, fnBody) : null;
+      if (result) resultIfaces.push(arRename(result.decl));
+      const sig = isAsync
+        ? result
+          ? `async ${name}(${params}): Promise<${result.iface}>`
+          : `async ${name}(${params})${returnsValue ? '' : ': Promise<void>'}`
+        : `${name}(${params})${returnsValue || returnsBare ? '' : ': void'}`;
+      // The kit's synthetic event, the same rewrite the page functions get:
+      // `e` here is a plain Object, with no DOM event behind it.
+      compFnMethods.push(`  ${sig} {\n${fnBody.replace(/\be\.target\.value\b/g, 'roseEventValue(e)')}\n  }`);
+    }
+    compFnMethods = compFnMethods.map((mth) => arRename(mth));
+  }
+  const ownStateFields = ownFacts.state.map((s) => {
+    const init = initialOf(compScript, s.name);
+    return `  @State ${arName(s.name)}: ${kotlinType(init)} = ${tsLiteral(init)};`;
+  });
+  const lifecycleState = [...propNames, ...ownFacts.state.map((s) => s.name), ...ownFacts.derived.map((d) => d.name), ...ownFacts.data];
+  const lifecycleFns = compFnNames;
+  const lifecycleMethods: string[] = [];
+  const mountCalls: string[] = [];
+  const disposes: string[] = [];
+  const mountLocals = new Set<string>();
+  const readLifecycleBody = (b: { body: string; isAsync: boolean; arg: string; read: boolean }, kind: string): string | null => {
+    if (!b.read) {
+      warnings.push(`arkts: component ${comp.name}: an ${kind} callback this exporter cannot read is skipped (${b.arg.slice(0, 40)})`);
+      return null;
+    }
+    if (!b.body.trim()) return null;
+    const dangling = [...mountLocals].filter((n) => new RegExp(`\\b${escapeRe(n)}\\b`).test(b.body));
+    if (dangling.length) {
+      warnings.push(`arkts: component ${comp.name}: an ${kind} body reads ${dangling.join(', ')} - a local an onMount body declared, with no shared scope on this target - it is dropped`);
+      return null;
+    }
+    return b.body;
+  };
+  const translateLifecycle = (src: string, name: string, isAsync: boolean): string => {
+    let out = translateBody(rewriteGlobalThis(src), comp.name, lifecycleState, warnings, [], isAsync, lifecycleFns, name);
+    for (const fn of lifecycleFns) out = out.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+    return arRename(out);
+  };
+  for (const m of mountCut.bodies) {
+    // `onMount(bump)` - a bare function reference - is callable now that the
+    // component's own functions are members; the unread-callback refusal below
+    // only stays for shapes the emission cannot close.
+    if (!m.read && lifecycleFns.has(m.arg.trim())) {
+      mountCalls.push(`this.${arName(m.arg.trim())}();`);
+      continue;
+    }
+    const bodySrc = readLifecycleBody(m, m.isAsync ? 'async onMount' : 'onMount');
+    if (bodySrc === null) continue;
+    const name = `__mount${mountCalls.length}`;
+    lifecycleMethods.push(`  private ${m.isAsync ? 'async ' : ''}${name}(): ${m.isAsync ? 'Promise<void>' : 'void'} {\n${translateLifecycle(bodySrc, name, m.isAsync)}\n  }`);
+    mountCalls.push(`this.${name}();`);
+    for (const lm of bodySrc.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)/g)) mountLocals.add(lm[1]);
+  }
+  for (const c of cleanCut.bodies) {
+    if (!c.read && lifecycleFns.has(c.arg.trim())) {
+      disposes.push(arName(c.arg.trim()));
+      continue;
+    }
+    const bodySrc = readLifecycleBody(c, c.isAsync ? 'async onCleanup' : 'onCleanup');
+    if (bodySrc === null) continue;
+    const disposeName = `__dispose${disposes.length}`;
+    lifecycleMethods.push(`  private ${c.isAsync ? 'async ' : ''}${disposeName}(): ${c.isAsync ? 'Promise<void>' : 'void'} {\n${translateLifecycle(bodySrc, disposeName, c.isAsync)}\n  }`);
+    disposes.push(disposeName);
+  }
+  // The {#await} settle wave: the component now has its own functions AND its
+  // own aboutToAppear, so the head's promise kicks off there and the settle
+  // state actually flips - the same machinery a page struct carries.
+  const awaitRunners = ctx.awaits.map((a, i) => {
+    const fn = a.call ? compFns.get(a.call.name) : undefined;
+    let settle: string;
+    if (a.literal) {
+      settle = `      this.${a.value} = ${a.expr};`;
+    } else if (a.call && fn && fn.ok) {
+      const args = a.call.args.trim() ? splitArgs(a.call.args).map((s) => etsExpr(s.trim(), ctx)).join(', ') : '';
+      settle = `      this.${a.value} = await this.${arName(a.call.name)}(${args});`;
+    } else if (a.call) {
+      const why = fn
+        ? `${a.call.name}() is a function whose body does not translate to ArkTS`
+        : `${a.call.name}() is not a function this target translated`;
+      settle = `      this.${a.err} = 'rosezm: the {#await} head cannot run here - ${why}';`;
+      warnings.push(`arkts: component ${comp.name}: the {#await} head is a promise this target cannot await - ${why} - the block renders the catch branch`);
+    } else {
+      settle = `      this.${a.value} = await (${a.expr});`;
+    }
+    return `  private async __runAwait${i}(): Promise<void> {
+    try {
+${settle}
+      this.${a.done} = true;
+    } catch (e) {
+      this.${a.err} = (e as Error)?.message ?? String(e);
+      this.${a.done} = true;
+    }
+  }`;
+  });
+  lifecycleMethods.push(...awaitRunners);
+  const awaitKicks = ctx.awaits.map((_, i) => `    this.__runAwait${i}();`);
+  const mountHook = mountCalls.length || awaitKicks.length ? `\n\n  aboutToAppear(): void {\n${[...awaitKicks, ...mountCalls.map((c) => `    ${c}`)].join('\n')}\n  }` : '';
+  const disposeHook = disposes.length ? `\n\n  aboutToDisappear(): void {\n${disposes.map((n) => `    this.${n}();`).join('\n')}\n  }` : '';
+  const lifecycleDefs = lifecycleMethods.length ? '\n\n' + lifecycleMethods.join('\n\n') : '';
+  // A component's own flags (hover halves, <details> folds) need @State
   // declarations here too - the page template declares them, the component
   // template did not, so those reads were undeclared names at compile time.
   const componentStates = [
+    ...ownStateFields,
+    // The component's own $derived is a getter over the struct - the same
+    // spelling a page's derived field carries - so the template and the
+    // lifecycle bodies read a real member instead of a bare identifier.
+    ...ownFacts.derived.map((d) => `  get ${arName(d.name)}(): ${kTypeOfExpr(d.expr)} { return ${etsExpr(d.expr, ctx)}; }`),
     ...ctx.hoverStates.map((h) => `  @State ${h.name}: boolean = false;`),
     ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
-  ].join('\n');
+    ...ctx.awaits.map((a) => `  @State ${a.done}: boolean = false;\n  @State ${a.value}: Object | null = null;\n  @State ${a.err}: string | null = null;`),
+  ].filter(Boolean).join('\n');
   // Inline handlers register into ctx.inlineBodies (see registerInlineHandler);
   // the page path splices them into its struct, and the component path must do
   // the same; dropping them leaves the template calling a method that does not
-  // exist. R124: no component of the demo has one, so this stays latent-until-now.
+  // exist. no component of the demo has one, so this stays latent-until-now.
   const inlineDefs = ctx.inlineBodies.length ? '\n\n' + ctx.inlineBodies.join('\n\n') : '';
-  // R256: the import names the kit helpers and types the component's emitted
+  // The import names the kit helpers and types the component's emitted
   // body (template, handlers, script) actually references - scanned from the
   // artifact itself, so the fixed header can never fall behind again.
-  const kitImports = kitImportLine(`${body}\n${(comp.script ?? '').replace(/^\s*import\s[^;]*;?\s*$/gm, '')}\n${ctx.inlineBodies.join('\n')}`, kitExports);
+  const kitImports = kitImportLine(`${body}\n${(comp.script ?? '').replace(/^\s*import\s[^;]*;?\s*$/gm, '')}\n${ctx.inlineBodies.join('\n')}\n${compFnMethods.join('\n')}`, kitExports);
+  const fnDefs = compFnMethods.length ? '\n\n' + compFnMethods.join('\n\n') : '';
   return `${kitImports ? kitImports + '\n' : ''}import router from '@ohos.router';
-
+${resultIfaces.length ? '\n' + resultIfaces.join('\n\n') + '\n' : ''}
 @Component
 export struct ${comp.struct} {
+  // The host page's route: a component-owned action posts to it.
+  route: string = ''
 ${fields}${componentStates ? '\n' + componentStates : ''}
 
   build() {
     ${wrapPage(body, ctx)}
-  }${inlineDefs}
+  }${inlineDefs}${fnDefs}${mountHook}${disposeHook}${lifecycleDefs}
 }
 `;
 }
 
-function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[]): string {
+function renderReadme(apiBase: string, pageCount: number, compCount: number, warnings: string[], webview = false): string {
   return `# rosezm -> HarmonyOS ArkTS
 
 Generated by \`rosezm export arkts\` from the project's \`.rose\` pages.
@@ -2050,6 +2787,10 @@ Generated by \`rosezm export arkts\` from the project's \`.rose\` pages.
   exist on HarmonyOS 4.x.
 - Server: \`rosezm export arkts --api <base>\` writes the base URL into
   \`entry/src/main/ets/kit/RoseKit.ets\`. Current: \`${apiBase || '(unset)'}\`
+- Dynamic routes render the baked first frame and then read their data
+  channel; \`--static-routes\` bakes every static route into rawfile, and
+  \`--webview\` ships the web build behind a Web component in
+  \`entry/src/main/resources/rawfile/web\` (${webview ? 'included in this export' : 'not included in this export'}).
 
 ArkTS is TypeScript, so the page expressions are translated almost verbatim;
 only the UI vocabulary (Column/Text/Button/ForEach) and the decorators differ.
@@ -2067,9 +2808,33 @@ function renderBuildProfile(): string {
   }, null, 2) + '\n';
 }
 
+/// The hybrid mode's host page: a Web component over the bundled web build.
+function renderWebHome(): string {
+  return `import { webview } from '@kit.ArkWeb';
+
+@Entry
+@Component
+struct WebHome {
+  controller: webview.WebviewController = new webview.WebviewController();
+  build() {
+    Column() {
+      Web({ src: $rawfile('web/index.html'), controller: this.controller })
+        .width('100%')
+        .height('100%')
+        .javaScriptAccess(true)
+        .domStorageAccess(true)
+    }
+    .width('100%')
+    .height('100%')
+  }
+}
+`;
+}
+
 function renderAbility(
   scheme: string,
   appArkts: { launch: string | null; show: string | null; hide: string | null; global: string | null } = { launch: null, show: null, hide: null, global: null },
+  keepAwake = false,
 ): string {
   const seedGlobal = appArkts.global
     ? `    AppStorage.setOrCreate('rosezmAppGlobal', JSON.parse(${JSON.stringify(appArkts.global)}) as Record<string, Object>);`
@@ -2086,12 +2851,13 @@ import type Want from '@ohos.app.ability.Want';
 import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import type Configuration from '@ohos.app.ability.Configuration';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
+${keepAwake ? "import { roseSetWindow } from '../kit/RoseKit';" : ''}
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(0x0000, 'rosezm', 'EntryAbility onCreate');
 ${seedGlobal}
-    // R470: seed the appearance the pages' dark tables read, before any page
+    // Seed the appearance the pages' dark tables read, before any page
     // builds. A later system flip arrives through onConfigurationUpdate.
     AppStorage.setOrCreate('rosezmDark', this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
 ${launchBody}
@@ -2108,7 +2874,7 @@ ${launchBody}
     }` : '// no scheme declared - no deep links'}
   }
 
-  // R470: the system appearance, kept where every page's dark tables read it.
+  // The system appearance, kept where every page's dark tables read it.
   onConfigurationUpdate(newConfig: Configuration): void {
     AppStorage.setOrCreate('rosezmDark', newConfig.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
   }
@@ -2119,7 +2885,10 @@ ${launchBody}
         hilog.error(0x0000, 'rosezm', 'loadContent failed: %{public}s', JSON.stringify(err));
       }
     });
-  }
+${keepAwake ? `    // keep-awake: the kit's roseNative('keep-awake') flips the window flag
+    // through this handle - the one place the real window is reachable.
+    roseSetWindow(windowStage.getMainWindowSync());
+` : ''}  }
 
   onForeground(): void {
 ${indented(appArkts.show)}
@@ -2142,10 +2911,16 @@ interface ArkCtx {
   stateNames: Set<string>;
   /** `$data` field names: their member reads are JSON map reads (see etsExpr). */
   dataNames?: Set<string>;
+  /** Page/script function names: a bare `on:input={onInput}` names a member call, not a value. */
+  fnNames?: Set<string>;
   mapBinds: Set<string>;
   components: Array<{ name: string; struct: string; nodes: IrNode[]; script: string | null; style?: string; slots: SlotUsage }>;
   /** Visible {#each} bindings, so a slot builder inside a loop keeps its scope. */
   loopVars: Set<string>;
+  /** {#each} item variable -> the $state root its items expression names, when
+   *  the source is a plain state read. A row-field two-way binding
+   *  (`bind:checked={item.done}`) writes back through it. */
+  eachRoots?: Map<string, string>;
   /** @Builder methods collected at component call sites for the page struct. */
   slotBuilders: Array<{ name: string; lines: string[] }>;
   lines: string[];
@@ -2155,6 +2930,13 @@ interface ArkCtx {
   sheet: StyleSheet;
   /** The element chain, nearest last - a descendant selector needs it. */
   ancestors: StyleSubject[];
+  /** A counting marker the <ol> emitter installs around its children: an <li>
+   *  inside reads and increments it, so its marker is "1. ", "2. ", ... */
+  olCounter?: { n: number };
+  /** The "N. " string an <ol>-installed counter handed this <li>. */
+  olMarker?: string;
+  /** The bullet (or the ordered number) this <li> prefixes its text with. */
+  liMarker?: string;
   /** Text properties inherited from the ancestors (CSS inheritance, explicit). */
   inherited: StyleModel;
   /** Families registered with font.registerFont - the only ones .fontFamily can resolve. */
@@ -2166,7 +2948,9 @@ interface ArkCtx {
   /** The page's merged script: type inference for each-loops reads it. */
   script: string;
   /** {#await} blocks registered for the page's aboutToAppear kick-off. */
-  awaits: Array<{ done: string; value: string; err: string; expr: string }>;
+  awaits: Array<{ done: string; value: string; err: string; expr: string; call: { name: string; args: string } | null; literal: boolean }>;
+  /** Inside a component: {#await} has no runner here, so the head is named. */
+  component?: boolean;
   /** Script-level consts the {#await} heads may reference. */
   scriptConsts: Map<string, string>;
   /** Inside a component: its declared props, whose edits ride the change callbacks. */
@@ -2174,11 +2958,13 @@ interface ArkCtx {
   /** The forms this page declares and the page's exported action. */
   forms: FormInfo[];
   pageAction: string | null;
-  /** R124: `{#defer}` flags - each starts false and its hold flips it true. */
+  /** The host page's route, which a component-owned action posts to. */
+  pageRoute?: string;
+  /** `{#defer}` flags - each starts false and its hold flips it true. */
   deferred: Array<{ name: string; hold: number }>;
-  /** R243: one @State flag per element that has a `:hover` rule. */
+  /** One @State flag per element that has a `:hover` rule. */
   hoverStates: Array<{ name: string; mods: string[] }>;
-  /** R452: one @State flag per <details>, seeded by its `open` attribute. */
+  /** One @State flag per <details>, seeded by its `open` attribute. */
   detailsStates: Array<{ name: string; open: boolean }>;
   /** Inline handlers registered for this page: code -> generated method name. */
   inline: Map<string, string>;
@@ -2210,6 +2996,11 @@ function renderPage(
   globalCss: string,
 ): string {
   const facts = scanState(page.script);
+  // A `$setState('k', …)` key with no `$state` still needs an @State field to assign.
+  for (const m of (page.script ?? '').matchAll(/\$setState\s*\(\s*['"]([A-Za-z_$][\w$]*)['"]/g)) {
+    if (facts.state.some((s) => s.name === m[1]) || facts.derived.some((d) => d.name === m[1]) || facts.data.includes(m[1])) continue;
+    facts.state.push({ name: m[1], init: 'null' });
+  }
   const serverGlobals = serverOnlyGlobals(page.script ?? '');
   for (const g of serverGlobals) warnings.push(content
     ? `arkts: ${g} reads the content collections, baked into the kit at export time`
@@ -2238,12 +3029,15 @@ function renderPage(
   const pip = arkSheetPipeline([globalCss, page.style, SHELL_STYLES].filter((s) => s && s.trim()).join('\n'));
   const sheet = parseStylesheet(pip.css);
   for (const w of sheet.warnings) warnings.push(`arkts: ${w}`);
-  // R257: the page root IS the body. SHELL_STYLES feeds this sheet, but no
+  // The page root IS the body. SHELL_STYLES feeds this sheet, but no
   // .rose node is ever `body`, so the shell's `body { padding: ... }` matched
   // nothing and every page rendered edge to edge; resolve the body rule once
   // here and paint it on the page root (python/dotnet seed the same rule).
   const bodyModel = cascadeFor(sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model;
-  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], detailsStates: [], extras: pip.extras, structural: pip.structural, scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
+  // A bare `on:input={onInput}` must call the page function, so the names are
+  // known before the template emits (the reference fix in dart.ts).
+  const pageFnNames = new Set<string>([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]));
+  const ctx: ArkCtx = { warnings, file: page.file, stateNames, dataNames: new Set(facts.data), fnNames: pageFnNames, mapBinds: new Set(binds.map((b) => b.name)), components, lines: [], depth: 1, media, sheet, ancestors: [], inherited: textCarry(bodyModel), fonts: new Set(fontMap.keys()), script: page.script, loopVars: new Set(), slotBuilders: [], awaits: [], deferred: [], hoverStates: [], detailsStates: [], extras: pip.extras, structural: pip.structural, scope: page.struct, scriptConsts: scriptConstsFor(page.script, new Set([...facts.state.map((x) => x.name), ...facts.derived.map((x) => x.name), ...facts.data])), componentProps: new Set(), forms: collectForms(page.nodes), pageAction: pageAction, pageRoute: page.route, vectors, vectorRenderers: [], inline: new Map(), inlineBodies: [] };
   emitNodes(page.nodes, ctx);
   const body = ctx.lines.join('\n');
   const knownBinds = new Set(binds.map((b) => b.name));
@@ -2255,13 +3049,15 @@ function renderPage(
       // optional single entry, so `posts[0]` and `post?.x` both compile.
       if (b.init.startsWith('roseContentList(')) return `  readonly ${b.name}: Object[] = ${b.init};`;
       if (b.init.startsWith('roseContentGet(')) return `  readonly ${b.name}: Object | null = ${b.init};`;
-      return `  readonly ${b.name}: ${kotlinType(b.init)} = ${tsLiteral(b.init)};`;
+      // A map bind is the module store - a handler writes its entries - so it
+      // is not readonly: ArkTS refuses a write through a readonly property.
+      return `  ${b.name}: ${kotlinType(b.init)} = ${tsLiteral(b.init)};`;
     })
     .join('\n');
   const persist = persistKeys(page.script ?? '');
   // A declared face is registered once, before the first build, so the
   // `.fontFamily(name)` modifiers this page emits resolve to it.
-  // R462: onPullDownRefresh is already a server action method; HarmonyOS's own
+  // OnPullDownRefresh is already a server action method; HarmonyOS's own
   // Refresh container is the gesture, `$$` two-way binding drives its spinner.
   const pull = /(?:export\s+)?(?:async\s+)?function\s+onPullDownRefresh\s*\(/.test(page.script ?? '');
   const fontRegisters = fontMap.size
@@ -2277,9 +3073,12 @@ function renderPage(
     }),
     ...facts.derived.map((d) => `  get ${arName(d.name)}(): ${kTypeOfExpr(d.expr)} { return ${etsExpr(d.expr, ctx)}; }`),
     ...facts.data.map((d) => `  @State ${arName(d)}: Object | null = null;`),
-    // R124: a `{#defer}` flag is @State, so it re-renders the block it guards.
+    // {#await} settle state: the runner flips these in aboutToAppear, and the
+    // branches read them from build().
+    ...ctx.awaits.map((a) => `  @State ${a.done}: boolean = false;\n  @State ${a.value}: Object | null = null;\n  @State ${a.err}: string | null = null;`),
+    // A `{#defer}` flag is @State, so it re-renders the block it guards.
     ...ctx.deferred.map((d) => `  @State ${d.name}: boolean = false;`),
-    // R243: a `:hover` rule becomes a flag + the hover model's own modifiers.
+    // A `:hover` rule becomes a flag + the hover model's own modifiers.
     ...ctx.hoverStates.map((h) => `  @State ${h.name}: boolean = false;`),
     ...ctx.detailsStates.map((d) => `  @State ${d.name}: boolean = ${d.open};`),
     ...(pull ? ['  @State __refreshing: boolean = false;'] : []),
@@ -2318,11 +3117,40 @@ function renderPage(
   const formFieldsHelper = formFields.length
     ? '\n  private __formFields(): Record<string, Object> {\n    return { ' + formFields.map((f) => `'${f}': this.${f}`).join(', ') + ' };\n  }'
     : '';
-  const handlers = [translateHandlers(page.script, facts, page, warnings, formFields, binds.map((b) => b.name)), ...ctx.inlineBodies].filter(Boolean).join('\n\n');
+  const translated = translateHandlers(page.script, facts, page, warnings, formFields, binds.map((b) => b.name));
+  const handlers = [translated.methods, ...ctx.inlineBodies].filter(Boolean).join('\n\n');
+  // An effect writes @State from inside build, so the pass must not start
+  // another one: the flag stops a write from re-entering the build.
+  const effectCalls = translated.effects;
+  const effectRunner = effectCalls.length
+    ? `
+
+  private __effecting: boolean = false;
+
+  private __runEffects(): void {
+    if (this.__effecting) return;
+    this.__effecting = true;
+    try {
+${effectCalls.map((c) => `      ${c}`).join('\n')}
+    } finally {
+      this.__effecting = false;
+    }
+  }`
+    : '';
+  const effectHead = effectCalls.length ? '    this.__runEffects();\n' : '';
+  // The cleanups' disposal moment: aboutToDisappear is the pair of
+  // aboutToAppear, and the struct calls every __disposeN there.
+  const disposeHook = translated.disposes.length
+    ? `
+
+  aboutToDisappear(): void {
+${translated.disposes.map((n) => `    this.${n}();`).join('\n')}
+  }`
+    : '';
   // A $derived field is a getter (see stateFields above), so there is nothing to
   // initialize: the value is computed on every read from the state it closes over.
   const imports = [...new Set(components.map((c) => `import { ${c.struct} } from '../components/${c.struct}';`))].join('\n');
-  // R256: routeInit's `@State params` collided with the page's `export const
+  // RouteInit's `@State params` collided with the page's `export const
   // params` bind (both declared: TS2300), and a page that only READS the launch
   // parameters ($query().q with no [param] segment - search.rose, await-demo)
   // emitted neither, while its state initializer spelled this.params['q']:
@@ -2360,7 +3188,7 @@ ${fontMap.size ? "import { font } from '@kit.ArkUI';" : ''}${imports}
 struct ${page.struct} {
 ${routeInit}
 ${bindFieldsOut}
-  // R470: a theme flip republishes this link, which rebuilds the page; every
+  // A theme flip republishes this link, which rebuilds the page; every
   // roseResolve below then reads the dark tables.
   @StorageLink('rosezmDark') rosezmDark: boolean = false;
 ${stateFields}
@@ -2382,22 +3210,43 @@ ${persistSeeds}${deepLinkHook}
 ${ctx.awaits.map((a, i) => `    this.__runAwait${i}();`).join('\n')}
 ${ctx.deferred.map((d) => `    setTimeout(() => { this.${d.name} = true; }, ${d.hold});`).join('\n')}
 ${kvSeedLines}
+${translated.mountCalls.map((c) => `    ${c}`).join('\n')}
   }
-${ctx.awaits.map((a, i) => `
+${ctx.awaits.map((a, i) => {
+  const fn = a.call ? translated.fns.get(a.call.name) : undefined;
+  let settle: string;
+  if (a.literal) {
+    settle = `      this.${a.value} = ${a.expr};`;
+  } else if (a.call && fn && fn.ok) {
+    const args = a.call.args.trim() ? splitArgs(a.call.args).map((s) => etsExpr(s.trim(), ctx)).join(', ') : '';
+    settle = `      this.${a.value} = await this.${arName(a.call.name)}(${args});`;
+  } else if (a.call) {
+    const why = fn?.action
+      ? `${a.call.name}() is a server action - its body stays on the server, so a native build has no value to resolve`
+      : fn
+        ? `${a.call.name}() is a function whose body does not translate to ArkTS`
+        : `${a.call.name}() is not a function this target translated`;
+    settle = `      this.${a.err} = 'rosezm: the {#await} head cannot run here - ${why}';`;
+    warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - ${why} - the block renders the catch branch`);
+  } else {
+    settle = `      this.${a.value} = await (${a.expr});`;
+  }
+  return `
   private async __runAwait${i}(): Promise<void> {
     try {
-      this.${a.value} = ${a.expr};
+${settle}
       this.${a.done} = true;
     } catch (e) {
       this.${a.err} = (e as Error)?.message ?? String(e);
       this.${a.done} = true;
     }
-  }`).join('')}
+  }`;
+}).join('')}
 
-${handlers}
+${handlers}${effectRunner}${disposeHook}
 
   build() {
-    ${pull ? `Refresh({ refreshing: $$this.__refreshing }) {
+${effectHead}    ${pull ? `Refresh({ refreshing: $$this.__refreshing }) {
       ${wrapPage(body, ctx)}
     }
     .onRefreshing(() => {
@@ -2413,12 +3262,12 @@ ${ctx.slotBuilders.map((b) => `\n  @Builder\n  ${b.name}(props: Record<string, O
 /** The page root: a Column unless the template is one root element. */
 function wrapPage(body: string, ctx: ArkCtx): string {
   const trimmed = body.trim();
-  // R257: the page root is the body, so the shell's `body { padding: ... }`
+  // The page root is the body, so the shell's `body { padding: ... }`
   // (and a project's own body rule) must land here - before, the fallback
   // padding only fired when the template produced no container at all, and a
   // single-root page returned unwrapped with nothing.
   const mods = arkBoxMods(cascadeFor(ctx.sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model).join('');
-  // R470: the page root is `body`; with a dark half its colour has to come from
+  // The page root is `body`; with a dark half its colour has to come from
   // the runtime resolve, not the light value baked above.
   const darkBody = arkDarkRules > 0 ? `.attributeModifier(roseModifier('body', [], '${ctx.scope}'))` : '';
   if (trimmed.startsWith('Column(') || trimmed.startsWith('Row(') || trimmed.startsWith('Text(') || trimmed.startsWith('Scroll(') || trimmed.startsWith('Grid(')) return trimmed + mods + darkBody;
@@ -2430,11 +3279,12 @@ function emitNodes(nodes: IrNode[], ctx: ArkCtx): void {
   const flush = () => {
     if (!run.length) return;
     const text = templateOf(run, ctx);
-    // R257: text lying directly in a container inherits the container's text
+    // Text lying directly in a container inherits the container's text
     // properties (CSS inheritance); the styled <p>/<span> branch at
     // emitElementStyled already applies arkTextMods(ctx.inherited) - the bare
     // run is the same text and was the one hole that dropped color/font-size.
-    if (text && !/^`\s*`$/.test(text)) emit(`Text(${text})${textModsFor(ctx)}`, ctx);
+    // A list marker prefixes the run the way a browser's <li> paints one.
+    if (text && !/^`\s*`$/.test(text)) emit(`Text(${ctx.liMarker ? `${JSON.stringify(ctx.liMarker)} + ${text}` : text})${textModsFor(ctx)}`, ctx);
     run.length = 0;
   };
   // Structural pseudo-classes (:first-child and friends) resolve against the
@@ -2473,10 +3323,20 @@ function templateOf(nodes: IrNode[], ctx: ArkCtx, trim = true): string {
       else raw += node.value.replace(/\s+/g, ' ');
     } else if (node.kind === 'expr') {
       const piece = etsExpr(node.code, ctx);
-      // R284: the expression may ITSELF be a template literal (the dialect
+      // The expression may ITSELF be a template literal (the dialect
       // spells templates natively). Splicing its CONTENT into the surrounding
       // template avoids the `${`...`}` nested shape, which older ArkTS
       // toolchains mangle - the interpolations compose naturally instead.
+      if (piece.startsWith('`') && piece.endsWith('`') && piece.length >= 2) {
+        raw += piece.slice(1, -1);
+      } else {
+        raw += '${' + piece + '}';
+      }
+    } else if (node.kind === 'html') {
+      // Trusted markup ({@html}) inside a text tag rides the same template:
+      // ArkUI renders the tags as text where a rich-text ForEach cannot be
+      // inline-spliced, but the markup survives instead of vanishing.
+      const piece = etsExpr(node.code, ctx);
       if (piece.startsWith('`') && piece.endsWith('`') && piece.length >= 2) {
         raw += piece.slice(1, -1);
       } else {
@@ -2500,10 +3360,11 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
       emit(`Column() {
         ForEach(roseHtmlSpans(${etsExpr(node.code, ctx)}), (span: rosezmSpan) => {
           Text(span.text)
-            .fontWeight(span.bold ? FontWeight.Bold : FontWeight.Normal)
+            .fontWeight(span.bold ? FontWeight.Bold : span.weight ? (span.weight >= 700 ? FontWeight.Bold : span.weight >= 500 ? FontWeight.Medium : FontWeight.Regular) : FontWeight.Normal)
             .fontStyle(span.italic ? FontStyle.Italic : FontStyle.Normal)
             .decoration(span.link ? { type: TextDecorationType.Underline, color: Color.Blue } : null)
-            .fontColor(span.link ? Color.Blue : Color.Black)
+            .fontColor(span.color ? span.color : span.link ? Color.Blue : Color.Black)
+            .fontSize(span.size ? span.size : undefined)
         })
       }`, ctx);
       return;
@@ -2534,9 +3395,14 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
     }
     case 'each': {
       const itemType = usesMemberAccess(node.children, node.binding) ? 'Record<string, Object>' : elementTypeOf(node.items, ctx.script);
-      emit(`ForEach(${etsExpr(node.items, ctx)}, (${node.binding}: ${itemType}, index: number) => {`, ctx);
+      // ForEach needs a real array; an {#await} value is an Object field, so
+      // the kit's list coercion stands between it and the loop.
+      const itemsCode = node.items.trim();
+      const items = /^this\.__await\d+Value$/.test(itemsCode) ? `roseListOf(${etsExpr(itemsCode, ctx)} as Object)` : etsExpr(node.items, ctx);
+      emit(`ForEach(${items}, (${node.binding}: ${itemType}, index: number) => {`, ctx);
       ctx.depth++;
-      const scoped: ArkCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, node.binding]), loopVars: new Set([...ctx.loopVars, node.binding]) };
+      const eachRoot = /^[A-Za-z_$][\w$]*$/.test(itemsCode) || /^\w+\(\)$/.test(itemsCode) ? itemsCode.replace(/\(\)$/, '') : '';
+      const scoped: ArkCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, node.binding]), loopVars: new Set([...ctx.loopVars, node.binding]), eachRoots: new Map([...ctx.eachRoots ?? [], [node.binding, eachRoot]]) };
       emitNodes(node.children, scoped);
       ctx.depth--;
       if (node.key) {
@@ -2548,17 +3414,25 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
     }
     case 'await': {
       // A real loading state: the promise runs in aboutToAppear, the branches
-      // render by the settle state.
+      // render by the settle state. The head is classified here; the runner
+      // (which knows the translated members) decides await vs catch degrade.
       const id = ctx.awaits.length;
       const done = `__await${id}Done`;
       const value = `__await${id}Value`;
       const err = `__await${id}Err`;
-      const expr = etsExpr(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts), ctx);
-      // A head that is still a promise at runtime (a call, not a literal) cannot
-      // be awaited where this target evaluates the block: it would land in the
-      // state field as a promise object. Say so instead of rendering garbage.
-      if (!awaitHeadIsLiteral(node.expr)) ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
-      ctx.awaits.push({ done, value, err, expr });
+      const head = substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts);
+      // A plain call head names a page function: `this.fn(args)` is what the
+      // runner awaits once the members exist.
+      let call: { name: string; args: string } | null = null;
+      const headTrim = head.trim();
+      const callMatch = /^([A-Za-z_$][\w$]*)\s*\(/.exec(headTrim);
+      if (callMatch) {
+        const open = callMatch.index + callMatch[0].length - 1;
+        const close = matchParen(headTrim, open);
+        if (close === headTrim.length - 1) call = { name: callMatch[1], args: headTrim.slice(open + 1, close) };
+      }
+      const expr = etsExpr(head, ctx);
+      ctx.awaits.push({ done, value, err, expr, call, literal: awaitHeadIsLiteral(node.expr) });
       const thenMap = new Map<string, string>();
       if (node.thenName) thenMap.set(node.thenName, `this.${value}`);
       const catchMap = new Map<string, string>();
@@ -2584,7 +3458,7 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
     }
     case 'block':
       if (node.name === 'defer') {
-        // R124: the web streams a placeholder; ArkUI has no stream, so the
+        // The web streams a placeholder; ArkUI has no stream, so the
         // block flips in on a setTimeout armed in aboutToAppear - which runs
         // once per page instance, so no armed guard is needed here.
         const hold = Number(/hold\s*=\s*(\d+)/.exec(String(node.head ?? ''))?.[1] ?? '0');
@@ -2625,14 +3499,29 @@ function emitNode(node: IrNode, ctx: ArkCtx): void {
       return;
     case 'slot':
       return;
-    case 'element':
+    case 'element': {
+      // An ordered list installs its counter around its <li> children: every
+      // item's marker numbers itself (1. 2. 3.), the way a browser paints one.
+      if (node.tag.toLowerCase() === 'ol') {
+        const counter = { n: 0 };
+        for (const child of node.children) {
+          if (child.kind === 'element' && child.tag.toLowerCase() === 'li') {
+            counter.n += 1;
+            emitElement(child, { ...ctx, olMarker: `${counter.n}. ` });
+          } else {
+            emitNodes([child], ctx);
+          }
+        }
+        return;
+      }
       emitElement(node, ctx);
       return;
+    }
   }
 }
 
 /**
- * R125: one cascade per element, against the shared style engine. The old
+ * One cascade per element, against the shared style engine. The old
  * emitter concatenated one modifier chain per class, so specificity, descendant
  * selectors, `@media` guards and `style=""` were all lost; now the element's
  * FULL class list, its ancestors and the reference width decide one model, and
@@ -2667,22 +3556,22 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
     };
     if (before || after) pseudo = { before, after };
   }
-  // R243: ArkUI has no `:hover` pseudo-class, but it does have `.onHover()` and
+  // ArkUI has no `:hover` pseudo-class, but it does have `.onHover()` and
   // @State - so the rule becomes a flag the element flips on pointer enter/leave,
   // and the hover model's modifiers are applied while it is set. Same shape WPF
   // already uses (a hover table); the element now actually reacts.
-  // R260: the `:focus` half rides the same tail shape with `.onFocus`/`.onBlur`
+  // The `:focus` half rides the same tail shape with `.onFocus`/`.onBlur`
   // - keyboard focus is a first-class ArkUI event pair, so no pointer needed.
   let hoverFlag = '';
   let hoverTail = '';
   if (resolved.hover) {
     const hoverMods = modifierOf(resolved.hover, ctx.fonts);
     if (hoverMods.length) {
-      // R243: the flag name is derived from the element, not a counter, so the
+      // The flag name is derived from the element, not a counter, so the
       // style table (written before any page renders) can name the same class.
-      // R260 FIX: class-only (see compileArkStyles) so both sides agree.
+      // FIX: class-only (see compileArkStyles) so both sides agree.
       hoverFlag = `__h_${binding.staticClasses.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
-      // R256: the declaration dedupes like the focus/active tails below - every
+      // The declaration dedupes like the focus/active tails below - every
       // element sharing the flag shares one @State (a page emitted the same
       // __h_x five times over: TS2300 duplicate identifier).
       if (!ctx.hoverStates.some((s) => s.name === hoverFlag)) ctx.hoverStates.push({ name: hoverFlag, mods: hoverMods });
@@ -2694,7 +3583,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
     const focusMods = modifierOf(resolved.focus, ctx.fonts);
     if (focusMods.length) {
       const focusFlag = `__f_${binding.staticClasses.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
-      // R260: one @State per flag - two elements sharing a class share the flag
+      // One @State per flag - two elements sharing a class share the flag
       // (the same `.field:focus` semantics), so the declaration dedupes.
       if (!ctx.hoverStates.some((s) => s.name === focusFlag)) ctx.hoverStates.push({ name: focusFlag, mods: focusMods });
       hoverTail += `.attributeModifier(roseModifier('${tag}', [this.${focusFlag} ? '__focus_${focusFlag}' : ''], '${ctx.scope}'))` +
@@ -2706,7 +3595,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
     if (activeMods.length) {
       const activeFlag = `__a_${binding.staticClasses.join('_') || 'x'}`.replace(/[^\w$]/g, '_');
       if (!ctx.hoverStates.some((s) => s.name === activeFlag)) ctx.hoverStates.push({ name: activeFlag, mods: activeMods });
-      // R270: the touch pair - ArkUI delivers Down/Up/Cancel on every press,
+      // The touch pair - ArkUI delivers Down/Up/Cancel on every press,
       // mouse or finger, so the flag mirrors the web's :active directly.
       hoverTail += `.attributeModifier(roseModifier('${tag}', [this.${activeFlag} ? '__active_${activeFlag}' : ''], '${ctx.scope}'))` +
         `.onTouch((event: TouchEvent) => { if (event.type === TouchType.Down) { this.${activeFlag} = true; } else if (event.type === TouchType.Up || event.type === TouchType.Cancel) { this.${activeFlag} = false; } })`;
@@ -2717,7 +3606,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
   // runtime through roseResolve; ArkTS now does too, so the style re-applies when
   // the state changes instead of being dropped.
   let dynamicMods = '';
-  // R470: a project with a dark half resolves every class at runtime, so a
+  // A project with a dark half resolves every class at runtime, so a
   // system theme flip reaches the elements (an inlined colour could not).
   if (binding.hasDynamic || arkDarkRules > 0) {
     const classes = [
@@ -2732,7 +3621,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
       : 'undefined';
     dynamicMods = `.attributeModifier(roseModifier('${tag}', [${classes.join(', ')}], '${ctx.scope}', ${props}${inline ? ', ' + inline : ''}))`;
   }
-  // R470: the runtime modifier carries the colours when a dark half exists;
+  // The runtime modifier carries the colours when a dark half exists;
   // leaving the inlined ones on the chain would fight it in unspecified order.
   const staticModel = arkDarkRules > 0 && binding.staticClasses.length && dynamicMods
     ? { ...styledModel, color: undefined, background: undefined }
@@ -2741,7 +3630,21 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkCtx): v
   const outerInherited = ctx.inherited;
   ctx.inherited = mergeModels(outerInherited, textCarry(model));
   try {
-    emitElementStyled(node, ctx, staticModel, dynamicMods, hoverTail, pseudo);
+    // A list item's marker: the <ol>-handed counter wins; otherwise the
+    // model's listStyle picks the bullet, `none` draws nothing. The prefix
+    // rides the scoped ctx the child text flush reads.
+    const liCtx = tag === 'li'
+      ? (() => {
+          let marker = '';
+          if (ctx.olMarker) marker = ctx.olMarker;
+          else {
+            const m = listMarkerOf({ tag, classes: [...binding.staticClasses, ...matchedSynthetic], ancestors: [...ctx.ancestors].reverse() }, staticModel);
+            if (m) marker = m.marker;
+          }
+          return marker ? { ...ctx, liMarker: marker } : ctx;
+        })()
+      : ctx;
+    emitElementStyled(node, liCtx, staticModel, dynamicMods, hoverTail, pseudo);
   } finally {
     ctx.ancestors.pop();
     ctx.inherited = outerInherited;
@@ -2753,7 +3656,7 @@ const ARK_INLINE = new Set(['b', 'strong', 'em', 'i', 'u', 's', 'del', 'code', '
 
 /** Span attributes only: alignment and line height belong to the whole Text. */
 function arkSpanMods(model: StyleModel, fonts: Set<string>): string[] {
-  return arkTextMods(model, fonts).filter((m) => !/^\.(textAlign|lineHeight|textCase|maxLines)\(/.test(m));
+  return arkTextMods(model, fonts).filter((m) => !/^\.(textAlign|lineHeight|textCase|maxLines|fontFeature)\(/.test(m));
 }
 
 /** Flatten a text tag's inline children into Span children, or null when a
@@ -2766,9 +3669,15 @@ function arkInlineRuns(children: IrNode[], ctx: ArkCtx, mods: string[]): string[
       continue;
     }
     if (c.kind !== 'element' || !ARK_INLINE.has(c.tag.toLowerCase())) return null;
+    // A literal <sub>/<sup> has no ArkUI inline baseline shift - the Span
+    // flattens it to plain text. Name the loss instead of hiding it.
+    const inlineTag = c.tag.toLowerCase();
+    if (inlineTag === 'sub' || inlineTag === 'sup') {
+      ctx.warnings.push(`arkts: <${inlineTag}> has no ArkUI inline baseline here - the glyph is flattened`);
+    }
     const binding = elementStyleBinding(c);
     if (binding.hasDynamic) return null;
-    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const subject: StyleSubject = { tag: inlineTag, classes: binding.staticClasses };
     const model = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
     ctx.ancestors.push(subject);
     let inner: string[] | null;
@@ -2789,6 +3698,8 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   // is a chainable .attributeModifier(...) call, so it folds in after the static
   // modifiers unchanged when there is no dynamic binding (dynamicMods is '').
   const box = (s: string): string => s + dynamicMods + hoverTail;
+  // A list item's marker arrived through the ctx (the ol counter or the
+  // bullet the element dispatch computed) - the child text flush reads it.
   // A component body's `<slot />` / `<slot name="x" prop={expr} />` invokes the
   // builder the caller passed, with the scoped props (plus any loop bindings
   // forwarded through __roseScope).
@@ -2836,7 +3747,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const scopeArg = scopeProps.length && (comp.slots.hasDefault || comp.slots.named.length)
       ? `, __roseScope: { ${scopeProps.map((v) => `'${v}': ${etsExpr(v, ctx)}`).join(', ')} }`
       : '';
-    const all = [props, ...bindArgs, ...slotArgs].filter(Boolean).join(', ');
+    const all = [props, ...bindArgs, ...slotArgs, ctx.pageRoute ? `route: '${ctx.pageRoute}'` : ''].filter(Boolean).join(', ');
     emit(`${comp.struct}({ ${all}${scopeArg} })`, ctx);
     return;
   }
@@ -2853,12 +3764,30 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   }
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = templateOf(node.children, ctx);
+    // Trusted markup inside a text tag renders as MARKUP: the same
+    // roseHtmlSpans reader a bare {@html} takes turns the whole paragraph
+    // into styled spans instead of literal tags in the string.
+    if (node.children.some((c) => c.kind === 'html') && text) {
+      arkPseudoText(pseudo?.before, ctx);
+      emit(`Column() {
+        ForEach(roseHtmlSpans(${text}), (span: rosezmSpan) => {
+          Text(span.text)
+            .fontWeight(span.bold ? FontWeight.Bold : span.weight ? (span.weight >= 700 ? FontWeight.Bold : span.weight >= 500 ? FontWeight.Medium : FontWeight.Regular) : FontWeight.Normal)
+            .fontStyle(span.italic ? FontStyle.Italic : FontStyle.Normal)
+            .decoration(span.link ? { type: TextDecorationType.Underline, color: Color.Blue } : null)
+            .fontColor(span.color ? span.color : span.link ? Color.Blue : Color.Black)
+            .fontSize(span.size ? span.size : undefined)
+        })
+      }${arkBoxMods(model).join('')}${textModsFor(ctx)}`, ctx);
+      arkPseudoText(pseudo?.after, ctx);
+      return;
+    }
     arkPseudoText(pseudo?.before, ctx);
     emit(box(`Text(${text || "''"})${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
     arkPseudoText(pseudo?.after, ctx);
     return;
   }
-  // R452: <details>/<summary> folds on a @State flag - the header toggles it and
+  // <details>/<summary> folds on a @State flag - the header toggles it and
   // the body renders only while open.
   if (tag === 'details') {
     const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
@@ -2895,7 +3824,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    // R438: the element's own attributes ride into the ArkUI Video.
+    // The element's own attributes ride into the ArkUI Video.
     const flag = (name: string): boolean => node.attrs.some((a) => a.name === name);
     const flags = `${flag('autoplay') ? '.autoPlay(true)' : ''}${flag('loop') ? '.loop(true)' : ''}${flag('muted') ? '.muted(true)' : ''}${flag('controls') ? '.controls(true)' : ''}`;
     emit(box(`Video({ src: ${JSON.stringify(url)} })${flags}${arkBoxMods(model).join('')}`), ctx);
@@ -2916,12 +3845,23 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const alt = altAttr && altAttr.value.kind === 'text' ? altAttr.value.text : '';
     const label = alt ? `.accessibilityText(${JSON.stringify(alt)})` : '';
     const media = ctx.media.get(url);
-    // R418: object-fit maps onto ArkUI's ImageFit; absent keeps contain.
+    // Object-fit maps onto ArkUI's ImageFit; absent keeps contain.
     const fit = ({ cover: 'ImageFit.Cover', contain: 'ImageFit.Contain', fill: 'ImageFit.Fill', none: 'ImageFit.None', 'scale-down': 'ImageFit.ScaleDown' } as Record<string, string>)[model.objectFit ?? 'contain'] ?? 'ImageFit.Contain';
+    // vertical-align on a replaced element: a Stack wrapper carries the
+    // alignment (ArkUI's Image has none of its own). Opened here, closed
+    // after the emit below.
+    const va = model.verticalAlign;
+    const stackOpen = va === 'middle' || va === 'top' || va === 'bottom'
+      ? `Stack({ alignContent: ${va === 'middle' ? 'Alignment.Center' : va === 'top' ? 'Alignment.Top' : 'Alignment.Bottom'} }).width('100%') {`
+      : '';
+    if (stackOpen) {
+      emit(stackOpen, ctx);
+      ctx.depth++;
+    }
     if (media) emit(box(`Image($r('app.media.${media}')).objectFit(${fit})${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
     else if (ctx.vectors.has(url)) { emit(arktsVectorExpr(url, ctx), ctx); }
     else if (url) {
-      // R416: a remote (or site-relative) image loads at runtime.
+      // A remote (or site-relative) image loads at runtime.
       const source = /^https?:\/\//i.test(url) ? JSON.stringify(url) : `roseAssetUrl(${JSON.stringify(url)})`;
       emit(box(`Image(${source}).objectFit(${fit})${model.width ? '' : '.width(72)'}${label}${arkBoxMods(model).join('')}`), ctx);
     }
@@ -2929,6 +3869,11 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       ctx.warnings.push(`arkts: ${url || '<img>'} has no media resource - rendered as a placeholder`);
       emit(`Text('[image: ${url.replace(/'/g, "\\'")}]')${label}`, ctx);
     }
+    if (stackOpen) {
+      ctx.depth--;
+      emit('}', ctx);
+    }
+
     return;
   }
   if (tag === 'a') {
@@ -2969,7 +3914,22 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       } else if (checked) {
         emit(`Toggle({ type: ToggleType.Checkbox, isOn: this.${checked} }).onChange((isOn: boolean) => { this.${checked} = isOn; })`, ctx);
       } else {
-        emit('Toggle({ type: ToggleType.Checkbox, isOn: false })', ctx);
+        // A member-path binding whose root is an {#each} row variable binds a
+        // FIELD of the row: the write replaces the owning array with a copy
+        // that swaps the row (the loop variable IS the element), so a keyed
+        // list keeps its state on reorder.
+        const rowPath = bindChecked && bindChecked.value.kind === 'expr' ? bindChecked.value.code.trim() : '';
+        const rowRoot = rowPath.includes('.') ? rowPath.split('.')[0] : '';
+        const rowRest = rowPath.includes('.') ? rowPath.split('.').slice(1) : [];
+        const rowState = rowRoot ? ctx.eachRoots?.get(rowRoot) : undefined;
+        if (rowState) {
+          const pathLit = rowRest.map((p) => JSON.stringify(p)).join(', ');
+          // isOn via the kit's path read; the write swaps the row AT INDEX
+          // (ForEach hands the row's own index) inside a copied array.
+          emit(`Toggle({ type: ToggleType.Checkbox, isOn: roseBool(rosePathOf(${rowRoot}, [${pathLit}])) }).onChange((isOn: boolean) => { this.${rowState} = roseSetRow(this.${rowState}, index, [${pathLit}], isOn) })`, ctx);
+        } else {
+          emit('Toggle({ type: ToggleType.Checkbox, isOn: false })', ctx);
+        }
       }
       return;
     }
@@ -2979,7 +3939,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       else emit('Radio({ value: "", group: "" })', ctx);
       return;
     }
-    // R229: a range is a Slider, not a text box. Falling through emitted a
+    // A range is a Slider, not a text box. Falling through emitted a
     // TextInput bound to the number, so dragging was impossible and the value
     // arrived as a string.
     if (type === 'range') {
@@ -2994,7 +3954,12 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
       emit(box(`Slider({ ${opts.join(', ')} })${model.width ? '' : ".width('100%')"}${arkBoxMods(model).join('')}${onChange}`), ctx);
       return;
     }
-    const boundName = bindValue && bindValue.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(bindValue.value.code.trim()) ? bindValue.value.code.trim() : '';
+    // A member-path binding - `bind:value={form.name}` - binds a FIELD of a
+    // state-held object. The write goes through the kit's path setter, which
+    // replaces the owner with a copy (the signal identity changes, the UI
+    // rebuilds) - the same immutable write the web build does.
+    const boundPath = bindValue && bindValue.value.kind === 'expr' ? bindValue.value.code.trim() : '';
+    const boundName = /^[A-Za-z_$][\w$]*$/.test(boundPath) ? boundPath : '';
     const propName = ctx.componentProps.has(boundName) ? boundName
       : (valueAttr && valueAttr.value.kind === 'expr' && ctx.componentProps.has(valueAttr.value.code.trim()) ? valueAttr.value.code.trim() : '');
     // A named input inside a submitting form binds to its name, like the
@@ -3003,7 +3968,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
     const formKey = field ? formFieldKey(ctx.forms, field) : null;
     const bound = boundName || formKey || '';
-    // R445: a date input is HarmonyOS's own calendar sheet, and the state keeps
+    // A date input is HarmonyOS's own calendar sheet, and the state keeps
     // the ISO yyyy-MM-dd day the web input writes.
     if (type === 'date') {
       const dateState = bound;
@@ -3020,15 +3985,70 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
         `.onChange((value: DatePickerResult) => { this.${dateState} = roseIsoDay(value.year, value.month, value.day); })`), ctx);
       return;
     }
-    const onChange = propName
+    let onChange = propName
       ? `.onChange((value: string) => { this.${propChangeHandler(propName)}(value); })`
       : (bound
         ? `.onChange((value: string) => { this.${bound} = value; })`
-        : '.onChange((value: string) => {})');
-    // R441: autofocus is the browser's focus-on-mount.
+        : '');
+    // A raw `on:input` arrow is the field's change callback: the browser's own
+    // spelling for an unbound field. `e.target.value` is the incoming text.
+    if (!propName && !bound) {
+      const rawChange = node.attrs.find((a) => (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+      // `on:input={onInput}` - a bare name naming a page function - is called
+      // with a synthetic event: the kit's roseEvent stub carries target.value.
+      // Must stay `if` ahead of the arrow branch below, or the arrow branch
+      // overwrites the callback with a bare-name statement (the dart.ts bug).
+      if (rawChange && rawChange.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(rawChange.value.code.trim()) && (ctx.fnNames?.has(rawChange.value.code.trim()) ?? false)) {
+        onChange = `.onChange((value: string) => { this.${rawChange.value.code.trim()}(roseEvent(value)); })`;
+      } else if (rawChange && rawChange.value.kind === 'expr') {
+        const head = /^(?:async\s+)?(?:\((?:[^()]*)\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(rawChange.value.code.trim());
+        const bodyRaw = head ? rawChange.value.code.trim().slice(head[0].length) : rawChange.value.code;
+        const body = stripTsTypes(bodyRaw).replace(/\(\s*(e\.target|e\.currentTarget)\s*\)/g, '$1').replace(/\be\.target\.value\b/g, 'value').replace(/\be\.currentTarget\.value\b/g, 'value').trim().replace(/;$/, '');
+        const ets = translateBody(body, ctx.file, ctx.warnings, [...ctx.mapBinds], [], false, ctx.stateNames).trim().replace(/;$/, '');
+        onChange = `.onChange((value: string) => {\n    ${ets}\n})`;
+      }
+    }
+    // A bound field that ALSO carries on:input/on:change must keep the
+    // browser's order: the bind write lands first, then the user's handler
+    // runs (the web runtime fires both). Dropping the handler here was silent
+    // - the web export ran it, this one never did. A component prop keeps
+    // precedence: the propWrite callback above already routes the change, so
+    // nothing extra is emitted.
+    if (!propName && bound) {
+      const rawChange = node.attrs.find((a) => (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+      // A bare name naming a page function is called with the kit's synthetic
+      // event - the same roseEvent spelling the unbound named branch emits.
+      if (rawChange && rawChange.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(rawChange.value.code.trim()) && (ctx.fnNames?.has(rawChange.value.code.trim()) ?? false)) {
+        onChange = `.onChange((value: string) => { this.${bound} = value; this.${rawChange.value.code.trim()}(roseEvent(value)); })`;
+      } else if (rawChange && rawChange.value.kind === 'expr') {
+        const head = /^(?:async\s+)?(?:\((?:[^()]*)\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(rawChange.value.code.trim());
+        const bodyRaw = head ? rawChange.value.code.trim().slice(head[0].length) : rawChange.value.code;
+        const body = stripTsTypes(bodyRaw).replace(/\(\s*(e\.target|e\.currentTarget)\s*\)/g, '$1').replace(/\be\.target\.value\b/g, 'value').replace(/\be\.currentTarget\.value\b/g, 'value').trim().replace(/;$/, '');
+        const ets = translateBody(body, ctx.file, ctx.warnings, [...ctx.mapBinds], [], false, ctx.stateNames).trim().replace(/;$/, '');
+        onChange = `.onChange((value: string) => {\n    this.${bound} = value;\n    ${ets}\n})`;
+      }
+    }
+    // A member-path binding: the write goes through the kit's path setter,
+    // which replaces the owner state with a copy carrying the new value.
+    if (!propName && !bound && boundPath.includes('.')) {
+      const [rootField, ...restPath] = boundPath.split('.');
+      const pathArg = restPath.map((p) => JSON.stringify(p)).join(', ');
+      if (ctx.stateNames.has(rootField)) {
+        onChange = `.onChange((value: string) => { this.${rootField} = roseSetPath(this.${rootField}, [${pathArg}], value); })`;
+      } else if (ctx.loopVars.has(rootField)) {
+        // An {#each} row field: the write swaps the row AT ITS INDEX inside a
+        // copied array (ForEach hands the row's own index), applying the field
+        // through the kit's path setter.
+        const rowState = ctx.eachRoots?.get(rootField);
+        if (rowState) {
+          onChange = `.onChange((value: string) => { this.${rowState} = roseSetRow(this.${rowState}, index, [${pathArg}], value); })`;
+        }
+      }
+    }
+    // Autofocus is the browser's focus-on-mount.
     const autoMod = node.attrs.some((a) => a.name === 'autofocus') ? '.defaultFocus(true)' : '';
     if (tag === 'textarea') {
-      // R440: rows is the textarea's visible line count (24px per line).
+      // Rows is the textarea's visible line count (24px per line).
       const rowsAttr = node.attrs.find((a) => a.name === 'rows');
       const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? Number(rowsAttr.value.text.trim()) : 4;
       emit(box(`TextArea({ placeholder: ${hint} })${onChange}${model.width ? '' : ".width('100%')"}${model.height ? '' : `.height(${rows * 24})`}${arkBoxMods(model).join('')}${textModsFor(ctx)}`), ctx);
@@ -3153,7 +4173,7 @@ function emitElementStyled(node: Extract<IrNode, { kind: 'element' }>, ctx: ArkC
     ctx.warnings.push('arkts: display:grid fell back to a flex wrap - the tracks or the children are not a plain element list');
   }
   const container = arkContainer(model, tag);
-  // R227: an overflow:auto/scroll box is its own scroll container. ArkUI's Scroll
+  // An overflow:auto/scroll box is its own scroll container. ArkUI's Scroll
   // takes exactly one child, so the Column goes inside it and the height that
   // makes it scrollable is what Scroll alone constrains.
   const scrolls = model.overflow === 'scroll';
@@ -3228,8 +4248,10 @@ function registerInlineHandler(code: string, ctx: ArkCtx): string {
   ctx.inline.set(code, name);
   const ir = normalizeInlineHandler(code, arktsHandlerDialect(ctx), ctx.stateNames);
   if (ir.reason || !ir.stmts.length) {
-    ctx.warnings.push(`arkts: an inline handler (${code.slice(0, 40)}...) is not translated (${ir.reason ?? 'empty'}); use a named function in <script>`);
-    ctx.inlineBodies.push(`  private ${name}(): void {\n    // rosezm: handler not translated (${ir.reason ?? 'empty'}).\n  }`);
+    // The generated method name is the location marker: the report names it,
+    // and the stub comment in the .ets file is greppable by it.
+    ctx.warnings.push(`arkts: ${ctx.file}: the inline handler (${code.slice(0, 40)}...) is not translated (${ir.reason ?? 'empty'}) - emitted as the stub ${name}(); use a named function in <script>`);
+    ctx.inlineBodies.push(`  private ${name}(): void {\n    // rosezm: the inline handler is a stub (${ir.reason ?? 'empty'}) - use a named function in <script>.\n  }`);
     return name;
   }
   ctx.inlineBodies.push(`  private ${name}(): void {\n${ir.stmts.map((s) => `    ${s};`).join('\n')}\n  }`);
@@ -3288,7 +4310,7 @@ ${draw}
 }
 
 /** A Rose expression in ArkTS: state reads become `this.x`. */
-/** R479: the ArkTS expression, with the reserved-word rename at the end. */
+/** The ArkTS expression, with the reserved-word rename at the end. */
 function etsExpr(code: string, ctx: ArkCtx): string {
   return arRename(etsExprRaw(code, ctx));
 }
@@ -3308,11 +4330,15 @@ function etsExprRaw(code: string, ctx: ArkCtx): string {
       return expr;
     });
   }
-  // R284: the four R273 constructs translate BEFORE the $-name rewrite and the
+  // An {#await} then-binding reads the settled value through this.__awaitNValue,
+  // an Object field: the reads go through the kit like a $data read, .length
+  // through the count helper.
+  out = out.replace(/this\.__await(\d+)Value\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, id: string, key: string) => (key === 'length' ? `roseCount(this.__await${id}Value as Object)` : `roseGet(this.__await${id}Value, '${key}')`));
+  // The four constructs translate BEFORE the $-name rewrite and the
   // state-getter unwrap - the probe showed a mangled nested template
   // (`${`...`}`) and a malformed optional-chain ternary reaching the .ets.
   // The state read rides `read`.
-  // R291: the string + search family joined the same gate - a template read of
+  // The string + search family joined the same gate - a template read of
   // `.split` / `.indexOf` / `.every` / `.startsWith` / `.endsWith` /
   // `.toUpperCase` / `.toLowerCase` must reach the kit. `join` is deliberately
   // absent: ArkTS has the native Array method and it is ALREADY correct on a
@@ -3428,7 +4454,7 @@ function kTypeOfExpr(expr: string): string {
 function tsLiteral(src: string): string {
   if (!src.trim()) return 'null';
   let out = src.trim();
-  // R177: a state initializer is a fourth code path with its own translator.
+  // A state initializer is a fourth code path with its own translator.
   // Runs before the Record rewrite below, whose `x.y` -> x['y'] rule would
   // otherwise mangle the method call the emptiness test needs.
   out = rewriteInitializer(out, {
@@ -3484,7 +4510,7 @@ function escapeRe(s: string): string {
 }
 
 /**
- * R292: `setTotal(n)` -> `this.total = n`, consuming the matching closer.
+ * `setTotal(n)` -> `this.total = n`, consuming the matching closer.
  *
  * The compiler gives every `let total = $state(...)` a `setTotal` setter, and a
  * handler calls it. Rewriting the opener alone is not enough: the closer has to
@@ -3588,16 +4614,17 @@ function matchParen(src: string, open: number): number {
 }
 
 /** Script -> ArkTS struct members: @State fields, methods, action POSTs. */
-/** R479: a handler body goes through the same rename as an expression. */
-function translateHandlers(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): string {
-  return arRename(translateHandlersRaw(script, facts, page, warnings, formFields, bindNames));
+/** A handler body goes through the same rename as an expression. */
+function translateHandlers(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): { methods: string; effects: string[]; fns: Map<string, { ok: boolean; action?: boolean }>; disposes: string[]; mountCalls: string[] } {
+  const out = translateHandlersRaw(script, facts, page, warnings, formFields, bindNames);
+  return { methods: arRename(out.methods), effects: out.effects, fns: out.fns, disposes: out.disposes, mountCalls: out.mountCalls };
 }
 
-function translateHandlersRaw(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): string {
-  if (!script.trim()) return '';
+function translateHandlersRaw(script: string, facts: StateFacts, page: { route: string; file: string }, warnings: string[], formFields: string[] = [], bindNames: string[] = []): { methods: string; effects: string[]; fns: Map<string, { ok: boolean; action?: boolean }>; disposes: string[]; mountCalls: string[] } {
+  if (!script.trim()) return { methods: '', effects: [], fns: new Map(), disposes: [], mountCalls: [] };
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
   try {
-    // R241: esbuild's first call pays a ~90ms service spawn; skip it when the
+    // Esbuild's first call pays a ~90ms service spawn; skip it when the
     // script is plain JavaScript and there is nothing to strip.
     code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
   } catch {
@@ -3615,34 +4642,60 @@ function translateHandlersRaw(script: string, facts: StateFacts, page: { route: 
   let actions: string[] = [];
   try { actions = extractExports(script).actions.map((a) => a.name); } catch { /* unparsable script keeps no actions */ }
   const methods: string[] = [];
+  // The {#await} head resolves against this table: a function whose body
+  // translated can be awaited, a stub or a server action degrades the block
+  // to the catch branch.
+  const fns = new Map<string, { ok: boolean; action?: boolean }>();
+  const fnNames = new Set<string>();
   for (const action of actions) {
     code = code.replace(new RegExp(`\\b(?:async\\s+)?function\\s+${escapeRe(action)}\\s*\\(`, 'g'), `function __server_${action}(`);
     const apply = [
       ...facts.state.map((st) => `    if (patch['${st.name}'] !== undefined) this.${arName(st.name)} = patch['${st.name}'] as ${kotlinType(st.init)};`),
       ...facts.data.map((d) => `    if (patch['${d}'] !== undefined) this.${arName(d)} = patch['${d}'];`),
     ].join('\n');
-    methods.push(`  async ${action}(): Promise<void> {
+    methods.push(`  async ${action}(): Promise<Record<string, Object>> {
     const patch = await roseAction(${JSON.stringify(page.route)}, ${JSON.stringify(action)}${formFields.length ? ', __formFields()' : ''});
-    if (!patch) return;
+    if (!patch) return patch;
 ${apply}
+    return patch;
   }`);
+    fns.set(action, { ok: false, action: true });
   }
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
     .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
+  // A `$effect` body becomes a method build() calls, so the rune itself must
+  // not stay behind in a handler body.
+  const effectSources = effectBodies(code);
+  code = stripEffectCalls(code);
+  for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)) fnNames.add(m[1]);
   for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
     const name = m[1];
     if (name.startsWith('__')) continue;
     const open = m.index + m[0].length - 1;
     const close = matchParen(code, open);
     if (close < 0) continue;
-    const body = translateBody(code.slice(open + 1, close), page.file, [...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data], warnings, bindNames);
+    const isAsync = m[0].includes('async');
+    const rawBody = code.slice(open + 1, close);
+    // A local bound from an awaited action/sibling holds its patch: `r.ok` is `r['ok']`.
+    const awaited = isAsync ? [...rawBody.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+/g)].map((x) => x[1]) : [];
+    let body = translateBody(rawBody, page.file, [...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data], warnings, [...bindNames, ...awaited], isAsync, fnNames, name);
+    // A patch field read off an awaited local is Object; a typed state field
+    // takes the same cast the action's patch pass spells.
+    for (const st of facts.state) {
+      const type = kotlinType(st.init);
+      if (!/^(string|number|boolean)$/.test(type)) continue;
+      for (const local of awaited) {
+        body = body.replace(new RegExp(`(this\\.${escapeRe(arName(st.name))}\\s*=\\s*${escapeRe(local)}\\[[^\\]]+\\])(\\s*;)`, 'g'), `$1 as ${type}$2`);
+      }
+    }
+    fns.set(name, { ok: !body.includes('handler body not translated') });
     const params = m[2].split(',').map((p) => p.trim()).filter(Boolean).map((p) => {
       const [rawName, rawType] = p.split(':').map((x) => x.trim());
       const type = rawType && /^(string|number|boolean|Object|Record)/.test(rawType) ? rawType : 'Object';
       return `${rawName}: ${type}`;
     }).join(', ');
-    // R256: the return type was pinned to void/Promise<void>, so a script
+    // The return type was pinned to void/Promise<void>, so a script
     // function with a `return expr` (mirror404's skin(), about's plural())
     // emitted `(): void { return ... }` - TS2322. The type follows the body:
     // a return with a value drops the annotation, a bare `return;` or none
@@ -3652,9 +4705,223 @@ ${apply}
     const sig = m[0].includes('async')
       ? `async ${name}(${params})${returnsValue ? '' : ': Promise<void>'}`
       : `${name}(${params})${returnsValue || returnsBare ? '' : ': void'}`;
-    methods.push(`  ${sig} {\n${body}\n  }`);
+    // A named input handler receives the kit's synthetic event (roseEvent), so
+    // its `e.target.value` read goes through the kit getter - `e` is a plain
+    // Object here, with no DOM event behind it.
+    methods.push(`  ${sig} {\n${body.replace(/\be\.target\.value\b/g, 'roseEventValue(e)')}\n  }`);
   }
-  return methods.join('\n\n');
+  // One method per effect body, plus the calls build() makes at its head. A
+  // compiled target has no reactive graph, so the build pass IS the recompute.
+  const effects: string[] = [];
+  const disposes: string[] = [];
+  const effectState = [...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data];
+  for (const eff of effectSources) {
+    if (eff.call) {
+      // Only a page function is callable here; anything else has no body this
+      // emitter can see.
+      if (!new RegExp(`^(?:async\\s+)?function\\s+${escapeRe(eff.call)}\\s*\\(`, 'm').test(code)) {
+        warnings.push(`arkts: ${page.file}: an effect on ${eff.call}() is skipped - it names no page function`);
+        continue;
+      }
+      effects.push(`this.${eff.call}();`);
+      continue;
+    }
+    if (!eff.body) {
+      warnings.push(`arkts: ${page.file}: an effect body the exporter could not read is skipped (${eff.arg.slice(0, 40)})`);
+      continue;
+    }
+    // A cleanup runs at the struct's own disposal moment: aboutToDisappear is
+    // the pair of aboutToAppear, so the statements translate into a __disposeN
+    // member the page calls there. A cleanup closing over a local the body
+    // declared has no mechanical scope split, so it keeps the honest warning.
+    const [run, dispose] = cutEffectReturn(eff.body);
+    if (dispose) {
+      const lifted = liftCleanup(dispose, run, page.file, warnings);
+      if (lifted !== null) {
+        let body = translateBody(rewriteGlobalThis(lifted), page.file, effectState, warnings, bindNames, false, fnNames, `__dispose${disposes.length}`);
+        for (const fn of fnNames) body = body.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+        const disposeName = `__dispose${disposes.length}`;
+        methods.push(`  private ${disposeName}(): void {\n${body}\n  }`);
+        disposes.push(disposeName);
+      }
+    }
+    if (!run.trim()) continue;
+    const name = `__effect${effects.length}`;
+    methods.push(`  private ${name}(): void {\n${translateBody(run, page.file, effectState, warnings, bindNames, false, fnNames, name)}\n  }`);
+    effects.push(`this.${name}();`);
+  }
+  // onMount bodies run once at the struct's own mount moment (aboutToAppear);
+  // onCleanup bodies join the __disposeN chain aboutToDisappear already calls.
+  const mountCut = cutLifecycleCalls(code, 'onMount');
+  const cleanCut = cutLifecycleCalls(mountCut.code, 'onCleanup');
+  const mountCalls: string[] = [];
+  const mountLocals = new Set<string>();
+  const lifecycleBody = (b: { body: string; isAsync: boolean; arg: string; read: boolean }, kind: string): string | null => {
+    if (!b.read) {
+      warnings.push(`arkts: ${page.file}: an ${kind} callback this exporter cannot read is skipped (${b.arg.slice(0, 40)})`);
+      return null;
+    }
+    if (!b.body.trim()) return null;
+    const dangling = [...mountLocals].filter((n) => new RegExp(`\\b${escapeRe(n)}\\b`).test(b.body));
+    if (dangling.length) {
+      warnings.push(`arkts: ${page.file}: an ${kind} body reads ${dangling.join(', ')} - a local an onMount body declared, with no shared scope on this target - it is dropped`);
+      return null;
+    }
+    return b.body;
+  };
+  for (const m of mountCut.bodies) {
+    const bodySrc = lifecycleBody(m, m.isAsync ? 'async onMount' : 'onMount');
+    if (bodySrc === null) continue;
+    const name = `__mount${mountCalls.length}`;
+    let body = translateBody(rewriteGlobalThis(bodySrc), page.file, effectState, warnings, bindNames, m.isAsync, fnNames, name);
+    for (const fn of fnNames) body = body.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+    methods.push(`  private ${m.isAsync ? 'async ' : ''}${name}(): ${m.isAsync ? 'Promise<void>' : 'void'} {\n${body}\n  }`);
+    mountCalls.push(`this.${name}();`);
+    for (const lm of bodySrc.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)/g)) mountLocals.add(lm[1]);
+  }
+  for (const c of cleanCut.bodies) {
+    const bodySrc = lifecycleBody(c, c.isAsync ? 'async onCleanup' : 'onCleanup');
+    if (bodySrc === null) continue;
+    const disposeName = `__dispose${disposes.length}`;
+    let body = translateBody(rewriteGlobalThis(bodySrc), page.file, effectState, warnings, bindNames, c.isAsync, fnNames, disposeName);
+    for (const fn of fnNames) body = body.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+    methods.push(`  private ${c.isAsync ? 'async ' : ''}${disposeName}(): ${c.isAsync ? 'Promise<void>' : 'void'} {\n${body}\n  }`);
+    disposes.push(disposeName);
+  }
+  return { methods: methods.join('\n\n'), effects, fns, disposes, mountCalls };
+}
+
+/**
+ * Every `onMount(...)` / `onCleanup(...)` call site, removed from the script,
+ * with the zero-argument callback body each carried. A page function reference
+ * or a curried arrow comes back unread, so the caller warns instead of
+ * dropping it in silence.
+ */
+function cutLifecycleCalls(code: string, name: string): { code: string; bodies: Array<{ body: string; isAsync: boolean; arg: string; read: boolean }> } {
+  const bodies: Array<{ body: string; isAsync: boolean; arg: string; read: boolean }> = [];
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const at = code.indexOf(name, i);
+    if (at < 0) { out += code.slice(i); break; }
+    if (/[A-Za-z0-9_$.]/.test(code[at - 1] ?? '')) { out += code.slice(i, at + name.length); i = at + name.length; continue; }
+    let open = at + name.length;
+    while (open < code.length && /\s/.test(code[open])) open++;
+    if (code[open] !== '(') { out += code.slice(i, at + name.length); i = at + name.length; continue; }
+    const close = matchParen(code, open);
+    if (close < 0) { out += code.slice(i); break; }
+    const arg = code.slice(open + 1, close).trim();
+    let m = /^(async\s+)?\(\s*\)\s*(?::[^=]*)?=>\s*\{([\s\S]*)\}$/.exec(arg)
+      || /^(async\s+)?function\s*\(\s*\)\s*\{([\s\S]*)\}$/.exec(arg);
+    if (m) bodies.push({ body: m[2], isAsync: Boolean(m[1]), arg, read: true });
+    else {
+      m = /^(async\s+)?\(\s*\)\s*(?::[^=]*)?=>\s*([\s\S]+)$/.exec(arg);
+      if (m && !/^[{[(]/.test(m[2].trim())) bodies.push({ body: m[2].trim().replace(/;\s*$/, ''), isAsync: Boolean(m[1]), arg, read: true });
+      else bodies.push({ body: '', isAsync: false, arg, read: false });
+    }
+    out += code.slice(i, at);
+    i = close + 1;
+    if (code[i] === ';') i++;
+  }
+  return { code: out, bodies };
+}
+
+/** Remove every `$effect(...)` call: its body is a method build calls now. */
+function stripEffectCalls(code: string): string {
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const at = code.indexOf('$effect', i);
+    if (at < 0) { out += code.slice(i); break; }
+    if (/[A-Za-z0-9_$.]/.test(code[at - 1] ?? '')) { out += code.slice(i, at + 7); i = at + 7; continue; }
+    let open = at + 7;
+    while (open < code.length && /\s/.test(code[open])) open++;
+    if (code[open] !== '(') { out += code.slice(i, at + 7); i = at + 7; continue; }
+    const close = matchParen(code, open);
+    if (close < 0) { out += code.slice(i); break; }
+    out += code.slice(i, at);
+    i = close + 1;
+    if (code[i] === ';') i++;
+  }
+  return out;
+}
+
+/** Split an effect body at its top-level `return`: [the statements, the cleanup]. */
+function cutEffectReturn(body: string): [string, string] {
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (depth === 0 && body.startsWith('return', i) && !/[\w$]/.test(body[i - 1] ?? '') && !/[\w$]/.test(body[i + 6] ?? '')) {
+      return [body.slice(0, i).replace(/;$/, ''), body.slice(i + 6).replace(/;$/, '').trim()];
+    }
+  }
+  return [body, ''];
+}
+
+/**
+ * The cleanup statements a __disposeN member can carry, or null (with the
+ * honest warning) when the split is not mechanical on this target: a wrapper
+ * other than a zero-argument function, a read of a local the body declared
+ * (the closure would dangle in a struct member), or a globalThis shape the
+ * AppStorage rewrite cannot spell.
+ */
+function liftCleanup(dispose: string, run: string, file: string, warnings: string[]): string | null {
+  const refuse = (): null => {
+    warnings.push(`arkts: ${file}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+    return null;
+  };
+  if (/\bglobalThis\s*\[/.test(dispose)) return refuse();
+  if (/\bglobalThis\s*\.\s*[A-Za-z_$][\w$]*\s*(?:[+\-*/%|&^?]=|<<=|>>>=?|\+\+|--)/.test(dispose)) return refuse();
+  const src = dispose.trim();
+  let m = /^(?:async\s+)?(?:function\s*)?\(\s*\)\s*(?::[^=]*)?=>\s*\{([\s\S]*)\}$/.exec(src)
+    || /^(?:async\s+)?function\s*\(\s*\)\s*\{([\s\S]*)\}$/.exec(src);
+  let body: string | null = null;
+  if (m) body = m[1].trim();
+  else {
+    m = /^(?:async\s+)?(?:function\s*)?\(\s*\)\s*(?::[^=]*)?=>\s*([\s\S]+)$/.exec(src);
+    if (m && !/^[{[(]/.test(m[1].trim())) body = m[1].trim();
+  }
+  if (body === null) return refuse();
+  // The closure would dangle in a struct member: a read of a local the body
+  // declared has no mechanical scope split on this target.
+  for (const lm of run.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)/g)) {
+    if (new RegExp(`\\b${escapeRe(lm[1])}\\b`).test(body)) return refuse();
+  }
+  return body;
+}
+
+/** globalThis has no home in ArkTS: the AppStorage KV is the platform's own global. */
+function rewriteGlobalThis(src: string): string {
+  const reads = (s: string): string => s
+    .replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*\|\|\s*(\d+(?:\.\d+)?)/g, "(AppStorage.get<number>('$1') as number) || $2")
+    .replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*=(?!=))/g, "AppStorage.get<Object>('$1')");
+  const stmts: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let start = 0;
+  for (let i = 0; i <= src.length; i++) {
+    const ch = src[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (i === src.length) { stmts.push(src.slice(start, i)); break; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth--; continue; }
+    if (ch === ';' && depth === 0) { stmts.push(src.slice(start, i)); start = i + 1; }
+  }
+  const out: string[] = [];
+  for (const raw of stmts) {
+    const stmt = raw.trim();
+    if (!stmt) continue;
+    const m = /^globalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)([\s\S]+)$/.exec(stmt);
+    if (m) out.push(`AppStorage.setOrCreate('${m[1]}', ${reads(m[2].trim())});`);
+    else out.push(reads(stmt));
+  }
+  return out.join('\n');
 }
 
 const ARKTS_EXPR: ExprDialect = {
@@ -3678,7 +4945,7 @@ const ARKTS_EXPR: ExprDialect = {
   arr: (items) => `roseArr(${items.join(', ')})`,
   not: (e) => `!roseBool(${e})`,
   lit: (v) => v,
-  // R284: the four R273 constructs in ArkTS's native TS spellings. ArkTS is a
+  // The four constructs in ArkTS's native TS spellings. ArkTS is a
   // TS dialect: template literals and ?. / ?? are native, so the dialect just
   // reproduces them over the translated parts (with the string-escape care a
   // generated file needs).
@@ -3691,7 +4958,7 @@ const ARKTS_EXPR: ExprDialect = {
   // platform spelling the nullish round already established.
   nullish: (l, r) => `(${l} !== null ? ${l} : ${r})`,
   optChain: (o, k) => `(${o})?.['${k}']`,
-  // R291: the string + search family. ArkTS is a TS dialect, so join is the
+  // The string + search family. ArkTS is a TS dialect, so join is the
   // native Array method (`this.items.join(',')` - the spelling the template
   // pass has always emitted). The rest go through the kit: a state read can be
   // an opaque `Object` ($data / $kv), where none of the native String methods
@@ -3708,7 +4975,7 @@ const ARKTS_EXPR: ExprDialect = {
 };
 
 /**
- * R291: the auto-setter form of a translated expression - `setJoined(items().join(','))`.
+ * The auto-setter form of a translated expression - `setJoined(items().join(','))`.
  *
  * ArkTS never used `rewriteAutoSetterWrites` (the shared pass the other
  * compiled targets run), so a `setX(collection chain)` - the shape real
@@ -3745,8 +5012,23 @@ function rewriteArkSearchWrites(body: string, stateSet: Set<string>): string {
   return out;
 }
 
-function translateBody(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = []): string {
+function translateBody(body: string, file: string, stateNames: string[], warnings: string[], bindNames: string[] = [], isAsync = false, fnNames: Set<string> = new Set(), member = ''): string {
+  // esbuild lowers `x ||= y` to `x || (x = y)`; ArkTS accepts neither side.
+  body = rewriteLoweredLogicalAssign(body, (read, op, rhs) => {
+    const key = stateNames.includes(read) ? read : null;
+    if (!key) return null;
+    const r = `this.${key}`;
+    if (op === '??') return `if (${r} == null) { ${r} = ${rhs}; }`;
+    const test = `(${r} !== '' && ${r} !== null)`;
+    return op === '||' ? `if (!${test}) { ${r} = ${rhs}; }` : `if (${test}) { ${r} = ${rhs}; }`;
+  });
+  // esbuild keeps `x?.['k']` intact, but the member/subscript passes each own one
+  // side of it - the optional-chain index is spelled here, once, instead.
+  body = rewriteOptionalIndex(body, (recv, key) => `${recv}?.[${key}]`);
   const stateSet = new Set(stateNames);
+  // ArkTS has no global fetch: the kit's @ohos.net.http request is the call a
+  // page makes, and its answer is a plain map.
+  body = body.replace(/\bfetch\s*\(/g, 'roseFetch(');
   // useNative('camera', opts) becomes the kit's roseNative call - one dispatch
   // shared by every page. Done before the DOM refusal so the call is never
   // mistaken for a construct ArkTS cannot express.
@@ -3762,17 +5044,42 @@ function translateBody(body: string, file: string, stateNames: string[], warning
   // input binds to), and preventDefault/reset/e.target are stripped. A genuine
   // DOM read survives the rewrite and is still refused below.
   body = rewriteFormReads(body);
+  // A script FUNCTION (not a handler) is its own code path and `$t` was never
+  // rewritten here: `return $t("k", { name: "x" })` reached the file as rosezm
+  // syntax, which is not ArkTS - the same leak the Swift parse gate caught.
+  body = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   if (/FormData\(|\bdocument\.|\bwindow\./.test(body)) {
-    warnings.push(`arkts: ${file}: a handler touches the DOM/FormData, which has no ArkTS equivalent - emitted as a stub`);
-    return '    // rosezm: handler body not translated (web-only API).';
+    // The report asks for the stub BY NAME: the warning and the comment in the
+    // emitted file both name the member, so the degraded surface is greppable.
+    const who = member ? `the member "${member}"` : 'a handler';
+    warnings.push(`arkts: ${file}: ${who} touches the DOM/FormData, which has no ArkTS equivalent - emitted as a stub`);
+    return member
+      ? `    // rosezm: the member "${member}" is a stub - its body touches the DOM/FormData, which has no ArkTS equivalent.`
+      : '    // rosezm: handler body not translated (web-only API).';
   }
   // No JS construct may leak into the emitted file: a state write with a
   // spread becomes concat, `throw new Error` the kit's roseThrow.
   let body2 = rewriteThrowNew(body);
   body2 = rewritePromiseExprs(body2);
+  // A local arrow (`const double = (n) => n * 2`) becomes a typed ArkTS
+  // lambda: `const double = (n: Object): Object => Number(n) * 2`. ArkTS call
+  // sites invoke the const natively; a keyword name gains a `_` suffix (the
+  // call sites follow) and the Object parameter's arithmetic rides Number(),
+  // the coercion the kit itself uses. A `+` body stays bare - `Object + String`
+  // does not compile and numeric `+` needs type inference; upgrade when a page
+  // trips it.
+  body2 = rewriteLocalArrow(body2, (name, params, b) => {
+    const kw = /^(?:break|case|catch|class|const|continue|default|do|else|enum|export|extends|false|finally|for|function|if|import|in|instanceof|interface|let|new|null|return|super|switch|this|throw|true|try|typeof|var|void|while|with|yield)$/;
+    const safe = kw.test(name) ? `${name}_` : name;
+    const { names, body: bb } = spellArrowParams(params, b, kw, (x) => `Number(${x})`, (x) => `(${x}).toString()`);
+    return [`const ${safe} = (${names.map((n) => `${n}: Object`).join(', ')}): Object => ${bb}`, safe];
+  });
+  // The JS sleep idiom is the one Promise constructor a page body may write;
+  // the kit's roseDelay is its spelling here, awaited like any other promise.
+  body2 = body2.replace(/new\s+Promise\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*setTimeout\s*\(\s*\1\s*,\s*(\d+)\s*\)\s*\)/g, 'roseDelay($2)');
   // A mapper setter ($setState('k', p => EXPR)) is translated before anything
   // else: the target's own state pass then never sees the JS arrow.
-  // R288: a direct mutation (`items().push(x); setItems(items())`) lowers to
+  // A direct mutation (`items().push(x); setItems(items())`) lowers to
   // the spread/filter write every target can already spell.
   {
     let n = 0;
@@ -3794,13 +5101,13 @@ function translateBody(body: string, file: string, stateNames: string[], warning
     const out = translateExpr(expr, { ...ARKTS_EXPR, read: (n) => (stateSet.has(n) ? `this.${n}` : n) }, new Set());
     return out === null ? null : `this.${key} = ${out};`;
   });
-  // R291: the auto-setter form of the same write for the string + search
+  // The auto-setter form of the same write for the string + search
   // family - `setJoined(items().join(','))`. The shared auto-setter pass covers
-  // only the map/filter/... family, so the R291 members need this one here.
+  // only the map/filter/... family, so the members need this one here.
   body2 = rewriteArkSearchWrites(body2, stateSet);
   body2 = rewriteSpreadWrites(body2, (kind, key, list, item) =>
     kind === 'append' ? `this.${key} = (${list}).concat([ ${item} ])` : `this.${key} = [ ${item} ].concat(${list})`,
-    // R286: the auto-setter form (setItems([...items(), 'new'])) rides the
+    // The auto-setter form (setItems([...items(), 'new'])) rides the
     // same spelling - it is what real handlers write.
     (setter) => {
       const key = setter.slice(3, 4).toLowerCase() + setter.slice(4);
@@ -3808,7 +5115,15 @@ function translateBody(body: string, file: string, stateNames: string[], warning
     },
   );
   let out = rewriteSetState(body2.trim());
-  out = out.replace(/\bawait\s+/g, '');
+  // An async member's await is native ArkTS - it survives; a sync body has no
+  // await to hang it on, so the keyword is dropped the way it always was.
+  if (!isAsync) out = out.replace(/\bawait\s+/g, '');
+  // A sibling page function is a member: the call needs `this.` to compile.
+  if (isAsync) {
+    for (const fn of fnNames) {
+      out = out.replace(new RegExp(`(?<![\\w$.])${escapeRe(fn)}\\s*\\(`, 'g'), `this.${fn}(`);
+    }
+  }
   out = out.replace(/\$action\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `this.${name}()`);
   out = out.replace(/\brefresh\s*\(\s*\)/g, 'this.loadData()');
   out = out.replace(/\bconsole\.(?:log|warn|error)\(/g, 'console.info(');
@@ -3816,7 +5131,7 @@ function translateBody(body: string, file: string, stateNames: string[], warning
   // State getters read the @State field; the compiler's setters write it.
   const known = new Set(stateNames);
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (_whole, name: string) => (known.has(name) ? `this.${name}` : _whole));
-  // R292: the P0 fix - a setter's closing paren must be consumed with its
+  // The P0 fix - a setter's closing paren must be consumed with its
   // opening one. The old pass was `out.replace(/\bsetX\s*\(/g, 'this.x = ')`:
   // a regex cannot see the matching `)`, so it rewrote the CALL but left its
   // closer behind and `setTotal(n)` became `this.total = n);` - a declaration
@@ -3834,7 +5149,7 @@ function translateBody(body: string, file: string, stateNames: string[], warning
   out = rewriteStringTruth(out, (name) => `${name} !== ''`);
   // `e.key || ''` is JS truthiness; ArkTS has no truthy String.
   out = rewriteOrFallback(out, (operand) => `(${operand} !== '' && ${operand} !== null)`, () => true);
-  // R189: a handler body is a THIRD code path (after the template and the state
+  // A handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it. `store.likes`
   // reached the file verbatim, which is not valid ArkTS: a module bind is a
   // Record, so the read must be store['likes']. Only a BIND is rewritten -

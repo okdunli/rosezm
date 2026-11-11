@@ -15,7 +15,7 @@
  *   app.py               - RoseApp(tk.Tk): routing, state, re-render, actions
  *   README.md
  *
- * R195: the page's CSS now goes through the SAME cascade engine as the web
+ * The page's CSS now goes through the SAME cascade engine as the web
  * build - descendant/child selectors, specificity, id rules, @media at the
  * reference width, and explicit inheritance (Tk inherits nothing, so the body
  * model is carried down as textCarry). flexbox translates to pack: direction,
@@ -32,15 +32,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { transformSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { appIdentity, type AppIdentity } from './app-identity.js';
-import { scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
-import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, ruleMatches, type StyleSheet, type StyleModel, type StyleSubject, type StyleRule, type Justify, type Align, type ElementStyleBinding, type Gradient } from './style-engine.js';
-import { bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads } from './state-ops.js';
-import { translateExpr, type ExprDialect } from './expr-ir.js';
+import { appIdentity, appBuildNumber, type AppIdentity } from './app-identity.js';
+import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
+import { parseRose, substituteParams, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, findSlotNode, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteIdents, callSiteBinds, type Node as IrNode, type Attr as IrAttr , implicitStateNames } from './ir.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, flexDirectionOf, sanitizeFor, ruleMatches, unsupportedForTarget, listMarkerOf, type StyleSheet, type StyleModel, type StyleSubject, type StyleRule, type Justify, type Align, type ElementStyleBinding, type Gradient , filterDowngradesFor,} from './style-engine.js';
+import { isSubmitButton, bakeRouteStates, rewritePromiseExprs, rewriteMapperSets, rewriteAutoSetterWrites, rewriteArrayMutations, replaceOutsideStrings, rewriteDirectSetValue, rewriteThrowNew, initializerLeak, renderWarningSection, rewriteInitializer, rewriteFormReads, coerceStringConcat, coerceStringConcatInAssignments, rewriteLength, rewriteJoinCalls, rewriteStringMethods, type StringMethodSpell, persistKeys, customFontFamilies, genericFontFamily, serverOnlyGlobals, rewriteContentReads, contentBindNames, bakeContent, effectBodies, callifyBareReads, rewriteForOf, rewriteLoweredLogicalAssign, rewriteOptionalIndex, rewriteRegexReplace, rewriteObjectAssign, rewriteSetDedupe, rewriteCollectionChain, rewriteLocalArrow, spellArrowParams, topLevelAssign } from './state-ops.js';
+import { translateExpr, type ExprDialect, matchArrow, rewriteToFixedCalls } from './expr-ir.js';
 import { normalizeHandler as normalizeInlineHandler, inlineHandlerName, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, type SvgShape } from './svg-path.js';
 import { literalOptions, nativeUsage, rewriteNativeCalls, type NativeCapability } from './native-api.js';
+import { validatePythonModule, pyCompileGate } from './python-safety.js';
 
 export interface EmitPythonOptions {
   projectRoot: string;
@@ -154,6 +155,12 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
   // when no page asks for a device capability, so a plain app keeps rosezm.py
   // exactly as it was.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
+  // The kit's background asyncio loop ships only when a page actually awaits:
+  // an {#await} block anywhere in the tree, or an async function - a page's
+  // own or one an inlined component declares (its click handlers schedule
+  // through rose_schedule).
+  const asyncKit = pages.some((p) => hasAwaitBlock(p.nodes) || /(?:^|\n)\s*(?:export\s+)?async\s+function\b/.test(p.script ?? ''))
+    || components.some((c) => hasAwaitBlock(c.nodes) || /(?:^|\n)\s*(?:export\s+)?async\s+function\b/.test(c.script ?? ''));
   // {#defer} is a streaming primitive: the web build flushes a placeholder and
   // the content arrives later. This target has no stream, so the block renders
   // immediately - say so rather than let the difference pass silently.
@@ -174,25 +181,45 @@ export async function emitPython(opts: EmitPythonOptions): Promise<{ pages: stri
     ...pages.flatMap((pg) => compileStyles([pg.style, compCss].filter((s) => s && s.trim()).join('\n'), warnings, pg.name)),
     ...compileStyles(SHELL_STYLES, warnings),
   ];
-  // R486: Tk has no image background (a Frame paints a colour only). Name it,
+  // Tk has no image background (a Frame paints a colour only). Name it,
   // so a hero that looked right on the web does not silently come out empty.
   const cssAll = [globalCss, ...pages.map((pg) => pg.style ?? ''), ...components.map((c) => c.style ?? '')].join('\n');
   if (/background-image\s*:/i.test(cssAll)) {
     warnings.push('python: background-image has no Tk equivalent - the box keeps its colour; use an <img> for the picture');
   }
-  // R489: Tk widgets take no transform.
+  // Tk widgets take no transform.
   if (/transform\s*:/i.test(cssAll)) warnings.push('python: transform has no Tk equivalent - the element renders untransformed');
-  // R248: the hover entries, so each page's element pass can tell which of its
+  // The hover entries, so each page's element pass can tell which of its
   // classes carry a :hover half (the same set STYLES carries at runtime).
   const hoverStyles = new Map(styles.filter((s) => s.className.startsWith('__hover_')).map((s) => [s.className, s.model]));
   await fs.promises.writeFile(path.join(out, 'styles.py'), renderStyles(styles), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'rosezm.py'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root)), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'rosezm.py'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root), asyncKit, { id: app.id, version: app.version, build: String(appBuildNumber(app.version)) }), 'utf8');
   await fs.promises.writeFile(path.join(out, 'pages', '__init__.py'), '', 'utf8');
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), renderPage(page, components, warnings, content, compCss, globalCss, hoverStyles), 'utf8');
+    const generated = renderPage(page, components, warnings, content, compCss, globalCss, hoverStyles);
+    // The syntax safety net: a real app's handlers may contain shapes the
+    // line translator cannot spell. Repair what is mechanical, degrade only
+    // the individual functions that still fail Python's AST, and keep the
+    // module compilable. (See python-safety.ts.)
+    const checked = process.env.rosezm_PY_SAFETY === 'off'
+      ? ({ code: generated } as { code?: string })
+      : validatePythonModule(generated, `pages/${page.name}.py`, warnings) as ReturnType<typeof validatePythonModule> & { code?: string };
+    await fs.promises.writeFile(path.join(out, 'pages', page.name + '.py'), checked.code ?? generated, 'utf8');
   }
-  await fs.promises.writeFile(path.join(out, 'app.py'), renderApp(pages, app), 'utf8');
+  // Optional full-fidelity native layer: a project may ship
+  // `src/python-native.py` implementing `build(app, st, parent)`. It is
+  // mounted by app.py alongside the translated .rose widget tree, so the
+  // exported desktop client keeps real interactions (not just compiled stubs).
+  const nativeSrc = path.join(root, 'src', 'python-native.py');
+  const hasNative = fs.existsSync(nativeSrc);
+  if (hasNative) {
+    await fs.promises.copyFile(nativeSrc, path.join(out, 'native.py'));
+    warnings.push('python: src/python-native.py mounted as a full-interaction native panel');
+  }
+  await fs.promises.writeFile(path.join(out, 'app.py'), renderApp(pages, app, hasNative), 'utf8');
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, warnings), 'utf8');
+  // The export must never claim success with uncompilable Python.
+  if (process.env.rosezm_PY_SAFETY !== 'off') pyCompileGate(out, warnings);
 
   return { pages: pages.map((p) => `pages/${p.name}.py`), components: components.map((c) => c.name) };
 }
@@ -203,6 +230,18 @@ function routeOf(stem: string): string {
   if (parts.length === 1 && parts[0] === 'index') return '/';
   if (parts[parts.length - 1] === 'index') parts.pop();
   return '/' + parts.join('/');
+}
+
+/** Whether any node in the tree is an {#await} block, nested blocks included. */
+function hasAwaitBlock(nodes: IrNode[]): boolean {
+  for (const n of nodes) {
+    if (n.kind === 'await') return true;
+    if (n.kind === 'element' && hasAwaitBlock(n.children)) return true;
+    if (n.kind === 'if' && n.branches.some((b) => hasAwaitBlock(b.children))) return true;
+    if (n.kind === 'each' && (hasAwaitBlock(n.children) || (n.fallback ? hasAwaitBlock(n.fallback) : false))) return true;
+    if (n.kind === 'block' && (hasAwaitBlock(n.children) || (n.fallback ? hasAwaitBlock(n.fallback) : false))) return true;
+  }
+  return false;
 }
 
 function titleOf(head: string | null): string {
@@ -246,7 +285,7 @@ function fontStacksOf(css: string): Map<string, string> {
 }
 
 /**
- * The stylesheet, compiled by the SHARED engine (R195). The old parser read a
+ * The stylesheet, compiled by the SHARED engine . The old parser read a
  * single `.class { }` rule and mapped seven declarations; descendant chains,
  * multi-class elements, `@media`, `style=""` and the entire layout half were
  * invisible, which is why an exported Tk app looked like bare widgets. Every
@@ -257,11 +296,22 @@ function compileStyles(css: string, warnings: string[], scope?: string): PyStyle
   if (!css.trim()) return [];
   const sheet = parseStylesheet(css);
   for (const w of sheet.warnings) warnings.push(`python: ${w}`);
+  // The model carries a few properties Tk cannot paint - the report says
+  // which, for THIS target, instead of the declaration vanishing.
+  const unsupported = unsupportedForTarget('python', sheet);
+  if (unsupported.length) {
+    warnings.push(`python: these declarations have no Tk equivalent - dropped: ${unsupported.join(', ')}`);
+  }
+  // The filter/collapse downgrade lines: what the CSS asked and what
+  // THIS target draws (or does not) - named by selector, never silent.
+  for (const line of filterDowngradesFor('python', sheet)) {
+    warnings.push('python: ' + line);
+  }
   const stacks = fontStacksOf(css);
   const merged = new Map<string, StyleModel>();
   for (const rule of sheet.rules) {
     const last = rule.parts[rule.parts.length - 1];
-    // R248: `:hover` is not dropped - it becomes a second style entry keyed
+    // `:hover` is not dropped - it becomes a second style entry keyed
     // `__hover_<class>`, applied while the pointer is over the widget
     // (<Enter>/<Leave> bindings). Tk on a touch screen has no pointer, so the
     // binding simply never fires there; on a desktop it is real.
@@ -651,7 +701,7 @@ function tkFont(m: StyleModel, rawFamily?: string): string | null {
 function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
   const bg = tkColor(m.background ?? gradientColor(m.gradient));
-  // R230: an explicit width/height. Tk counts a Label's width in CHARACTERS and
+  // An explicit width/height. Tk counts a Label's width in CHARACTERS and
   // a Frame's in PIXELS, so the same number means two things - the author asked
   // for pixels, which is what the Frame path honours; the Label path is right
   // for a text box sized in characters of its own font.
@@ -671,7 +721,7 @@ function tkDecls(m: StyleModel, rawFamily?: string): Array<{ key: string; value:
     out.push({ key: 'highlightbackground', value: tkColor(m.borderColor ?? '#cccccc') ?? "'#cccccc'" });
     out.push({ key: 'highlightthickness', value: String(Math.max(...m.borderWidth)) });
   }
-  // R490: `cursor: pointer` is Tk's own 'hand2'.
+  // `cursor: pointer` is Tk's own 'hand2'.
   if (m.cursor === 'pointer') out.push({ key: 'cursor', value: "'hand2'" });
   if (m.textAlign) {
     out.push({ key: 'justify', value: `'${m.textAlign === 'center' ? 'center' : m.textAlign === 'right' ? 'right' : 'left'}'` });
@@ -697,12 +747,12 @@ function declsKw(decls: Array<{ key: string; value: string }>): string {
 
 /** The text properties a container passes down: explicit CSS inheritance. */
 function textCarry(m: StyleModel): StyleModel {
-  // R256: `background` deliberately does NOT ride along - buttons and inputs
+  // `background` deliberately does NOT ride along - buttons and inputs
   // carry their own browser-chrome background, and CSS does not inherit
   // background into them. The transparent-LABEL case is handled at the label
   // branch, which configures the container surface after pack.
   const out: StyleModel = {};
-  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'textAlign', 'textTransform', 'underline', 'strike'] as Array<keyof StyleModel>) {
+  for (const k of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'tabularNums', 'textAlign', 'textTransform', 'underline', 'strike'] as Array<keyof StyleModel>) {
     const v = m[k];
     if (v !== undefined) (out as Record<string, unknown>)[k] = v;
   }
@@ -742,7 +792,7 @@ function renderStyles(rules: PyStyle[]): string {
   return lines.join('\n');
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}, asyncKit = false, appInfo: { id: string; version: string; build: string } = { id: '', version: '', build: '' }): string {
   const contentBlock = content ? `
 # The project's markdown collections, baked at export time. A page reads them
 # through rose_content_list / rose_content_get, the same shape the server-side
@@ -764,7 +814,7 @@ def rose_content_get(coll, slug):
   // useNative keeps rosezm.py exactly as it was.
   const nativeBlock = native.length ? `
 # The device capabilities this project's pages asked for through
-# useNative(...) - one dispatch, because each capability reaches a different
+# useNative capability calls - one dispatch, because each capability reaches a different
 # corner of the stdlib. The contract every call site relies on:
 #   camera          -> a local image path/URI, or None when cancelled
 #   geolocation     -> { 'latitude': .., 'longitude': .. }, or None
@@ -781,8 +831,14 @@ ${native.includes('clipboard-read') || native.includes('clipboard-write') ? `def
     return root
 
 
+` : ''}${native.includes('keep-awake') ? `import sys
+# The OS idle-suppression handle (a caffeinate Popen on macOS, a bool
+# elsewhere): the switch keeps it alive until the app turns it off.
+_ROSE_KEEP_AWAKE = None
+
+
 ` : ''}def rose_native(capability, options=None):
-    """One helper for every useNative(...) call this project's pages make."""
+    """One helper for every native capability call this project's pages make."""
     options = options if isinstance(options, dict) else {}
 ${native.includes('get-system-info') ? `    if capability == 'get-system-info':
         import platform as _platform
@@ -792,6 +848,59 @@ ${native.includes('get-system-info') ? `    if capability == 'get-system-info':
             'machine': _platform.machine(),
             'version': _platform.version(),
         }
+` : ''}${native.includes('app-info') ? `    if capability == 'app-info':
+        # The identity the export baked into the module: the page's about
+        # screen reads it, no guessing.
+        import platform as _platform
+        return {
+            'id': ${JSON.stringify(appInfo.id)},
+            'version': ${JSON.stringify(appInfo.version)},
+            'build': ${JSON.stringify(appInfo.build)},
+            'platform': _platform.system().lower(),
+            'os': _platform.release(),
+            'device': _platform.machine(),
+        }
+` : ''}${native.includes('keep-awake') ? `    if capability == 'keep-awake':
+        # The OS idle-suppression switch: on keeps the display awake, off
+        # releases it. Each platform's own API - no third-party package.
+        global _ROSE_KEEP_AWAKE
+        on = bool(options.get('on', True))
+        if on:
+            if sys.platform == 'win32':
+                import ctypes
+                # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x1 | 0x2)
+                _ROSE_KEEP_AWAKE = True
+            elif sys.platform == 'darwin':
+                import subprocess
+                if not _ROSE_KEEP_AWAKE:
+                    _ROSE_KEEP_AWAKE = subprocess.Popen(['caffeinate', '-d'])
+            else:
+                import subprocess
+                try:
+                    subprocess.call(['xset', 's', 'off'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    _ROSE_KEEP_AWAKE = True
+                except FileNotFoundError:
+                    return False
+        else:
+            if sys.platform == 'win32':
+                import ctypes
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+            elif sys.platform == 'darwin' and _ROSE_KEEP_AWAKE:
+                _ROSE_KEEP_AWAKE.terminate()
+            else:
+                import subprocess
+                subprocess.call(['xset', 's', 'on'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _ROSE_KEEP_AWAKE = None
+        return True
+` : ''}${native.includes('check-permission') ? `    if capability == 'check-permission':
+        # The desktop has no runtime permission model of its own: the
+        # answer is 'unknown' (never a fabricated 'granted').
+        return {'name': str(options.get('name', '')), 'state': 'unknown'}
+` : ''}${native.includes('request-permission') ? `    if capability == 'request-permission':
+        # The one request function: the desktop asks nothing, so the
+        # answer is the same 'unknown' - there is no dialog to raise.
+        return {'name': str(options.get('name', '')), 'state': 'unknown'}
 ` : ''}${native.includes('get-network-type') ? `    if capability == 'get-network-type':
         import socket
         try:
@@ -847,7 +956,7 @@ ${native.includes('get-system-info') ? `    if capability == 'get-system-info':
         # capture, so this answers None instead of pretending.
         return None
 ` : ''}${native.includes('toast') ? `    if capability == 'toast':
-        # R428: a borderless Toplevel near the bottom of the window - a
+        # A borderless Toplevel near the bottom of the window - a
         # non-modal overlay, unlike messagebox.
         root = getattr(tk, '_default_root', None) or tk.Tk()
         box = tk.Toplevel(root)
@@ -907,6 +1016,7 @@ The same protocol the web build and the mini-program target speak - no SDK, no
 third-party package, no framework runtime on the client.
 """
 import json
+import math
 import tkinter as tk
 from tkinter import ttk
 ${contentBlock}
@@ -915,11 +1025,55 @@ ${contentBlock}
 def roseThrow(message):
     """The await reject branch: it always raises, so the catch arm renders."""
     raise Exception(str(message))
-def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False, readonly=False, autofocus=False):
+class _RoseTarget:
+    def __init__(self, value):
+        self.value = value
+
+class _RoseEvent:
+    """The event stub a named field handler receives: target.value (and
+    currentTarget.value) carry the field's new value - the one piece a change
+    callback can supply. Any other member raises AttributeError."""
+    def __init__(self, value):
+        self.target = _RoseTarget(value)
+        self.currentTarget = self.target
+
+def rose_event(value):
+    return _RoseEvent(value)
+
+class _RoseKeyEvent(_RoseEvent):
+    """A keydown event on a text field: the key name and target.value ride it -
+    the two members an on:keydown handler reads on the web."""
+    def __init__(self, key, value):
+        super().__init__(value)
+        self.key = key
+
+def rose_key_event(key, value):
+    return _RoseKeyEvent(key, value)
+
+def __deepset(row, path, value):
+    """The immutable path write a member-path two-way binding uses: copy every
+    level on the way down and place the value at the end."""
+    if not path:
+        return value
+    head = path[0]
+    if len(path) == 1:
+        out = dict(row)
+        out[head] = value
+        return out
+    nested = row.get(head)
+    if not isinstance(nested, dict):
+        nested = {}
+    out = dict(row)
+    out[head] = __deepset(nested, path[1:], value)
+    return out
+
+def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password=False, readonly=False, autofocus=False, textvariable=None):
     """A text field with the app's base font - a bare tk.Entry renders in the
     system default at a size that fights every styled label beside it."""
     from styles import STYLES
     opts = {'font': ('TkDefaultFont', 10), 'relief': 'sunken', 'bd': 1}
+    if textvariable is not None:
+        opts['textvariable'] = textvariable
     for __k, __v in STYLES.get(cls, {}).items():
         if __k in ('bg', 'background', 'fg', 'foreground', 'font', 'justify', 'show', 'state', 'cursor', 'takefocus', 'readonlybackground', 'relief', 'bd', 'highlightbackground', 'highlightthickness', 'padx', 'pady'):
             opts[__k] = __v
@@ -937,13 +1091,13 @@ def rose_entry(parent, cls='', style=None, disabled=False, maxlength=0, password
         # Tk has no maxlength: a key validator refuses input past the limit.
         vcmd = (parent.register(lambda proposed: len(proposed) <= maxlength), '%P')
         widget.configure(validate='key', validatecommand=vcmd)
-    # R441: autofocus is the browser's focus-on-mount; defer until mapped.
+    # Autofocus is the browser's focus-on-mount; defer until mapped.
     if autofocus:
         widget.after(0, widget.focus_set)
     return widget
 
 def rose_date(parent, key, state, render, iso_min='', iso_max=''):
-    """R447: a date input as three spin boxes (year, month, day) - Tk has no
+    """A date input as three spin boxes (year, month, day) - Tk has no
     calendar sheet in the box, but the value is the same ISO day the web input
     writes, so nothing downstream sees a different format."""
     import datetime as _dt
@@ -1094,6 +1248,13 @@ def rose_tokens(value):
     return str(value).split()
 
 
+def rose_distinct(value):
+    out = []
+    for item in rose_list(value):
+        if item not in out:
+            out.append(item)
+    return out
+
 def rose_join(parts):
     """Flatten the pieces of one class attribute - literal strings and the token
     lists a bound expression returned - into the single list rose_resolve
@@ -1178,6 +1339,17 @@ def rose_html_label(parent, html, **pack):
                 flush(); active.add('r_code')
             elif tag == '/code':
                 flush(); active.discard('r_code')
+            elif tag in ('sub', 'sup'):
+                flush()
+                # Tk's Text tag carries the shift as a vertical offset and a
+                # smaller font - the glyph reads as subscript/superscript, the
+                # way the browser paints the literal tag.
+                name = 'r_sub' if tag == 'sub' else 'r_sup'
+                if name not in active:
+                    box.tag_config(name, offset=(-2 if tag == 'sub' else 4))
+                active.add(name)
+            elif tag in ('/sub', '/sup'):
+                flush(); active.discard('r_sub'); active.discard('r_sup')
             elif tag == 'u':
                 flush(); active.add('r_link')
             elif tag == '/u':
@@ -1186,6 +1358,34 @@ def rose_html_label(parent, html, **pack):
                 flush(); active.add('r_link')
             elif tag == '/a':
                 flush(); active.discard('r_link')
+            elif tag == 'font' or tag.startswith('font ') or tag == 'span' or tag.startswith('span '):
+                flush()
+                # A colour rides the attribute, not a fixed tag: one config per
+                # distinct value (the way a styled ::marker glyph reads here).
+                at = tag.find('color')
+                if at >= 0:
+                    rest = tag[at + 5:].lstrip('= :\\\'"')
+                    val = rest.split(';')[0].split(' ')[0].strip('\\\'"')
+                    if val:
+                        name = 'r_c_' + val.lstrip('#')
+                        box.tag_config(name, foreground=val)
+                        active.add(name)
+                fz = tag.find('font-size')
+                if fz >= 0:
+                    rest = tag[fz + 9:].lstrip('= :')
+                    val = rest.split(';')[0].split(' ')[0].rstrip('px').strip()
+                    if val:
+                        try:
+                            px = int(float(val))
+                            name = 'r_s_%d' % px
+                            box.tag_config(name, font=('TkDefaultFont', max(6, px)))
+                            active.add(name)
+                        except ValueError:
+                            pass
+            elif tag in ('/font', '/span'):
+                flush()
+                for name in [a for a in active if a.startswith('r_c_') or a.startswith('r_s_')]:
+                    active.discard(name)
             i = end + 1
             continue
         if html[i] == '&':
@@ -1210,13 +1410,19 @@ def rose_rich_label(parent, runs, **pack):
         box.configure(bg=parent.cget('bg'))
     except Exception:
         pass
-    for i, (font, color, text) in enumerate(runs):
+    for i, run in enumerate(runs):
+        font, color, text = run[0], run[1], run[2]
+        # The 4th slot is a baseline offset (vertical-align: Npx) - Tk's Text
+        # tag carries it natively; older callers keep the 3-tuple shape.
+        shift = run[3] if len(run) > 3 else None
         tag = 'r_run%d' % i
         opts = {}
         if font is not None:
             opts['font'] = font
         if color is not None:
             opts['foreground'] = color
+        if shift:
+            opts['offset'] = int(shift)
         if opts:
             box.tag_config(tag, **opts)
         box.insert('end', text, (tag,) if opts else ())
@@ -1237,7 +1443,7 @@ def rose_rich_label(parent, runs, **pack):
 
 
 def rose_remote_image(parent, url, **pack):
-    """R417: a remote image. A daemon thread downloads it and the label swaps
+    """A remote image. A daemon thread downloads it and the label swaps
     the pixmap in when it arrives; the page build never blocks on the host."""
     import threading
     import urllib.request
@@ -1282,6 +1488,60 @@ def rose_text(fn):
         return 'This section failed to render.'
 
 
+def rose_pow(value, exponent):
+    return math.pow(float(value or 0), float(exponent or 0))
+
+
+def rose_sqrt(value):
+    return math.sqrt(max(0.0, float(value or 0)))
+
+
+def rose_assign(a, b):
+    out = dict(a) if isinstance(a, dict) else {}
+    if isinstance(b, dict):
+        out.update(b)
+    return out
+
+
+def rose_number(value):
+    try:
+        return float(value) if '.' in str(value) else int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def __rose_reduce(fn, value, seed=None):
+    acc = seed
+    for item in (value or []):
+        acc = fn(acc, item)
+    return acc
+
+
+def rose_char_at(value, idx):
+    s = str(value or '')
+    i = idx if idx >= 0 else len(s) + idx
+    return s[i] if 0 <= i < len(s) else ''
+
+def rose_bool(value):
+    """JS Boolean(x) - truthiness spelled for Python."""
+    return bool(value)
+
+def rose_pad_start(value, width, fill=' '):
+    """JS String.padStart - right-justify in a fixed width."""
+    s = str(value)
+    w = int(width)
+    return s.rjust(w, fill) if len(s) < w else s
+
+def rose_pad_end(value, width, fill=' '):
+    """JS String.padEnd - left-justify in a fixed width."""
+    s = str(value)
+    w = int(width)
+    return s.ljust(w, fill) if len(s) < w else s
+
+def rose_re_sub(value, pat, repl, count=0):
+    import re
+    return re.sub(pat, repl, str(value or ''), count=count)
+
 def rose_floor(value):
     v = float(value or 0)
     i = int(v)
@@ -1310,8 +1570,46 @@ API_BASE = os.environ.get('ROSEZM_API') or ${JSON.stringify(apiBase)}
 # The state each route rendered with at build time: the first frame a device can
 # paint with no server. A live data channel still wins when it answers.
 BAKED = json.loads(${JSON.stringify(JSON.stringify(baked))})
+${asyncKit ? `
+# The async half: a page's {#await} blocks and its own async functions run as
+# real coroutines on one background asyncio loop. The Tk main loop never
+# blocks on them - a settled result flips the await state from the worker
+# side and the app re-renders.
+import asyncio
+import threading
+
+_ROSE_LOOP = None
 
 
+def rose_loop():
+    global _ROSE_LOOP
+    if _ROSE_LOOP is None:
+        _ROSE_LOOP = asyncio.new_event_loop()
+        threading.Thread(target=_ROSE_LOOP.run_forever, daemon=True).start()
+    return _ROSE_LOOP
+
+
+def rose_await(coro):
+    """Evaluate a coroutine on the background loop, blocking the calling
+    worker thread (never the Tk main loop) until it settles."""
+    return asyncio.run_coroutine_threadsafe(coro, rose_loop()).result()
+
+
+def rose_schedule(coro):
+    """A button bound to an async def: Tk cannot await, so the coroutine is
+    scheduled on the loop and a failure is printed instead of vanishing."""
+    def _failed(fut):
+        try:
+            exc = fut.exception()
+        except Exception:
+            exc = None
+        if exc is not None:
+            import sys as _rose_sys
+            print('rosezm: async handler failed: %r' % (exc,), file=_rose_sys.stderr)
+    future = asyncio.run_coroutine_threadsafe(coro, rose_loop())
+    future.add_done_callback(_failed)
+    return future
+` : ''}
 def baked_patch(route):
     entry = BAKED.get(route)
     return entry if isinstance(entry, dict) else {}
@@ -1389,6 +1687,60 @@ def wall_status(error):
     return None
 
 
+class RoseFetchResult(dict):
+    """The decoded fetch body. A dict for r['ok'] / r.get(...), AND awaitable:
+    an exported coroutine keeps the web's await-fetch spelling, while
+    rose_fetch itself is synchronous (urllib). Plain await on a dict raised
+    TypeError on every desktop data poll; this makes both call shapes work."""
+    def __await__(self):
+        # A nested coroutine cannot be declared verbatim inside this TS
+        # template literal (the TS parser reads the keyword as a modifier).
+        # __await__ only needs an
+        # ITERATOR, so a generator that yields once and returns self is enough
+        # - no coroutine object, no asyncio dependency for the fetch itself.
+        def _resolved():
+            yield
+            return self
+        return _resolved()
+
+def rose_fetch(url, method='GET', body=None):
+    """The web's fetch, in the kit's currency: a dict with ok and status plus
+    the decoded JSON body, so a page reads r['ok'] / r.json() like a Response."""
+    target = url if url.startswith('http') else API_BASE + url
+    out = RoseFetchResult(ok=False, status=0)
+    data = body.encode('utf-8') if isinstance(body, str) else body
+    try:
+        request = urllib.request.Request(target, data=data, method=method)
+    except ValueError:
+        return out
+    if SESSION_COOKIE:
+        request.add_header('Cookie', SESSION_COOKIE)
+    if data is not None:
+        request.add_header('Content-Type', 'application/x-www-form-urlencoded')
+    try:
+        with _ROSE_OPENER.open(request, timeout=8) as response:
+            _rose_capture_cookie(response.headers)
+            text = response.read().decode('utf-8', 'replace')
+            out['ok'] = 200 <= response.status < 300
+            out['status'] = response.status
+        try:
+            decoded = json.loads(text)
+        except Exception:
+            decoded = text
+        if isinstance(decoded, dict):
+            out.update(decoded)
+        else:
+            out['body'] = decoded
+    except urllib.error.HTTPError as error:
+        _rose_capture_cookie(error.headers)
+        out['status'] = error.code
+        out['ok'] = 200 <= error.code < 300
+    except Exception:
+        # A missing server is a data-less screen, not a crash.
+        pass
+    return out
+
+
 def data_patch(route):
     """The JSON half of a render: the state the page's $data produced."""
     global WALL
@@ -1428,14 +1780,17 @@ def t(key, params=None):
     return key
 
 
-def action_patch(route, name):
+def action_patch(route, name, fields=None):
     """POST __action=<name> - the framework's own server-action protocol."""
     global WALL
     WALL = None
     if not API_BASE:
         return {}
     url = API_BASE + route
-    body = urllib.parse.urlencode({'__action': name}).encode('utf-8')
+    pairs = {'__action': name}
+    if fields:
+        pairs.update(fields)
+    body = urllib.parse.urlencode(pairs).encode('utf-8')
     try:
         request = urllib.request.Request(url, data=body, method='POST')
     except ValueError:
@@ -1489,8 +1844,12 @@ class bound to state (class={expr}) resolves at runtime from styles.py.
 ${renderWarningSection(warnings)}`;
 }
 
-function renderApp(pages: Array<{ route: string; name: string; params: string[]; title: string }>, app: AppIdentity): string {
-  const appName = app.name;
+function renderApp(pages: Array<{ route: string; name: string; params: string[]; title: string }>, app: AppIdentity, hasNative = false): string {
+  // A page's <head><title> is the app window title on the desktop - the web
+  // build already shows it in the tab. Fall back to the app identity only when
+  // no page declares one (or the title was a dynamic expression).
+  const home = pages.find((p) => p.route === '/') ?? pages[0];
+  const appName = (home && home.title ? home.title : app.name).replace(/'/g, "\\'");
   const imports = pages.map((p) => `from pages import ${p.name} as page_${p.name}`).join('\n');
   const table = pages.map((p) => `    ('${p.route}', page_${p.name}),`).join('\n');
   return `"""rosezm - the exported Python desktop app (stdlib Tkinter)."""
@@ -1505,6 +1864,7 @@ import rosezm
 from styles import STYLES
 
 ${imports}
+${hasNative ? 'import native' : ''}
 
 PAGES = [
 ${table}
@@ -1554,6 +1914,10 @@ class RoseApp(tk.Tk):
         self.body = tk.Frame(self, bg='#ffffff', padx=32, pady=32)
         self.body.pack(fill='both', expand=True)
         self.states = {}
+        # A page $effect's cleanup registers here and runs when the page is left.
+        self.disposers = []
+        # The desktop's global object: globalThis reads and writes land here.
+        self.globals = {}
         # The launch parameters. A desktop app has no address bar, so this is
         # empty unless the app fills it - a $query() read then behaves exactly
         # like a missing query param on the web.
@@ -1612,7 +1976,7 @@ class RoseApp(tk.Tk):
         pattern, module, params = self.resolve(route)
         if pattern in self.states:
             return self.states[pattern]
-        # R253: a seed that reads the app handle is a lambda on the module
+        # A seed that reads the app handle is a lambda on the module
         # (STATE is built before any RoseApp exists), and build() resolves it
         # LATER - this copy is taken BEFORE that, so resolving the callables
         # here too. Without it st['q'] held the lambda itself and the page
@@ -1674,9 +2038,20 @@ class RoseApp(tk.Tk):
             else:
                 print('rosezm: %s is behind a middleware wall (%d); the server refused it'
                       % (route, status), file=sys.stderr)
+        self.dispose_page()
         for child in list(self.body.winfo_children()):
             child.destroy()
         module.build(self, state, self.body)
+${hasNative ? "        try:\n            native.build(self, state, self.body)\n        except Exception as __native_err:\n            print('rosezm: native panel failed:', __native_err, file=sys.stderr)" : ''}
+
+    def dispose_page(self):
+        """Run the current page's effect cleanups, then forget them - the Tk
+        spelling of the web's route disposal: every navigation away drains
+        here, and main() drains once more after mainloop returns."""
+        pending = self.disposers
+        self.disposers = []
+        for fn in pending:
+            fn()
 
     def back(self):
         """Pop the last page off the back-stack, no-op at the floor."""
@@ -1692,8 +2067,8 @@ class RoseApp(tk.Tk):
         """Re-render the current page from its (mutated) state."""
         self.show(self.current)
 
-    def run_action(self, route, name):
-        patch = rosezm.action_patch(route, name)
+    def run_action(self, route, name, fields=None):
+        patch = rosezm.action_patch(route, name, fields)
         if patch:
             self.states.setdefault(route, {}).update(patch)
             self.render()
@@ -1702,6 +2077,7 @@ def main():
     app = RoseApp()
     app.show('/')
     app.mainloop()
+    app.dispose_page()
 
 
 if __name__ == '__main__':
@@ -1729,7 +2105,6 @@ function renderPage(
     ? rewriteContentReads(page.script ?? '', 'rose_content_list', 'rose_content_get', "''")
     : page.script;
   const persist = persistKeys(pageScript ?? '');
-  const stateNames = new Set([...facts.state, ...facts.derived.map((d) => d.name), ...facts.data]);
   // A `const posts = globalThis.__rosezmContent.list('posts')` is not a literal,
   // so moduleBinds skips it; the exporter knows what it expands to and emits it.
   const contentBinds = content && contentGlobals.length ? contentBindNames(page.script ?? '') : [];
@@ -1739,7 +2114,15 @@ function renderPage(
     return { name, init: rewriteContentReads(init, 'rose_content_list', 'rose_content_get', "''") };
   })];
   const knownBinds = new Set(binds.map((b) => b.name));
-  // R195: the page's own cascade. The site's theme, the page CSS, every
+  // The component half of the lifecycle: a .rose component inlines into this
+  // page's tree, so its onMount/onCleanup ride the parent's mount/drain
+  // moments, and a hook-declaring component's own $state keys into this
+  // page's STATE per instance (`<instanceId>:<name>` - the element pass
+  // materializes one instance per call site and those keys join the state
+  // tables below).
+  const compLc = translateComponentLifecycles(page, components, componentClosure(page.nodes, page.components, components), warnings, [...facts.state, ...facts.derived.map((d) => d.name), ...facts.data], binds.map((b) => b.name), facts.state);
+  const stateNames = new Set([...facts.state, ...facts.derived.map((d) => d.name), ...facts.data]);
+  // The page's own cascade. The site's theme, the page CSS, every
   // component's CSS it can reach, and the shell's base theme resolve through the
   // same engine the web build uses - the reference width decides an
   // @media-guarded rule. The theme comes first so the page's own `<style>` wins.
@@ -1764,6 +2147,12 @@ function renderPage(
   // The shell's `body` rule is the page's base typography: Tk inherits nothing,
   // so the body model is carried down explicitly instead of lost.
   const bodyModel = cascadeFor(sheet, { tag: 'body', classes: [] }, [], { viewport: REFERENCE_WIDTH }).model;
+  // Handlers translate BEFORE the tree so an {#await} head can tell which of
+  // the page's own async functions really became coroutines (and which are
+  // stubs that must degrade the block to its catch branch).
+  const effectNames: string[] = [];
+  const fnInfo = { asyncClean: [] as string[], asyncStub: [] as string[], sync: [] as string[], syncStub: [] as string[] };
+  const handlers = translateHandlers(page.script, facts, page, warnings, binds.map((b) => b.name), effectNames, fnInfo);
   const ctx: PyCtx = {
     warnings,
     file: page.name,
@@ -1771,12 +2160,26 @@ function renderPage(
     mapBinds: new Set(knownBinds),
     funcBinds: new Set(binds.filter((b) => b.init.includes('=>') || b.init.startsWith('__ARROW__')).map((b) => b.name)),
     components,
+    compLc,
     lines: [],
     depth: 1,
     app: 'app',
     st: 'st',
     parent: 'parent',
+    pageAction: (() => { try { return extractExports(page.script).actions[0]?.name ?? null; } catch { return null; } })(),
+    pageRoute: page.route,
+    evt: { used: false },
+    keyEvt: { used: false },
+    fields: { used: false },
+    fnArities: new Map(
+      [...page.script.matchAll(/^\s*(?:(async)\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => [m[2], m[3].trim() ? m[3].split(',').length : 0]),
+    ),
     awaits: [],
+    asyncFuncs: new Set(fnInfo.asyncClean),
+    asyncStubs: new Set(fnInfo.asyncStub),
+    syncFuncs: new Set(fnInfo.sync),
+    syncStubs: new Set(fnInfo.syncStub),
+    compFns: compLc.compFns,
     deferred: [],
     opens: [],
     scriptConsts: scriptConstsFor(page.script, stateNames),
@@ -1796,17 +2199,18 @@ function renderPage(
     fontStacks,
     noted: new Set(),
     dyn: { used: false },
+    rowbind: { used: false },
     links: { used: false },
-    // R191: `$derived` is a live function of other state, so every read must
+    // `$derived` is a live function of other state, so every read must
     // re-evaluate it. The one-shot `st['name'] = ...` assignment below stays as
     // the initial seed for anything that reads the raw dict, but the template
     // and handler paths read through this map instead.
     derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
-    // R256: the page scope paints the body's white on a transparent page - the
+    // The page scope paints the body's white on a transparent page - the
     // frame the build() tree packs into IS the visible page, and Tk defaults
     // every widget to grey SystemButtonFace, not the document background.
     surface: tkColor(bodyModel.background) ?? "'#ffffff'",
-    // R248: the hover entries the page's compileStyles registered - the same
+    // The hover entries the page's compileStyles registered - the same
     // keys STYLES carries, keyed to the scope the element pass resolves with.
     hoverKeys: new Set(hoverStyles.keys()),
   };
@@ -1814,8 +2218,8 @@ function renderPage(
   const lines = ctx.lines.join('\n');
   const appSeedNames: string[] = [];
   const state = facts.state.map((name) => {
-    const seed = initialOf(page.script, name, new Set([...knownBinds, ...facts.state, ...facts.derived.map((d) => d.name), ...facts.data]));
-    // R253: a seed that reads the app handle ($query().q) cannot run at import
+    const seed = compLc.seeds.get(name) ?? initialOf(page.script, name, new Set([...knownBinds, ...facts.state, ...facts.derived.map((d) => d.name), ...facts.data]));
+    // A seed that reads the app handle ($query().q) cannot run at import
     // time - STATE is built before any RoseApp exists. A zero-arg lambda was
     // wrong for a second reason: Python closures are LEXICAL, so a lambda defined
     // at module scope cannot see build()'s local `app` - it raised NameError at
@@ -1830,15 +2234,13 @@ function renderPage(
   // Always defined - build() references __APP_SEEDS even when no seed needs the
   // app handle, and an empty list keeps that one code path.
   const appSeedsLine = `__APP_SEEDS = ${JSON.stringify(appSeedNames)}`;
-  // R252: an arrow-function module bind becomes a real `def`, not an assignment.
+  // An arrow-function module bind becomes a real `def`, not an assignment.
   const bindLines = binds.map((b) => {
     const arrow = /^__ARROW__(.*?)__ARROW__\n    ([\s\S]*)$/.exec(b.init);
     if (!arrow) return `${b.name} = ${b.init}`;
     return `def ${b.name}(${arrow[1]}):\n    ${arrow[2]}`;
   }).join('\n');
   const derived = facts.derived.map((d) => `    st['${d.name}'] = ${pyExpr(d.expr, { ...ctx, lines: [], depth: 1, scriptConsts: new Map(), derivedExprs: new Map() })}`).join('\n');
-  const effectNames: string[] = [];
-  const handlers = translateHandlers(page.script, facts, page, warnings, binds.map((b) => b.name), effectNames);
   // build() is the recompute pass, so an effect runs at the head of it: the
   // derived assignments above are already in `st`, and the tree below renders the
   // values the effect just wrote.
@@ -1846,14 +2248,18 @@ function renderPage(
   const inlineDefs = ctx.inlineBodies.length ? '\n' + ctx.inlineBodies.join('\n') : '';
   // The page imports the kit dispatch only when its own translated code calls
   // it: a page without useNative keeps the exact import line it has today.
-  const usesNative = /\brose_native\s*\(/.test(handlers + inlineDefs);
-  return `"""${page.route} - generated from a .rose page."""
+  const usesNative = /\brose_native\s*\(/.test(handlers.defs + inlineDefs);
+  // An async def lowers delay promises to asyncio.sleep, so the page module
+  // needs the import whenever it declares one that really translated - its own
+  // or one an inlined component declared.
+  const hasAsyncDef = fnInfo.asyncClean.length > 0 || [...compLc.compFns.values()].some((f) => f.async);
+  const src = `"""${page.route} - generated from a .rose page."""
 import tkinter as tk
 from tkinter import ttk
-
+${hasAsyncDef ? 'import asyncio\n' : ''}
 from styles import STYLES
 import rosezm
-from rosezm import roseThrow, rose_text, rose_button, rose_entry, rose_html_label${/\brose_rich_label\s*\(/.test(lines) ? ', rose_rich_label' : ''}${/\brose_remote_image\s*\(/.test(lines) ? ', rose_remote_image' : ''}${ctx.dyn.used ? ', rose_resolve, rose_apply, rose_join, rose_tokens' : ''}${ctx.links.used ? ', rose_link' : ''}${content && contentGlobals.length ? ', rose_content_list, rose_content_get' : ''}${usesNative ? ', rose_native' : ''}
+from rosezm import roseThrow, rose_text, rose_button, rose_entry, rose_html_label${/\brose_rich_label\s*\(/.test(lines) ? ', rose_rich_label' : ''}${/\brose_remote_image\s*\(/.test(lines) ? ', rose_remote_image' : ''}${ctx.dyn.used ? ', rose_resolve, rose_apply, rose_join, rose_tokens' : ''}${ctx.links.used ? ', rose_link' : ''}${ctx.evt.used ? ', rose_event' : ''}${ctx.keyEvt.used ? ', rose_key_event' : ''}${content && contentGlobals.length ? ', rose_content_list, rose_content_get' : ''}${usesNative ? ', rose_native' : ''}${ctx.rowbind.used ? ', __deepset' : ''}
 
 ${bindLines}
 ${appSeedsLine}
@@ -1862,7 +2268,9 @@ ${state}
 }
 
 PERSIST = ${JSON.stringify(persist)}
-${ctx.opens.length ? '\n# R453: a fold keeps its state across re-renders - build() runs again on every render.\n__OPENED = {}' : ''}
+${compLc.mountLines.length || compLc.runtimeLc ? `\n# The component lifecycle: the one-shot mount flags (component+parent),\n# the keyed cleanup registry the dispose drain walks, and the per-instance\n# store the hoisted lifecycle fields live in.\n__COMP_MOUNTED = set()\n__COMP_CLEANUPS = {}\n__COMP_FIELDS = {}${compLc.fieldSeeds.length ? '\n' + compLc.fieldSeeds.join('\n') : ''}` : ''}
+${ctx.opens.length ? '\n# A fold keeps its state across re-renders - build() runs again on every render.\n__OPENED = {}' : ''}
+${ctx.fields.used ? '\n# A field keeps its own text across re-renders - build() runs again on every render.\n__FIELDS = {}' : ''}
 
 ${ctx.awaits.map((a) => `${a.started} = False
 ${a.done} = False
@@ -1879,7 +2287,7 @@ ${ctx.deferred.length ? `
 __DEFER_ARMED = set()
 ` : ''}
 def build(app, st, parent):
-    # R187: a state seed that reads the app handle (the query string) was stored
+    # A state seed that reads the app handle (the query string) was stored
     # as a lambda, because STATE is built before any RoseApp exists. Resolve it
     # here, where the app is real.
 ${ctx.deferred.map((d) => `    if '${d.name}' not in __DEFER_ARMED:
@@ -1888,9 +2296,26 @@ ${ctx.deferred.map((d) => `    if '${d.name}' not in __DEFER_ARMED:
     for __k, __v in list(STATE.items()):
         if callable(__v):
             STATE[__k] = __v(app) if __k in __APP_SEEDS else __v()
-${derived ? derived + '\n' : ''}${handlers}${inlineDefs}
+${derived ? derived + '\n' : ''}${handlers.defs}${inlineDefs}${compLc.defs.length ? '\n' + compLc.defs.join('\n') : ''}
 ${effectCalls}${lines || '    pass'}
+${handlers.mountCalls}${compLc.mountLines.length ? '\n' + compLc.mountLines.join('\n') : ''}\
 `;
+  // The per-instance state keys ride quoted placeholders through every
+  // translation pass; the assembled page module is where they become the
+  // runtime `<instanceId>:<name>` keys (single- and double-quoted - the
+  // double form is the JSON in __APP_SEEDS). A per-row instance's placeholder
+  // becomes the runtime key expression instead - the id is a build-local at
+  // the splice and a def parameter inside the instance's defs.
+  let out = src;
+  for (const [ph, key] of compLc.keyLits) {
+    out = out.split(`'${ph}'`).join(`'${key}'`);
+    out = out.split(`"${ph}"`).join(`'${key}'`);
+  }
+  for (const [ph, expr] of compLc.keyExprs) {
+    out = out.split(`'${ph}'`).join(expr);
+    out = out.split(`"${ph}"`).join(expr);
+  }
+  return out;
 }
 
 interface PyCtx {
@@ -1898,28 +2323,75 @@ interface PyCtx {
   file: string;
   stateNames: Set<string>;
   mapBinds: Set<string>;
-  /** R253: `{#each}` bindings currently in scope. A $state of the same name is
+  /** `{#each}` bindings currently in scope. A $state of the same name is
    *  SHADOWED - `qty.n` inside `{#each ... as qty}` reads the loop item, not
    *  st['qty']. Every state-name gate below consults this first. */
   loopVars?: Set<string>;
-  /** R253: module-level arrow functions (`const f = () => ...`), callified at the
+  /** Module-level arrow functions (`const f = () => ...`), callified at the
    *  read the way the web compiler does - otherwise `{#each docListE as d}`
    *  iterated over the function object itself. */
   funcBinds?: Set<string>;
   components: Array<{ name: string; nodes: IrNode[]; script: string | null }>;
+  /** The inlined-component accumulator: per-instance state keys, defs and
+   *  mount lines the element pass materializes at each call site. */
+  compLc?: PyCompLc;
+  /** The instance id of the component whose template is being spliced in
+   *  right now - the scope a handler's bare function name resolves against
+   *  while the component's nodes emit. */
+  compInstance?: string;
+  /** How many {#each} loops the current emission sits inside. */
+  eachDepth?: number;
+  /** The row-index counters of the enclosing {#each} loops, outermost first.
+   *  A component call site inside a loop appends them to its instance id, so
+   *  every row materializes its own keyed $state. */
+  rowIndices?: string[];
+  /** {#each} item variable -> the $state root its items expression names, when
+   *  the source is a plain state read. A row-field two-way binding writes back
+   *  through it. */
+  eachRoots?: Map<string, string>;
+  /** A counting marker the <ol> emitter installs around its children: an <li>
+   *  inside reads and increments it, so its marker is "1. ", "2. ", ... */
+  olCounter?: { n: number };
+  /** The "N. " string an <ol>-installed counter handed this <li>. */
+  olMarker?: string;
+  /** The bullet (or the ordered number) this <li> prefixes its text with. */
+  liMarker?: string;
   lines: string[];
   depth: number;
   app: string;
   st: string;
   parent: string;
+  /** A form POST's server action: the submitting button runs it through the
+   *  app's own run_action (a synchronous POST - the server executes it). */
+  pageAction?: string | null;
+  pageRoute?: string;
   /** The background painted behind this container: a justify spacer must be
    *  invisible against it, never a grey dot. */
   surface?: string;
   /** {#await} blocks registered for the page module's thread kick-off. */
-  awaits: Array<{ started: string; done: string; value: string; err: string; expr: string }>;
+  awaits: Array<{ started: string; done: string; value: string; err: string; expr: string; mode: 'coro' | 'value' | 'degraded' }>;
+  /** The page's async functions whose bodies translated: an {#await} head
+   *  calling one runs as a real coroutine on the kit's background loop. */
+  asyncFuncs: Set<string>;
+  /** Async functions declared but stubbed - a head calling one degrades to
+   *  the catch branch instead of handing the then branch a null. */
+  asyncStubs: Set<string>;
+  /** Sync functions the page defines; a head calling one evaluates directly
+   *  (its promise constructors were lowered to plain values). */
+  syncFuncs: Set<string>;
+  /** Sync functions whose bodies were stubbed - their heads degrade too. */
+  syncStubs: Set<string>;
+  /** The inlined components' own functions: source name -> the emitted def
+   *  (and whether it is a real coroutine). A template handler that names one
+   *  resolves to the emitted closure, renamed or not. */
+  compFns?: Map<string, { py: string; async: boolean }>;
+  /** The component whose template is being spliced in right now, keyed by its
+   *  lowercase name - the scope a handler's bare function name resolves
+   *  against while the component's nodes emit. */
+  compScope?: string;
   /** {#defer} flags: each starts false and its hold flips it true. */
   deferred: Array<{ name: string; hold: number }>;
-  /** R453: the `<details>` fold ids this page declared, for the __OPENED map. */
+  /** The `<details>` fold ids this page declared, for the __OPENED map. */
   opens: string[];
   /** Script-level consts the {#await} heads may reference. */
   scriptConsts: Map<string, string>;
@@ -1929,10 +2401,10 @@ interface PyCtx {
   inline: Map<string, string>;
   /** The generated defs themselves, appended inside `build`. */
   inlineBodies: string[];
-  /** R195: the page's stylesheet. The same engine and the same cascade the web
+  /** The page's stylesheet. The same engine and the same cascade the web
    *  build resolves - a `.rose` style is no longer a single class lookup. */
   sheet: StyleSheet;
-  /** R248: the synthetic `__hover_<class>__<scope>` keys this export carries -
+  /** The synthetic `__hover_<class>__<scope>` keys this export carries -
    *  an element whose class is in here gets Enter/Leave bindings that apply the
    *  hover half at runtime. */
   hoverKeys?: Set<string>;
@@ -1979,9 +2451,19 @@ interface PyCtx {
   noted: Set<string>;
   /** True once the page needs the runtime resolver (`class={state}`). */
   dyn: { used: boolean };
+  rowbind: { used: boolean };
   /** True once the page emits an anchor (the kit import follows the body). */
   links: { used: boolean };
-  /** R191: `$derived` name -> its source expression. A derived value is a
+  /** True once a named field callback needs the rose_event stub import. */
+  evt: { used: boolean };
+  /** True once a named on:keydown callback needs the rose_key_event import. */
+  keyEvt: { used: boolean };
+  /** True once a raw on:input field persists its text in the page's __FIELDS. */
+  fields: { used: boolean };
+  /** Page <script> function name -> declared parameter count, so a named field
+   *  callback is called with the arity it declared. */
+  fnArities: Map<string, number>;
+  /** `$derived` name -> its source expression. A derived value is a
    *  function of other state, so it must be re-evaluated at every read rather
    *  than snapshotted once at build time. */
   derivedExprs?: Map<string, string>;
@@ -2216,7 +2698,11 @@ function emitNodes(nodes: IrNode[], ctx: PyCtx): void {
       if (text && !/^[\s'\"]*$/.test(text)) {
         ctx.seq.n++;
         const decls = filterDecls(tkDecls(ctx.inherited, ctx.rawFamily), 'Label');
-        emit(`tk.Label(${ctx.parent}, text=${text}, wraplength=680${decls.length ? ', ' + declsKw(decls) : ''}).pack(${packArgs(ctx, { last: isLast })})`, ctx);
+        // A list marker prefixes the run the way a browser's <li> paints one.
+        // vertical-align on a text block: the label's own anchor positions the
+        // text within the widget (middle/top/bottom).
+        const vaAnchor = ctx.inherited.verticalAlign === 'middle' ? ", anchor='center'" : ctx.inherited.verticalAlign === 'top' ? ", anchor='n'" : ctx.inherited.verticalAlign === 'bottom' ? ", anchor='s'" : '';
+        emit(`tk.Label(${ctx.parent}, text=${ctx.liMarker ? `${JSON.stringify(ctx.liMarker)} + ${text}` : text}, wraplength=680${vaAnchor}${decls.length ? ', ' + declsKw(decls) : ''}).pack(${packArgs(ctx, { last: isLast })})`, ctx);
       }
     } else {
       // The child ctx carries its own "is last" so justify-between can pin it,
@@ -2237,8 +2723,42 @@ function emitNodes(nodes: IrNode[], ctx: PyCtx): void {
  *  double-quoted - nesting the same quote only parses on Python 3.12+ and an
  *  exported app has to run on whatever the user has. */
 function pyLabelText(label: string, fallback: string): string {
-  if (label.includes('{')) return 'f' + JSON.stringify(label);
-  return JSON.stringify(label || fallback);
+  const text = label || fallback;
+  // A label built by the <a>/<button> builders is a plain string that may carry
+  // two very different kinds of brace:
+  //   1. real interpolations, written as {rose_text(lambda: <expr>)} groups -
+  //      these ARE f-string interpolations and must survive untouched;
+  //   2. literal prose that happens to contain { or }, e.g. a JSON snippet
+  //      "{ "a": 1 }" or a stray "{" - to Python these open an interpolation
+  //      that is never closed, so the exported .py fails to parse with
+  //      "SyntaxError: '{' was never closed'" on the user's machine.
+  // The expr inside an interpolation may itself contain braces (a dict literal
+  // like {"a": 1}), so we cannot just blindly double every brace. We walk the
+  // string, copy interpolation groups verbatim, and only double the braces that
+  // belong to literal prose - so both kinds round-trip correctly. (This mirrors
+  // textOf(), which already does the same for text runs.)
+  const INTERP_START = '{rose_text(lambda:';
+  let escaped = '';
+  let cursor = 0;
+  while (true) {
+    const at = text.indexOf(INTERP_START, cursor);
+    if (at === -1) { escaped += text.slice(cursor).replace(/\{/g, '{{').replace(/\}/g, '}}'); break; }
+    // literal prose between the previous group and this one: double its braces
+    escaped += text.slice(cursor, at).replace(/\{/g, '{{').replace(/\}/g, '}}');
+    // brace-match the '{' at `at` to its matching '}' (the inner expr may nest {})
+    let depth = 0, j = at;
+    for (; j < text.length; j++) {
+      if (text[j] === '{') depth++;
+      else if (text[j] === '}') { depth--; if (depth === 0) { j++; break; } }
+    }
+    // the interpolation group is copied back verbatim - its braces are real
+    escaped += text.slice(at, j);
+    cursor = j;
+  }
+  if (escaped.includes('{') || escaped.includes('}')) {
+    return 'f' + JSON.stringify(escaped);
+  }
+  return JSON.stringify(text);
 }
 
 function textOf(nodes: IrNode[], ctx: PyCtx): string {
@@ -2248,6 +2768,11 @@ function textOf(nodes: IrNode[], ctx: PyCtx): string {
     if (node.kind === 'text') {
       segs.push({ text: (node.preserve ? node.value : node.value.replace(/\s+/g, ' ')).replace(/`/g, "'") });
     } else if (node.kind === 'expr') {
+      segs.push({ expr: `rose_text(lambda: ${pyExpr(node.code, ctx)})` });
+    } else if (node.kind === 'html') {
+      // Trusted markup ({@html}) inside a text tag rides the same string: Tk
+      // shows the tags as text where a rich-text label cannot be inline-spliced,
+      // but the markup survives instead of vanishing.
       segs.push({ expr: `rose_text(lambda: ${pyExpr(node.code, ctx)})` });
     }
   }
@@ -2287,13 +2812,22 @@ function pyInlineRuns(children: IrNode[], ctx: PyCtx, base: StyleModel): string[
     if (c.kind === 'text' || c.kind === 'expr') {
       const font = tkFont(base) ?? 'None';
       const color = base.color ? `'${base.color}'` : 'None';
-      runs.push(`(${font}, ${color}, ${textOf([c], ctx)})`);
+      // The 4th slot is the baseline offset (vertical-align: Npx) - Tk's Text
+      // tag carries it natively; 0 keeps the 3-tuple shape for the kit.
+      const shift = base.verticalShift && base.verticalShift.u === 'px' ? Math.round(base.verticalShift.n) : 0;
+      runs.push(`(${font}, ${color}, ${textOf([c], ctx)}, ${shift})`);
       continue;
     }
     if (c.kind !== 'element' || !PY_INLINE.has(c.tag.toLowerCase())) return null;
+    // A literal <sub>/<sup> has no Tk inline baseline shift - the run
+    // flattens it to plain text. Name the loss instead of hiding it.
+    const inlineTag = c.tag.toLowerCase();
+    if (inlineTag === 'sub' || inlineTag === 'sup') {
+      ctx.warnings.push(`python: <${inlineTag}> has no Tk inline baseline here - the glyph is flattened`);
+    }
     const binding = elementStyleBinding(c);
     if (binding.dynamicClassExprs.length || binding.dynamicStyle.length) return null;
-    const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
+    const subject: StyleSubject = { tag: inlineTag, classes: binding.staticClasses };
     const own = mergeModels(cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
     ctx.ancestors.push(subject);
     let inner: string[] | null;
@@ -2318,7 +2852,7 @@ function emitNode(node: IrNode, ctx: PyCtx): void {
       emit(`rose_html_label(${ctx.parent}, ${pyExpr(node.code, ctx)})`, ctx);
       return;
     case 'const': {
-      // R251: a `{@const x = expr}` is a compile-time binding for the rest of the
+      // A `{@const x = expr}` is a compile-time binding for the rest of the
       // block. It used to be dropped with no warning, so every later read of `x`
       // reached the emitted page as an undefined name (a NameError at render).
       // JS `+` on a string is concatenation; Python's needs the operand coerced,
@@ -2348,59 +2882,101 @@ function emitNode(node: IrNode, ctx: PyCtx): void {
     }
     case 'each': {
       emit(`__items = ${pyExpr(node.items, ctx)}`, ctx);
+      // A component call site inside the loop appends the row index to its
+      // instance id, so every row keys its own $state. The counter exists only
+      // when the body materializes such a call site - the children emit into a
+      // buffer first and the counter lines splice in around them.
+      const rowSeq = ctx.compLc ? ++ctx.compLc.rowSeq : 0;
+      const row = `__row${rowSeq}`;
+      const itemsSrc = node.items.trim();
+      const eachRoot = /^[A-Za-z_$][\w$]*$/.test(itemsSrc) || /^\w+\(\)$/.test(itemsSrc) ? itemsSrc.replace(/\(\)$/, '') : '';
+      const scoped: PyCtx = { ...ctx, lines: [], lastChild: false, mapBinds: new Set([...ctx.mapBinds, node.binding.replace(/[^\w]/g, '')]), loopVars: new Set([...(ctx.loopVars ?? []), node.binding.replace(/[^\w]/g, '')]), eachDepth: (ctx.eachDepth ?? 0) + 1, rowIndices: [...(ctx.rowIndices ?? []), row], eachRoots: new Map([...ctx.eachRoots ?? [], [node.binding.replace(/[^\w]/g, ''), eachRoot]]), depth: ctx.depth + 1 };
+      emitNodes(node.children, scoped);
+      const used = ctx.compLc ? ctx.compLc.rowUsers.has(row) : false;
+      if (used) emit(`${row} = -1`, ctx);
       emit(`for ${node.binding} in (__items or []):`, ctx);
       ctx.depth++;
-      const scoped: PyCtx = { ...ctx, lastChild: false, mapBinds: new Set([...ctx.mapBinds, node.binding.replace(/[^\w]/g, '')]), loopVars: new Set([...(ctx.loopVars ?? []), node.binding.replace(/[^\w]/g, '')]) };
-      const before = ctx.lines.length;
-      emitNodes(node.children, scoped);
-      if (ctx.lines.length === before) emit('pass', ctx);
+      if (used) emit(`${row} += 1`, ctx);
+      if (!scoped.lines.length) emit('pass', ctx);
+      ctx.lines.push(...scoped.lines);
       ctx.depth--;
       return;
     }
     case 'await': {
-      // A real loading state: a daemon thread evaluates the promise, and the
-      // app re-renders the page when it settles (Tk has no async UI thread).
+      // A real loading state: a worker thread evaluates the head, and the app
+      // re-renders the page when it settles (Tk has no async UI thread). A
+      // head that names one of the page's own translated async functions runs
+      // as a real coroutine on the kit's background asyncio loop.
       const id = ctx.awaits.length;
       const started = `__await${id}_started`;
       const done = `__await${id}_done`;
       const value = `__await${id}_value`;
       const err = `__await${id}_err`;
+      const callee = /^([A-Za-z_$][\w$]*)\s*\(/.exec(node.expr.trim())?.[1] ?? '';
       const expr = pyExpr(pyTernary(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts)), ctx);
-      if (!awaitHeadIsLiteral(node.expr)) ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
-      ctx.awaits.push({ started, done, value, err, expr });
+      let mode: 'coro' | 'value' | 'degraded' = 'value';
+      if (callee && ctx.asyncFuncs.has(callee)) {
+        mode = 'coro';
+      } else if (callee && (ctx.asyncStubs.has(callee) || ctx.syncStubs.has(callee))) {
+        mode = 'degraded';
+        ctx.warnings.push(`${ctx.file}: the function ${callee}() could not be translated for this target - the {#await} block degrades to its catch branch`);
+      } else if (!(callee && ctx.syncFuncs.has(callee)) && /\bPromise\s*\.|new\s+[A-Z]/.test(normalizeAwaitExpr(node.expr.trim()))) {
+        // Warn only when the normalized head still constructs a promise (or
+        // another JS object): this worker thread would hand the then branch
+        // that object, not its result. A head whose wrappers all lowered to
+        // plain values runs here and stays quiet.
+        ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
+      }
+      ctx.awaits.push({ started, done, value, err, expr, mode });
       const thenMap = new Map<string, string>();
       if (node.thenName) thenMap.set(node.thenName, value);
       const catchMap = new Map<string, string>();
       if (node.catchName) catchMap.set(node.catchName, err);
-      // R252: these flags live in `globals()` because the thread below writes
+      // These flags live in `globals()` because the thread below writes
       // them from another function scope. A bare read of the same name in this
       // scope makes Python treat it as a local, so `if not __await0_started`
       // raised UnboundLocalError on the FIRST render - the block never worked.
       emit(`if not globals().get('${started}'):`, ctx);
       ctx.depth++;
       emit(`globals()['${started}'] = True`, ctx);
-      emit(`def __await${id}_run():`, ctx);
-      ctx.depth++;
-      emit('try:', ctx);
-      ctx.depth++;
-      emit(`globals()['${value}'] = ${expr}`, ctx);
-      ctx.depth--;
-      emit('except Exception as e:', ctx);
-      ctx.depth++;
-      emit(`globals()['${err}'] = str(e)`, ctx);
-      ctx.depth--;
-      emit(`globals()['${done}'] = True`, ctx);
-      emit('try:', ctx);
-      ctx.depth++;
-      emit(`${ctx.app}.after(0, ${ctx.app}.render)`, ctx);
-      ctx.depth--;
-      emit('except Exception:', ctx);
-      ctx.depth++;
-      emit('pass', ctx);
-      ctx.depth--;
-      ctx.depth--;
-      emit(`import threading; threading.Thread(target=__await${id}_run, daemon=True).start()`, ctx);
-      ctx.depth--;
+      if (mode === 'degraded') {
+        // The head cannot run here: settle the block as a real error so the
+        // catch branch renders, never a silent null in the then branch.
+        emit(`globals()['${err}'] = 'the await head ${callee || node.expr.trim().slice(0, 24)} cannot run on this target'`, ctx);
+        emit(`globals()['${done}'] = True`, ctx);
+        emit('try:', ctx);
+        ctx.depth++;
+        emit(`${ctx.app}.after(0, ${ctx.app}.render)`, ctx);
+        ctx.depth--;
+        emit('except Exception:', ctx);
+        ctx.depth++;
+        emit('pass', ctx);
+        ctx.depth--;
+        ctx.depth--;
+      } else {
+        emit(`def __await${id}_run():`, ctx);
+        ctx.depth++;
+        emit('try:', ctx);
+        ctx.depth++;
+        emit(`globals()['${value}'] = ${mode === 'coro' ? `rosezm.rose_await(${expr})` : expr}`, ctx);
+        ctx.depth--;
+        emit('except Exception as e:', ctx);
+        ctx.depth++;
+        emit(`globals()['${err}'] = str(e)`, ctx);
+        ctx.depth--;
+        emit(`globals()['${done}'] = True`, ctx);
+        emit('try:', ctx);
+        ctx.depth++;
+        emit(`${ctx.app}.after(0, ${ctx.app}.render)`, ctx);
+        ctx.depth--;
+        emit('except Exception:', ctx);
+        ctx.depth++;
+        emit('pass', ctx);
+        ctx.depth--;
+        ctx.depth--;
+        emit(`import threading; threading.Thread(target=__await${id}_run, daemon=True).start()`, ctx);
+        ctx.depth--;
+      }
       emit(`if globals().get('${done}'):`, ctx);
       ctx.depth++;
       emit(`if globals().get('${err}') is not None:`, ctx);
@@ -2462,9 +3038,24 @@ function emitNode(node: IrNode, ctx: PyCtx): void {
     case 'slot':
       ctx.warnings.push(`python: a <slot> outside a component call has no content here - skipped`);
       return;
-    case 'element':
+    case 'element': {
+      // An ordered list installs its counter around its <li> children: every
+      // item's marker numbers itself (1. 2. 3.), the way a browser paints one.
+      if (node.tag.toLowerCase() === 'ol') {
+        const counter = { n: 0 };
+        for (const child of node.children) {
+          if (child.kind === 'element' && child.tag.toLowerCase() === 'li') {
+            counter.n += 1;
+            emitElement(child, { ...ctx, olMarker: `${counter.n}. ` });
+          } else {
+            emitNode(child, ctx);
+          }
+        }
+        return;
+      }
       emitElement(node, ctx);
       return;
+    }
   }
 }
 
@@ -2485,7 +3076,7 @@ function rawFamilyOf(classes: string[], ctx: PyCtx): string | undefined {
  * not allowed to be silently poorer.
  */
 function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx, shadowApprox = false): void {
-  // R257: the note is keyed by the FEATURE AND THE ELEMENT, not by the
+  // The note is keyed by the FEATURE AND THE ELEMENT, not by the
   // feature alone. The bare feature name made the first element that asked
   // for it swallow the whole page: a card and a button with their own radii
   // produced ONE line, so the second loss never reached the reader and the
@@ -2511,6 +3102,7 @@ function noteUnsupported(m: StyleModel, who: string, ctx: PyCtx, shadowApprox = 
   if (m.opacity !== undefined && m.opacity < 1) note('opacity', `opacity on ${who} is dropped - Tk widgets have no alpha`);
   if (m.gradient) note('gradient', `a CSS gradient on ${who} is approximated as one blended solid colour (the 50% stop)`);
   if (m.letterSpacing) note('spacing', `letter-spacing on ${who} is dropped - Tk fonts carry no tracking`);
+  if (m.tabularNums) note('tabular', `font-variant-numeric: tabular-nums on ${who} is dropped - Tk has no font-feature API`);
   if (m.lineHeight !== undefined && m.lineHeight !== 1) note('leading', `line-height on ${who} is dropped - Tk line spacing follows the face`);
   if (m.wrap) note('wrap', `flex-wrap on ${who} is dropped - Tk pack lays a single line`);
   if (m.overflow === 'hidden') note('overflow', `overflow:hidden on ${who} is dropped - Tk clips nothing`);
@@ -2559,6 +3151,16 @@ function pyStyleExpr(code: string, ctx: PyCtx): string {
 
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): void {
   const tag = node.tag.toLowerCase();
+  // Key events and raw change events have no Tk equivalent outside the field
+  // emitters (which consume them first) - name the loss instead of dropping it.
+  if (tag !== 'input' && tag !== 'textarea') {
+    for (const a of node.attrs) {
+      const evt = a.name.startsWith('on:') ? a.name.slice(3).split('|')[0] : '';
+      if (evt === 'keydown' || evt === 'keyup' || evt === 'input' || evt === 'change') {
+        ctx.warnings.push(`python: on:${evt} on <${tag}> has no Tk equivalent - dropped (page '${ctx.file}')`);
+      }
+    }
+  }
   const binding = elementStyleBinding(node);
   const comp = ctx.components.find((c) => c.name.toLowerCase() === tag);
   if (comp) {
@@ -2578,6 +3180,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     for (const [prop, state] of callSiteBinds(node)) {
       ctx.propWriteTargets.set(prop, state);
       map.set(prop, state);
+    }
+    // A hook-declaring component's own $state keyed into the page's STATE per
+    // instance: this call site materializes its instance and the template's
+    // reads rename onto its keyed placeholders.
+    const inst = ctx.compLc?.materialize(comp, ctx);
+    if (inst) {
+      for (const [orig, ph] of inst.renames) {
+        if (!map.has(orig)) map.set(orig, ph);
+      }
     }
     // Slots: the default children and every `slot="x"` child are spliced where
     // the component declares `<slot />` / `<slot name="x" prop={...} />`. A
@@ -2599,7 +3210,22 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       }
       slotContent.set(s.name, substituteSlotProps(passed, s.props, (p) => resolved.get(p) ?? p));
     }
+    // The inlined template's handler names resolve against THIS component's
+    // own functions while its nodes emit (a parent's slot content restores
+    // its own scope by falling through the miss).
+    const prevScope = ctx.compScope;
+    ctx.compScope = comp.name.toLowerCase();
+    const prevInst = ctx.compInstance;
+    if (inst) ctx.compInstance = inst.instId;
+    // The component's own exported action: its submit button posts through
+    // the app's run_action to the host route - the same server action the
+    // web build registers for this page.
+    const prevAction = ctx.pageAction;
+    ctx.pageAction = (() => { try { return extractExports(comp.script ?? '').actions[0]?.name ?? null; } catch { return null; } })();
     emitNodes(substituteComponentNodes(spliceSlotNodes(comp.nodes, slotContent), map), ctx);
+    ctx.pageAction = prevAction;
+    ctx.compScope = prevScope;
+    ctx.compInstance = prevInst;
     return;
   }
 
@@ -2613,11 +3239,11 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   // through the shared engine, not a single-class lookup.
   const cascadedAll = cascadeFor(ctx.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH });
   const cascaded = cascadedAll.model;
-  // R253: the `:focus` half is a first-class variant now. Every native input
+  // The `:focus` half is a first-class variant now. Every native input
   // has a focus mechanism (Tk's <FocusIn>/<FocusOut>), so the variant is
   // carried to the widgets that can actually take focus.
   const focusModel = cascadedAll.focus;
-  // R263: the `:active` half - Tk's <ButtonPress-1>/<ButtonRelease-1> pair.
+  // The `:active` half - Tk's <ButtonPress-1>/<ButtonRelease-1> pair.
   const activeModel = cascadedAll.active;
   // An `:nth-child` rule is a position, not a paint: the shared sheet cannot
   // carry it (the engine strips the suffix), so it merges here, after the
@@ -2632,6 +3258,20 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     }
   }
   const model = mergeModels(mergeModels(mergeModels(ctx.inherited, cascaded), structModel ?? {}), binding.inlineStyle);
+  // A list item's marker: the <ol>-handed counter wins; otherwise the model's
+  // listStyle picks the bullet, `none` draws nothing. The prefix rides the
+  // scoped ctx the child text flush reads.
+  const liCtx = tag === 'li'
+    ? (() => {
+        let marker = '';
+        if (ctx.olMarker) marker = ctx.olMarker;
+        else {
+          const m = listMarkerOf({ tag, classes: binding.staticClasses, ancestors: [...ctx.ancestors].reverse() }, model);
+          if (m) marker = m.marker;
+        }
+        return marker ? { ...ctx, liMarker: marker } : ctx;
+      })()
+    : ctx;
   if (model.display === 'none') return;
   const rawFamily = rawFamilyOf(binding.staticClasses, ctx);
   const who = binding.staticClasses.length ? `<${tag} class="${binding.staticClasses.join(' ')}">` : `<${tag}>`;
@@ -2679,7 +3319,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   };
 
   /**
-   * R253: the widget's own focus pair. `<FocusIn>` applies the `:focus` model,
+   * The widget's own focus pair. `<FocusIn>` applies the `:focus` model,
    * `<FocusOut>` re-applies the base one - the input-state styling the web's
    * `.input:focus` carries, on the widgets that can actually take focus. The
    * focus dict is emitted inline (rose_apply accepts a model dict), so no
@@ -2704,7 +3344,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   };
 
   /**
-   * R263: the widget's own active pair. `<ButtonPress-1>` applies the `:active`
+   * The widget's own active pair. `<ButtonPress-1>` applies the `:active`
    * model (mouse/touch down), `<ButtonRelease-1>` re-applies the base one - the
    * pressed-state styling the web's `.btn:active` carries. Same inline-dict
    * shape as focusPair.
@@ -2721,7 +3361,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     emit(`${widget}.bind('<ButtonRelease-1>', lambda e: rose_apply(${widget}, ${baseDict || '{}'}))`, ctx);
   };
 
-  // R453: <details>/<summary> as a header button + a body frame that packs only
+  // <details>/<summary> as a header button + a body frame that packs only
   // while open; __OPENED lives at module scope so a re-render keeps the fold.
   if (tag === 'details') {
     const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
@@ -2758,7 +3398,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   if (tag === 'video') {
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
-    // R257: Tk has no video widget, so the element becomes a text label - but
+    // Tk has no video widget, so the element becomes a text label - but
     // a silent downgrade is a loss the reader cannot see. An <img> without a
     // bundled asset says so; a video and an audio say the same.
     ctx.warnings.push(`python: <video ${url}> has no Tk video widget - shown as a placeholder label`);
@@ -2777,10 +3417,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const asset = assetMap.get(url);
     if (asset) {
+      // vertical-align on a replaced element: the label's own anchor aligns
+      // the image in its box (middle/top/bottom).
+      const vaArg = model.verticalAlign === 'middle' ? ", anchor='center'" : model.verticalAlign === 'top' ? ", anchor='n'" : model.verticalAlign === 'bottom' ? ", anchor='s'" : '';
       emit('try:', ctx);
       emit('    __photo = tk.PhotoImage(file=' + JSON.stringify(asset) + ')', ctx);
       emit("    st.setdefault('__images', []).append(__photo)", ctx);
-      emit('    ' + `tk.Label(${ctx.parent}, image=__photo).pack(${packArgs(ctx, { model, last })})`, ctx);
+      emit('    ' + `tk.Label(${ctx.parent}, image=__photo${vaArg}).pack(${packArgs(ctx, { model, last })})`, ctx);
       emit('except Exception:', ctx);
       emit('    ' + `tk.Label(${ctx.parent}, text='[image: ${url.replace(/'/g, "\\\\'")}]').pack(${packArgs(ctx, { model, last })})`, ctx);
       return;
@@ -2827,7 +3470,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       return;
     }
     if (url) {
-      // R417: a remote (or site-relative) image downloads on a daemon thread.
+      // A remote (or site-relative) image downloads on a daemon thread.
       emit(`rose_remote_image(${ctx.parent}, ${JSON.stringify(url)})`, ctx);
       return;
     }
@@ -2870,7 +3513,17 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const valueAttr = node.attrs.find((a) => a.name === 'value');
     const optionValue = valueAttr && valueAttr.value.kind === 'text' ? JSON.stringify(valueAttr.value.text) : valueAttr && valueAttr.value.kind === 'expr' ? pyExpr(valueAttr.value.code, ctx) : "''";
     const choiceOpts = styleDict(model, 'Button', rawFamily);
+    // Key events: a text-carrying field maps an Enter check to its <Return>
+    // confirm binding; anything else the widget cannot carry is named.
+    const entryLike = tag === 'textarea' || !typeAttr || ['text', 'password', 'search', 'email', 'tel', 'url', 'number'].includes(type);
+    const keydownAttr = node.attrs.find((a) => a.name === 'on:keydown');
+    const confirm = keydownAttr && entryLike ? pyFieldConfirm(keydownAttr, ctx, tag) : null;
+    if (keydownAttr && !entryLike) ctx.warnings.push(`python: on:keydown on <input type="${type}"> has no Tk equivalent - dropped (page '${ctx.file}')`);
+    for (const a of node.attrs) {
+      if (a.name.startsWith('on:keyup')) ctx.warnings.push(`python: on:keyup on <${tag}> has no Tk equivalent - dropped (page '${ctx.file}')`);
+    }
     if (type === 'checkbox') {
+      warnRawChangeAttrs(node, ctx, 'input');
       const group = stateOf(bindGroup);
       const checked = stateOf(bindChecked);
       if (group) {
@@ -2880,41 +3533,86 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
         place('tk.Checkbutton(' + ctx.parent + ', variable=__var_' + suffix + ', command=__toggle_' + suffix + (choiceOpts ? ', **' + choiceOpts : '') + ')');
       } else if (checked) {
         emit(`__var_${checked} = tk.BooleanVar(value=bool(${ctx.st}.get('${checked}', False)))`, ctx);
-        // R256: the toggle must re-render, or the bound text stays on its old value.
+        // The toggle must re-render, or the bound text stays on its old value.
         place(`tk.Checkbutton(${ctx.parent}, variable=__var_${checked}, command=lambda: (${ctx.st}.__setitem__('${checked}', __var_${checked}.get()), ${ctx.app}.render())${choiceOpts ? ', **' + choiceOpts : ''})`);
       } else {
-        place(`tk.Checkbutton(${ctx.parent}${choiceOpts ? ', ' + declsKw(filterDecls(tkDecls(model, rawFamily), 'Button')) : ''})`);
+        // A member-path binding whose root is an {#each} row variable: the
+        // write finds the row BY VALUE (the loop variable IS the element) and
+        // replaces the owning list with a copy that carries the new field.
+        const rowPath = bindChecked && bindChecked.value.kind === 'expr' ? bindChecked.value.code.trim() : '';
+        const rowRoot = rowPath.includes('.') ? rowPath.split('.')[0].replace(/[^\w]/g, '') : '';
+        const rowRest = rowPath.includes('.') ? rowPath.split('.').slice(1) : [];
+        const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+        if (rowState) {
+          const fieldKey = rowRest[rowRest.length - 1];
+          // The row and its variable ride the factory's DEFAULT PARAMETER:
+          // a def inside the loop body re-binds per iteration, and every
+          // closure would otherwise read the LAST row - the classic Python
+          // late-binding trap. `row=<this item>` freezes the row per widget.
+          emit(`def __rowtoggle_${rowRoot}_${fieldKey}(row=${rowRoot}, var=None):`, ctx);
+          ctx.depth++;
+          emit(`if var is None:`, ctx);
+          ctx.depth++;
+          emit(`return`, ctx);
+          ctx.depth--;
+          emit(`rows = list(${ctx.st}.get('${rowState}', []))`, ctx);
+          ctx.rowbind.used = true;
+          emit(`rows = [__deepset(r, ${JSON.stringify(rowRest)}, var.get()) if isinstance(r, dict) and r == row else r for r in rows]`, ctx);
+          emit(`${ctx.st}.__setitem__('${rowState}', rows)`, ctx);
+          emit(`${ctx.app}.render()`, ctx);
+          ctx.depth--;
+          emit(`__var_${rowRoot}_${fieldKey} = tk.BooleanVar(value=bool(${rowRoot}.get('${fieldKey}', False)))`, ctx);
+          emit(`__rowtoggle_${rowRoot}_${fieldKey}(var=__var_${rowRoot}_${fieldKey})`, ctx);
+          // The lambda freezes THIS row's var through its own default too -
+          // a bare closure would read whichever var the loop assigned last.
+          place(`tk.Checkbutton(${ctx.parent}, variable=__var_${rowRoot}_${fieldKey}, command=(lambda v=__var_${rowRoot}_${fieldKey}: __rowtoggle_${rowRoot}_${fieldKey}(var=v))${choiceOpts ? ', **' + choiceOpts : ''})`);
+        } else {
+          place(`tk.Checkbutton(${ctx.parent}${choiceOpts ? ', ' + declsKw(filterDecls(tkDecls(model, rawFamily), 'Button')) : ''})`);
+        }
       }
       return;
     }
     if (type === 'radio') {
+      warnRawChangeAttrs(node, ctx, 'input');
       const group = stateOf(bindGroup);
       if (group) {
         emit(`if '__var_${group}' not in ${ctx.st}:`, ctx);
         emit(`    ${ctx.st}['__var_${group}'] = tk.StringVar(value=${ctx.st}.get('${group}', ''))`, ctx);
-        // R256: re-render after the radio writes its group back.
+        // Re-render after the radio writes its group back.
         place(`tk.Radiobutton(${ctx.parent}, text=${optionValue}, variable=${ctx.st}['__var_${group}'], value=${optionValue}, command=lambda: (${ctx.st}.__setitem__('${group}', ${ctx.st}['__var_${group}'].get()), ${ctx.app}.render())${choiceOpts ? ', **' + choiceOpts : ''})`);
       }
       return;
     }
     if (tag === 'textarea') {
       const tdecls = filterDecls(tkDecls(model, rawFamily), 'Text');
-      // R440: rows is the textarea's visible line count.
+      // Rows is the textarea's visible line count.
       const rowsAttr = node.attrs.find((a) => a.name === 'rows');
       const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
       const focusDictWanted = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Text', rawFamily);
-      if (focusDictWanted) {
-        // R253: the widget is named so the focus pair can attach to it.
+      const changeAttr = node.attrs.find((a) => a.name === 'on:input' || a.name === 'on:change');
+      const change = changeAttr ? pyFieldChange(changeAttr, ctx, 'textarea') : null;
+      const call = `tk.Text(${ctx.parent}, height=${rows}${tdecls.length ? ', ' + declsKw(tdecls) : ''})`;
+      if (focusDictWanted || change || confirm) {
+        // The widget is named so the focus pair and the field callbacks attach.
         const name = `__w${ctx.seq.n++}`;
-        emit(`${name} = tk.Text(${ctx.parent}, height=${rows}${tdecls.length ? ', ' + declsKw(tdecls) : ''})`, ctx);
-        focusPair(name, 'Text');
+        emit(`${name} = ${call}`, ctx);
+        if (focusDictWanted) focusPair(name, 'Text');
+        if (change) {
+          ctx.fields.used = true;
+          const fieldId = `f${ctx.lines.length}`;
+          // <<Modified>> fires with the flag set on every edit; the reset fires
+          // it once more with the flag clear, which the guard swallows.
+          emit(`${name}.insert('1.0', __FIELDS.get('${fieldId}', ''))`, ctx);
+          emit(`${name}.bind('<<Modified>>', lambda e: (${name}.edit_modified(False), __FIELDS.__setitem__('${fieldId}', ${name}.get('1.0', 'end-1c')), ${pyFieldCall(change, `${name}.get('1.0', 'end-1c')`, ctx)}) if ${name}.edit_modified() else None)`, ctx);
+        }
+        if (confirm) emit(`${name}.bind('<Return>', lambda e: ${pyFieldCall({ ...confirm, event: false, sched: false }, `${name}.get('1.0', 'end-1c')`, ctx)})`, ctx);
         emit(`${name}.pack(${packArgs(ctx, { model, last })})`, ctx);
       } else {
-        place(`tk.Text(${ctx.parent}, height=${rows}${tdecls.length ? ', ' + declsKw(tdecls) : ''})`);
+        place(call);
       }
       return;
     }
-    // R229: a range is a Scale. Falling through emitted a text entry bound to
+    // A range is a Scale. Falling through emitted a text entry bound to
     // the number, so the value could only be typed.
     if (type === 'range') {
       const minAttr = node.attrs.find((a) => a.name === 'min');
@@ -2924,10 +3622,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
       const opts = [`from_=${num(minAttr, '0')}`, `to=${num(maxAttr, '100')}`, 'orient=tk.HORIZONTAL'];
       const sdecls = filterDecls(tkDecls(model, rawFamily), 'Scale');
       if (sdecls.length) opts.push(declsKw(sdecls));
-      place(`tk.Scale(${ctx.parent}, ${opts.join(', ')}${target ? `, command=lambda v: (${ctx.st}.__setitem__('${target}', v), ${ctx.app}.render())` : ''})`);
+      const rawChangeAttr = node.attrs.find((a) => a.name === 'on:input' || a.name === 'on:change');
+      // bind:value owns the command when it resolves; the raw arrow fills a
+      // Scale without one - the command already hands over the value.
+      const rawChange = !target && rawChangeAttr ? pyFieldChange(rawChangeAttr, ctx, 'input') : null;
+      if (target) opts.push(`command=lambda v: (${ctx.st}.__setitem__('${target}', v), ${ctx.app}.render())`);
+      else if (rawChange) opts.push(`command=lambda v: ${pyFieldCall(rawChange, 'v', ctx)}`);
+      place(`tk.Scale(${ctx.parent}, ${opts.join(', ')})`);
       return;
     }
-    // R447: a date input is a year/month/day spinner - Tk has no calendar sheet
+    // A date input is a year/month/day spinner - Tk has no calendar sheet
     // in the box, but the value is the same ISO day the web input writes.
     if (type === 'date') {
       const name = bind && bind.value.kind === 'expr' && ctx.stateNames.has(bind.value.code.trim()) ? bind.value.code.trim() : '';
@@ -2946,23 +3650,84 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     if (!bind && valueAttr && valueAttr.value.kind === 'expr' && [...ctx.propWriteTargets.values()].includes(valueAttr.value.code.trim())) {
       bind = valueAttr;
     }
+    // A member-path binding whose root is an {#each} row variable: the entry
+    // reads the row field and the write swaps the row BY VALUE inside a
+    // copied list - the same contract the checkbox row bind follows.
+    {
+      const rowPath = bind && bind.value.kind === 'expr' && !ctx.stateNames.has(bind.value.code.trim()) && bind.value.code.includes('.')
+        ? bind.value.code.trim() : '';
+      const rowRoot = rowPath ? rowPath.split('.')[0].replace(/[^\w]/g, '') : '';
+      const rowRest = rowPath ? rowPath.split('.').slice(1) : [];
+      const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+      if (rowState) {
+        const fieldKey = rowRest[rowRest.length - 1];
+        const varName = `__var_${rowRoot}_${fieldKey}`;
+        emit(`${varName} = tk.StringVar(value=str(${rowRoot}.get('${fieldKey}', '')))`, ctx);
+        // The toggle rebuilds the list with the row swapped BY VALUE; the row
+        // freezes through the lambda's default (the late-binding guard).
+        emit(`def __rowset_${rowRoot}_${fieldKey}(v, row=${rowRoot}):`, ctx);
+        ctx.depth++;
+        emit(`rows = list(${ctx.st}.get('${rowState}', []))`, ctx);
+        ctx.rowbind.used = true;
+        emit(`rows = [__deepset(r, ${JSON.stringify(rowRest)}, v) if isinstance(r, dict) and r == row else r for r in rows]`, ctx);
+        emit(`${ctx.st}.__setitem__('${rowState}', rows)`, ctx);
+        emit(`${ctx.app}.render()`, ctx);
+        ctx.depth--;
+        emit(`${varName}.trace_add('write', lambda *_: __rowset_${rowRoot}_${fieldKey}(${varName}.get()))`, ctx);
+        const edeclsR = filterDecls(tkDecls(model, rawFamily), 'Entry');
+        const entryStyleR = styleDict(model, 'Entry', rawFamily);
+        const entryDisabledR = node.attrs.find((a) => a.name === 'disabled');
+        const entryDisabledArgR = entryDisabledR ? `, disabled=${entryDisabledR.value.kind === 'expr' ? pyExpr(entryDisabledR.value.code, ctx) : 'True'}` : '';
+        const entryMaxR = node.attrs.find((a) => a.name === 'maxlength');
+        const entryMaxArgR = entryMaxR && entryMaxR.value.kind === 'text' && /^\d+$/.test(entryMaxR.value.text.trim()) ? `, maxlength=${entryMaxR.value.text.trim()}` : '';
+        const entryTypeR = node.attrs.find((a) => a.name === 'type');
+        const entryPwArgR = entryTypeR && entryTypeR.value.kind === 'text' && entryTypeR.value.text.trim().toLowerCase() === 'password' ? ', password=True' : '';
+        const entryRoArgR = node.attrs.some((a) => a.name === 'readonly') ? ', readonly=True' : '';
+        const entryAutoR = node.attrs.some((a) => a.name === 'autofocus') ? ', autofocus=True' : '';
+        const entryArgsR = `${ctx.parent}${entryStyleR ? `, '', ${entryStyleR}` : ''}${entryDisabledArgR}${entryMaxArgR}${entryPwArgR}${entryRoArgR}${entryAutoR}, textvariable=${varName}`;
+        const fallbackFocusR = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Entry', rawFamily);
+        if (fallbackFocusR || confirm) {
+          const w = `__e${ctx.seq.n++}`;
+          emit(`${w} = rose_entry(${entryArgsR})`, ctx);
+          if (fallbackFocusR) focusPair(w, 'Entry');
+          if (confirm) emit(`${w}.bind('<Return>', lambda e: ${pyFieldCall({ ...confirm, event: false, sched: false }, `${varName}.get()`, ctx)})`, ctx);
+          emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
+        } else {
+          place(`rose_entry(${entryArgsR})`);
+        }
+        return;
+      }
+    }
     if (bind && bind.value.kind === 'expr' && ctx.stateNames.has(bind.value.code.trim())) {
       const name = bind.value.code.trim();
       const target = ctx.propWriteTargets.get(name) ?? name;
+      // The browser fires a coexisting on:input/on:change after the bind
+      // write; the trace below must run both in that order. When the bound
+      // name is a component prop, the prop's change path owns the callback
+      // and nothing new is wired here.
+      const handlerAttr = node.attrs.find((a) => a.name === 'on:input' || a.name === 'on:change');
+      const handler = !ctx.propWriteTargets.has(name) && handlerAttr && handlerAttr.value.kind === 'expr' ? pyFieldChange(handlerAttr, ctx, tag) : null;
       const edecls = filterDecls(tkDecls(model, rawFamily), 'Entry');
       emit(`__var_${name} = tk.StringVar(value=${ctx.st}.get('${target}', ''))`, ctx);
-      emit(`__var_${name}.trace_add('write', lambda *_: ${ctx.st}.__setitem__('${target}', __var_${name}.get()))`, ctx);
-      // R256: a state write is invisible until a re-render - the handler path
-      // appends app.render() after its writes, so these widget callbacks must too.
-      emit(`__var_${name}.trace_add('write', lambda *_: ${ctx.app}.render())`, ctx);
+      if (handler) {
+        // pyFieldCall appends the re-render the state write needs (or the
+        // async schedule spelling the unbound handler path emits).
+        emit(`__var_${name}.trace_add('write', lambda *_: (${ctx.st}.__setitem__('${target}', __var_${name}.get()), ${pyFieldCall(handler, `__var_${name}.get()`, ctx)}))`, ctx);
+      } else {
+        emit(`__var_${name}.trace_add('write', lambda *_: ${ctx.st}.__setitem__('${target}', __var_${name}.get()))`, ctx);
+        // A state write is invisible until a re-render - the handler path
+        // appends app.render() after its writes, so these widget callbacks must too.
+        emit(`__var_${name}.trace_add('write', lambda *_: ${ctx.app}.render())`, ctx);
+      }
       const focusDictWanted = focusModel && Object.keys(focusModel).length && styleDict(focusModel, 'Entry', rawFamily);
       const tvType = node.attrs.find((a) => a.name === 'type');
       const tvPw = tvType && tvType.value.kind === 'text' && tvType.value.text.trim().toLowerCase() === 'password' ? ", show='*'" : '';
-      if (focusDictWanted) {
-        // R253: the widget is named so the focus pair can attach to it.
+      if (focusDictWanted || confirm) {
+        // The widget is named so the focus pair and a confirm binding attach.
         const w = `__e${ctx.seq.n++}`;
         emit(`${w} = tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''}${tvPw})`, ctx);
-        focusPair(w, 'Entry');
+        if (focusDictWanted) focusPair(w, 'Entry');
+        if (confirm) emit(`${w}.bind('<Return>', lambda e: ${pyFieldCall({ ...confirm, event: false, sched: false }, `__var_${name}.get()`, ctx)})`, ctx);
         emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
       } else {
         place(`tk.Entry(${ctx.parent}, textvariable=__var_${name}${edecls.length ? ', ' + declsKw(edecls) : ''}${tvPw})`);
@@ -2978,29 +3743,60 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const entryMaxArg = entryMax && entryMax.value.kind === 'text' && /^\d+$/.test(entryMax.value.text.trim()) ? `, maxlength=${entryMax.value.text.trim()}` : '';
     const entryType = node.attrs.find((a) => a.name === 'type');
     const entryPwArg = entryType && entryType.value.kind === 'text' && entryType.value.text.trim().toLowerCase() === 'password' ? ', password=True' : '';
-    // R430: a readonly entry keeps its text selectable but refuses edits.
+    // A readonly entry keeps its text selectable but refuses edits.
     const entryRoArg = node.attrs.some((a) => a.name === 'readonly') ? ', readonly=True' : '';
-    // R441: autofocus is the browser's focus-on-mount.
+    // Autofocus is the browser's focus-on-mount.
     const entryAutoArg = node.attrs.some((a) => a.name === 'autofocus') ? ', autofocus=True' : '';
-    if (fallbackFocus) {
+    const changeAttr = node.attrs.find((a) => a.name === 'on:input' || a.name === 'on:change');
+    const change = changeAttr ? pyFieldChange(changeAttr, ctx, 'input') : null;
+    const fieldId = `f${ctx.lines.length}`;
+    // A form's payload is the fields' own text: the variable exists even
+    // when nothing else listens, and every keystroke lands in __FIELDS.
+    const fieldVar = `__var_${fieldId}`;
+    if (fieldVar) {
+      ctx.fields.used = true;
+      const initText = valueAttr && valueAttr.value.kind === 'text' ? JSON.stringify(valueAttr.value.text) : "''";
+      emit(`${fieldVar} = tk.StringVar(value=__FIELDS.get('${fieldId}', ${initText}))`, ctx);
+    }
+    const entryArgs = `${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg}${entryAutoArg}${fieldVar ? `, textvariable=${fieldVar}` : ''}`;
+    const changeTrace = change
+      ? `${fieldVar}.trace_add('write', lambda *_: (__FIELDS.__setitem__('${fieldId}', ${fieldVar}.get()), ${pyFieldCall(change, `${fieldVar}.get()`, ctx)}))`
+      : `${fieldVar}.trace_add('write', lambda *_: __FIELDS.__setitem__('${fieldId}', ${fieldVar}.get()))`;
+    if (fallbackFocus || confirm) {
       const w = `__e${ctx.seq.n++}`;
-      emit(`${w} = rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg}${entryAutoArg})`, ctx);
-      focusPair(w, 'Entry');
+      emit(`${w} = rose_entry(${entryArgs})`, ctx);
+      if (fallbackFocus) focusPair(w, 'Entry');
+      if (confirm) {
+        const cb = { ...confirm, event: false, sched: false };
+        if (cb.keyEvent) {
+          // Every keypress, with the browser's key name: Return -> 'Enter',
+          // otherwise Tk's char or keysym (the handler branches on e.key).
+          emit(`${w}.bind('<KeyPress>', lambda ev, __w=${w}: (${cb.py}(rose_key_event('Return' if ev.keysym == 'Return' else (ev.char or ev.keysym), __w.get())), ${ctx.app}.render()))`, ctx);
+        } else {
+          emit(`${w}.bind('<Return>', lambda e: ${pyFieldCall(cb, `${fieldVar}.get()`, ctx)})`, ctx);
+        }
+      }
+      if (changeTrace) emit(changeTrace, ctx);
       emit(`${w}.pack(${packArgs(ctx, { model, last })})`, ctx);
     } else {
-      place(`rose_entry(${ctx.parent}${entryStyle ? `, '', ${entryStyle}` : ''}${entryDisabledArg}${entryMaxArg}${entryPwArg}${entryRoArg}${entryAutoArg})`);
+      place(`rose_entry(${entryArgs})`);
+      if (changeTrace) emit(changeTrace, ctx);
     }
     return;
   }
   if (tag === 'button') {
     const click = node.attrs.find((a) => a.name === 'on:click' || a.name === 'on:submit');
-    const command = click && click.value.kind === 'expr' ? pyHandler(click.value.code.trim(), ctx) : 'lambda: None';
+    let command = click && click.value.kind === 'expr' ? pyHandler(click.value.code.trim(), ctx) : 'lambda: None';
+    // A form POST's server action: the button runs it through the app's own
+    // run_action - a synchronous POST whose patch seeds the state, the same
+    // channel the kit has always carried (the button used to be inert).
+    if (!click && isSubmitButton(node) && ctx.pageAction) command = `lambda: ${ctx.app}.run_action('${ctx.pageRoute ?? '/'}', '${ctx.pageAction}', dict(__FIELDS))`;
     const label = node.children.map((c) => (c.kind === 'text' ? c.value.replace(/\s+/g, ' ') : c.kind === 'expr' ? `{rose_text(lambda: ${pyExpr(c.code, ctx)})}` : '')).join('').trim();
     const text = transformLabel(pyLabelText(label, 'Button'), model);
     const style = styleDict(model, 'Button', rawFamily);
     const buttonDisabled = node.attrs.find((a) => a.name === 'disabled');
     const buttonDisabledArg = buttonDisabled ? `, disabled=${buttonDisabled.value.kind === 'expr' ? pyExpr(buttonDisabled.value.code, ctx) : 'True'}` : '';
-    // R263: the button is named here so BOTH press-state halves attach directly
+    // The button is named here so BOTH press-state halves attach directly
     // - the hover half (STYLES key, as emitPack would) and the `:active` half
     // (inline dict). A button returns before the generic tail; `:active` is
     // written for buttons, so the button branch is where it must land.
@@ -3069,11 +3865,11 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
         ? `${JSON.stringify(valueMap)}.get(__choice.get(), __choice.get())`
         : `__choice.get()`;
       emit(`__choice.trace_add('write', lambda *_: ${ctx.st}.__setitem__('${state}', ${store}))`, ctx);
-      // R256: the pick must repaint - otherwise `{plan}` shows its stale value.
+      // The pick must repaint - otherwise `{plan}` shows its stale value.
       emit(`__choice.trace_add('write', lambda *_: ${ctx.app}.render())`, ctx);
     }
     const mdecls = filterDecls(tkDecls(model, rawFamily), 'Button');
-    // R252: `tk.OptionMenu` takes no style keywords at all - only its *values
+    // `tk.OptionMenu` takes no style keywords at all - only its *values
     // positional args - so passing font/padx/bg raised "unknown option -font".
     // The style is applied to the widget afterwards instead. `place()` below adds
     // the geometry manager itself, so these two lines must not.
@@ -3112,7 +3908,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     const text = transformLabel(textOf(node.children, ctx), model);
     const decls = filterDecls(tkDecls(model, rawFamily), 'Label');
     const wrap = model.maxWidth && model.maxWidth.u === 'px' ? Math.round(model.maxWidth.n) : 680;
-    // R256: a CSS-transparent label shows the CONTAINER's colour on the web; Tk
+    // A CSS-transparent label shows the CONTAINER's colour on the web; Tk
     // paints grey SystemButtonFace instead. The surface chain carries every
     // container's real background down, and the inherited colour rides the
     // CONSTRUCTOR - Tk's `configure()` and `pack()` both return None, so a
@@ -3124,7 +3920,18 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
     // have opaque browser chrome, and CSS does not inherit background into
     // them either - so the two paths agree with the browser on purpose.
     const inheritedBg = !decls.some((d) => d.key === 'bg') && model.background === undefined && ctx.surface ? `, bg=${ctx.surface}` : '';
-    const call = `tk.Label(${ctx.parent}, text=${text}, wraplength=${model.nowrap || model.ellipsis ? 0 : wrap}${decls.length ? ', ' + declsKw(decls) : ''}${inheritedBg})`;
+    // vertical-align on a text block: the label's own anchor positions the
+    // text within the widget (middle/top/bottom).
+    const vaAnchor = model.verticalAlign === 'middle' ? ", anchor='center'" : model.verticalAlign === 'top' ? ", anchor='n'" : model.verticalAlign === 'bottom' ? ", anchor='s'" : '';
+    // Trusted markup inside a text tag renders as MARKUP: the kit's
+    // rose_html_label reads the same inline subset a bare {@html} does, so a
+    // formula keeps its <sub> instead of the tags showing as text.
+    if (node.children.some((c) => c.kind === 'html')) {
+      const pack = packArgs(ctx, { model, last });
+      emit(`rose_html_label(${ctx.parent}, ${text}${pack ? `, ${pack}` : ''})`, ctx);
+      return;
+    }
+    const call = `tk.Label(${ctx.parent}, text=${text}, wraplength=${model.nowrap || model.ellipsis ? 0 : wrap}${vaAnchor}${decls.length ? ', ' + declsKw(decls) : ''}${inheritedBg})`;
     if (binding.hasDynamic) {
       const name = `__w${ctx.lines.length}`;
       emit(`${name} = ${call}`, ctx);
@@ -3139,12 +3946,12 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   // carried down to every label inside it (Tk inherits nothing).
   const varName = `__f${ctx.depth}_${ctx.lines.length}`;
   const decls = filterDecls(tkDecls(model, rawFamily), 'Frame');
-  // R257: tkDecls already carries an explicit px width/height into the Frame
+  // TkDecls already carries an explicit px width/height into the Frame
   // options. Pushing them a second time wrote `tk.Frame(p, width=160,
   // height=48, ..., width=160, height=48)` - a repeated keyword argument,
   // which is a SyntaxError, so a container with a CSS size did not even
   // compile. One source for the size, one pair of keywords.
-  // R256: a transparent container takes its parent's surface - on the web it
+  // A transparent container takes its parent's surface - on the web it
   // would show through; in Tk "show through" is the toolkit's grey, never the
   // enclosing colour, so the background chain has to be carried explicitly.
   if (!model.background && ctx.surface && !decls.some((d) => d.key === 'bg')) decls.push({ key: 'bg', value: ctx.surface });
@@ -3176,7 +3983,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
   const grid = gridEntry?.grid;
   if (grid) emit(`for __ci, __cw in enumerate(${JSON.stringify(grid.weights)}): ${varName}.columnconfigure(__ci, weight=__cw)`, ctx);
   const scoped: PyCtx = {
-    ...ctx,
+    ...liCtx,
     parent: varName,
     surface: tkColor(model.background) ?? ctx.surface,
     layout: grid
@@ -3208,7 +4015,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx): vo
 
 /** The `place` move for a call expression whose widget was not named. */
 function emitPack(ctx: PyCtx, widget: string, binding: ElementStyleBinding, model: StyleModel, last: boolean): void {
-  // R248: a class carrying a `:hover` half gets Enter/Leave bindings that apply
+  // A class carrying a `:hover` half gets Enter/Leave bindings that apply
   // the hover model at runtime and re-apply the base one on leave - the same
   // press state the web build has, on a desktop pointer. Every widget passes
   // through here, so one hook covers labels, buttons, frames and inputs alike.
@@ -3238,7 +4045,7 @@ function emitPack(ctx: PyCtx, widget: string, binding: ElementStyleBinding, mode
   emit(`${widget}.pack(${packArgs(ctx, { model, last })})`, ctx);
 }
 
-/** R481: a renamed function's call sites follow the rename. */
+/** A renamed function's call sites follow the rename. */
 function pyRenameCalls(code: string, renamed: Map<string, string>): string {
   if (!renamed.size) return code;
   let out = code;
@@ -3250,9 +4057,25 @@ function pyRenameCalls(code: string, renamed: Map<string, string>): string {
 
 function pyHandler(code: string, ctx: PyCtx): string {
   if (!code) return 'lambda: None';
-  // R481: a user function named `build` became `build_` (the page's entry point
-  // owns `build`), so a call to it must use the new name.
-  if (/^[A-Za-z_$][\w$]*$/.test(code)) return code === 'build' ? 'build_' : code;
+  // A user function named `build` became `build_` (the page's entry point
+  // owns `build`), so a call to it must use the new name. An async def is a
+  // coroutine: Tk's command would create it and never await, so it is
+  // scheduled on the kit's loop instead.
+  if (/^[A-Za-z_$][\w$]*$/.test(code)) {
+    if (code === 'build') return 'build_';
+    const cf = ctx.compScope && ctx.compInstance ? ctx.compFns?.get(`${ctx.compScope}:${ctx.compInstance}:${code}`) : undefined;
+    if (cf) {
+      // A per-row instance's def takes the runtime instance id: the lambda
+      // binds it as a default argument, so the value freezes at the row's
+      // render pass instead of reading the loop variable after it ends.
+      const ri = ctx.compInstance ? ctx.compLc?.instExprs.get(ctx.compInstance) : undefined;
+      if (ri) return cf.async
+        ? `lambda ${ri.variable}=${ri.expr}: rosezm.rose_schedule(${cf.py}(${ri.variable}))`
+        : `lambda ${ri.variable}=${ri.expr}: ${cf.py}(${ri.variable})`;
+      return cf.async ? `lambda: rosezm.rose_schedule(${cf.py}())` : cf.py;
+    }
+    return ctx.asyncFuncs.has(code) ? `lambda: rosezm.rose_schedule(${code}())` : code;
+  }
   const existing = ctx.inline.get(code);
   if (existing) return existing;
   const ir = normalizeInlineHandler(code, pythonHandlerDialect(ctx), ctx.stateNames);
@@ -3266,11 +4089,18 @@ function pyHandler(code: string, ctx: PyCtx): string {
   return name;
 }
 
+/** A state key inside an inlined component's scope: the component's own
+ *  $state writes through the instance's keyed placeholder, everything else
+ *  (page state, props, module binds) passes under its own name. */
+function pyStateKey(ctx: PyCtx, name: string): string {
+  return ctx.compInstance ? ctx.compLc?.instRenames.get(ctx.compInstance)?.get(name) ?? name : name;
+}
+
 /** The Python spelling of every piece an inline handler is made of. */
 function pythonHandlerDialect(ctx: PyCtx): HandlerDialect {
   return {
     expr: (code) => pyExpr(code, ctx),
-    set: (name, expr) => `st['${name}'] = ${expr}`,
+    set: (name, expr) => `st['${pyStateKey(ctx, name)}'] = ${expr}`,
     action: (name) => `__action('${name}')`,
     refresh: () => 'app.render()',
     refuses: (body) => {
@@ -3287,9 +4117,181 @@ function pythonHandlerDialect(ctx: PyCtx): HandlerDialect {
   };
 }
 
+/** How one field callback is invoked: the callable, whether it takes the
+ *  field's value, and whether that value arrives raw or as a stub event. */
+interface FieldCallback {
+  py: string;
+  takesValue: boolean;
+  event?: boolean;
+  /** A keydown callback: the call site wraps the value in rose_key_event so
+   *  the handler reads `.key` as well as `.target.value`. */
+  keyEvent?: boolean;
+  sched?: boolean;
+  /** A per-row instance's def takes the runtime instance id first - the call
+   *  site passes the build-local bound at the row's render pass. */
+  instExpr?: string;
+}
+
+/** The arrow shape `(e) => body` / `e => body` / `() => body`, params cleaned
+ *  of types and defaults. Null when `src` is not an arrow. */
+function pyArrowParts(src: string): { params: string[]; body: string } | null {
+  const single = /^([A-Za-z_$][\w$]*)\s*=>\s*([\s\S]*)$/.exec(src);
+  if (single) return { params: [single[1]], body: single[2].trim() };
+  if (!src.startsWith('(')) return null;
+  const close = matchParen(src, 0);
+  if (close < 0 || !/^\s*=>/.test(src.slice(close + 1))) return null;
+  const params = src
+    .slice(1, close)
+    .split(',')
+    .map((p) => p.trim().split(/[:=]/)[0].trim())
+    .filter((p) => /^[A-Za-z_$][\w$]*$/.test(p));
+  return { params, body: src.slice(close + 1).replace(/^\s*=>\s*/, '').trim() };
+}
+
+/** The rewritten handler body becomes a generated def; `param` is the incoming
+ *  value parameter when the body reads one. */
+function pyValueHandler(body: string, ctx: PyCtx, param: string | null): { ok: true; name: string } | { ok: false; reason: string } {
+  const ir = normalizeInlineHandler(param ? `${param} => ${body}` : body, pythonHandlerDialect(ctx), ctx.stateNames);
+  if (ir.reason || !ir.stmts.length || ir.ref) {
+    return { ok: false, reason: ir.reason ?? (ir.ref ? `a bare function reference (${ir.ref})` : 'no statements') };
+  }
+  // pyExpr spells expressions, not statements: an if/loop head here would land
+  // in the emitted file raw and break py_compile - refuse it by name.
+  const bad = ir.stmts.find((s) => /^(?:if|for|while)\s*\(/.test(s));
+  if (bad) return { ok: false, reason: 'an if/loop statement' };
+  const name = inlineHandlerName(new Set(ctx.inline.values()));
+  ctx.inline.set(`__field:${param ?? ''}:${body}`, name);
+  ctx.inlineBodies.push(`    def ${name}(${param ?? ''}):\n${ir.stmts.map((s) => `        ${s}`).join('\n')}`);
+  return { ok: true, name };
+}
+
+/** A raw `on:input`/`on:change` attribute becomes the field's change callback.
+ *  An arrow's `e.target.value` is rewritten to the incoming value parameter;
+ *  a named function is handed a stub event whose target.value carries it.
+ *  Any other read of the event has no mechanical mapping here and is refused
+ *  with a warning instead of broken code. */
+function pyFieldChange(attr: IrAttr, ctx: PyCtx, tag: string): FieldCallback | null {
+  const evt = attr.name.slice(3).split('|')[0];
+  const drop = (why: string): null => {
+    ctx.warnings.push(`python: on:${evt} on <${tag}> ${why} (page '${ctx.file}')`);
+    return null;
+  };
+  if (attr.value.kind !== 'expr') return drop('is not a handler expression - dropped');
+  const src = attr.value.code.trim();
+  const arrow = pyArrowParts(src);
+  if (!arrow) {
+    if (/^[A-Za-z_$][\w$]*$/.test(src)) {
+      const cf = ctx.compScope && ctx.compInstance ? ctx.compFns?.get(`${ctx.compScope}:${ctx.compInstance}:${src}`) : undefined;
+      const py = src === 'build' ? 'build_' : cf ? cf.py : src;
+      const sched = cf ? cf.async : ctx.asyncFuncs.has(src);
+      const ri = cf && ctx.compInstance ? ctx.compLc?.instExprs.get(ctx.compInstance) : undefined;
+      const arity = ctx.fnArities.get(src);
+      const key = `oninput-named-${ctx.file}-${py}`;
+      if (!ctx.noted.has(key)) {
+        ctx.noted.add(key);
+        ctx.warnings.push(`python: on:${evt} handler '${src}' is a named function - it is called with a stub event whose target.value carries the field's value (page '${ctx.file}')`);
+      }
+      ctx.evt.used = true;
+      return { py, takesValue: arity === undefined ? true : arity > 0, event: true, sched, instExpr: ri?.variable };
+    }
+    return drop('is not an arrow or named function - dropped');
+  }
+  const p = arrow.params[0] ?? '';
+  let body = arrow.body;
+  let valueRead = false;
+  if (p) {
+    const esc = p.replace(/[$]/g, '\\$&');
+    const valRe = `\\b${esc}\\s*\\.\\s*(?:target|currentTarget)\\s*\\.\\s*value\\b`;
+    valueRead = new RegExp(valRe).test(body);
+    body = body.replace(new RegExp(valRe, 'g'), '__v');
+    if (new RegExp(`\\b${esc}\\b`).test(body)) return drop('reads the event beyond e.target.value - no Tk callback carries it');
+  }
+  const built = pyValueHandler(body, ctx, valueRead ? '__v' : null);
+  if (!built.ok) return drop(`is not translated (${built.reason}) - dropped`);
+  return { py: built.name, takesValue: valueRead };
+}
+
+/** `on:keydown` with an Enter check becomes the entry's <Return> binding - the
+ *  confirm event Tk carries. The check must be `e.key === 'Enter'` (or ==) and
+ *  the guarded body must read the field only through `e.target.value`. */
+function pyFieldConfirm(attr: IrAttr, ctx: PyCtx, tag: string): FieldCallback | null {
+  const evt = attr.name.slice(3).split('|')[0];
+  const drop = (why: string): null => {
+    ctx.warnings.push(`python: on:${evt} on <${tag}> ${why} - no Tk callback carries it (page '${ctx.file}')`);
+    return null;
+  };
+  if (attr.value.kind !== 'expr') return drop('is not a handler expression');
+  const src = attr.value.code.trim();
+  const arrow = pyArrowParts(src);
+  if (!arrow) {
+    // A NAMED script function takes the key event whole: Tk's <KeyPress>
+    // binding hands it a stub carrying `.key` and `.target.value`, the two
+    // members the web's keydown handler reads.
+    if (/^[A-Za-z_$][\w$]*$/.test(src)) {
+      ctx.evt.used = true;
+      ctx.keyEvt.used = true;
+      return { py: src, takesValue: true, event: false, keyEvent: true };
+    }
+    return drop(/^[A-Za-z_$][\w$]*$/.test(src) ? `handler '${src}' is a named function` : 'is not an arrow handler');
+  }
+  const p = arrow.params[0] ?? '';
+  if (!p) return drop('has no event parameter to check');
+  const esc = p.replace(/[$]/g, '\\$&');
+  // A block-bodied arrow keeps its braces here - strip the one outer pair so
+  // the `if (e.key === 'Enter')` head is at the top.
+  let body = arrow.body;
+  if (body.startsWith('{')) {
+    const outer = matchParen(body, 0);
+    if (outer === body.length - 1) body = body.slice(1, outer).trim();
+  }
+  if (!new RegExp(`\\b${esc}\\s*\\.\\s*key\\b`).test(body)) return drop('never checks e.key');
+  let inner = '';
+  const ifm = new RegExp(`^if\\s*\\(\\s*${esc}\\s*\\.\\s*key\\s*(?:===|==)\\s*(['"])Enter\\1\\s*\\)\\s*\\{`).exec(body);
+  if (ifm) {
+    const open = (ifm.index ?? 0) + ifm[0].length - 1;
+    const close = matchParen(body, open);
+    if (close < 0) return drop('has an unbalanced Enter block');
+    if (body.slice(close + 1).trim()) return drop('carries an else branch or trailing statements');
+    inner = body.slice(open + 1, close).trim();
+  } else {
+    const em = new RegExp(`^${esc}\\s*\\.\\s*key\\s*(?:===|==)\\s*(['"])Enter\\1\\s*&&\\s*([\\s\\S]+)$`).exec(body);
+    if (!em) return drop('checks e.key without a mapped Enter comparison');
+    inner = em[2].trim();
+  }
+  const valRe = `\\b${esc}\\s*\\.\\s*(?:target|currentTarget)\\s*\\.\\s*value\\b`;
+  const takesValue = new RegExp(valRe).test(inner);
+  inner = inner.replace(new RegExp(valRe, 'g'), '__v');
+  if (new RegExp(`\\b${esc}\\b`).test(inner)) return drop('reads the event beyond e.target.value inside the Enter branch');
+  const built = pyValueHandler(inner, ctx, takesValue ? '__v' : null);
+  if (!built.ok) return drop(`Enter branch is not translated (${built.reason})`);
+  return { py: built.name, takesValue };
+}
+
+/** The Python expression one field callback evaluates: the handler call, then
+ *  the re-render the state write needs - the shape the bind path emits too. */
+function pyFieldCall(cb: FieldCallback, value: string, ctx: PyCtx): string {
+  const arg = cb.takesValue
+    ? (cb.keyEvent ? `rose_key_event('Enter', ${value})` : cb.event ? `rose_event(${value})` : value)
+    : '';
+  const args = [cb.instExpr, cb.takesValue ? arg : ''].filter((a) => a !== undefined && a !== '');
+  const call = `${cb.py}(${args.join(', ')})`;
+  return cb.sched ? `rosezm.rose_schedule(${call})` : `(${call}, ${ctx.app}.render())`;
+}
+
+/** A raw on:input/on:change on a widget whose value follows bind:* (or nothing):
+ *  the bind path owns the callback where one exists; otherwise name the drop. */
+function warnRawChangeAttrs(node: Extract<IrNode, { kind: 'element' }>, ctx: PyCtx, tag: string): void {
+  if (node.attrs.some((a) => a.name === 'bind:value' || a.name === 'bind:group' || a.name === 'bind:checked')) return;
+  for (const a of node.attrs) {
+    if (a.name === 'on:input' || a.name === 'on:change') {
+      ctx.warnings.push(`python: on:${a.name.slice(3)} on <${tag}> has no change callback outside bind:value - dropped (page '${ctx.file}')`);
+    }
+  }
+}
+
 /** A Rose expression in Python: state reads are dict lookups, binds are maps. */
 /**
- * R253: `.property` reads that follow a content call become dict lookups.
+ * `.property` reads that follow a content call become dict lookups.
  * `rose_content_get("docs", "getting-started").html` must be `["html"]` -
  * a dict has no attributes. Scanning is balanced (the call's third argument
  * can be an object literal with its own parens), and a method/length idiom
@@ -3338,15 +4340,19 @@ function rewriteContentCallMembers(src: string): string {
  *  namespace (max/min/abs/round are builtins, floor/ceil are kit helpers) nor
  *  toFixed. */
 function pyMathCalls(code: string): string {
-  return code
-    .replace(/\bMath\.round\s*\(/g, 'round(')
-    .replace(/\bMath\.floor\s*\(/g, 'rose_floor(')
-    .replace(/\bMath\.ceil\s*\(/g, 'rose_ceil(')
-    .replace(/\bMath\.(max|min|abs)\s*\(/g, '$1(')
-    .replace(/\(([^()]*)\)\.toFixed\(\s*(\d+)\s*\)/g, (_m, recv: string, d: string) => `rose_fixed((${recv}), ${d})`)
-    .replace(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.toFixed\(\s*(\d+)\s*\)/g, (_m, recv: string, d: string) => `rose_fixed(${recv}, ${d})`);
+  return rewriteToFixedCalls(
+    code
+      .replace(/\bMath\.round\s*\(/g, 'round(')
+      .replace(/\bMath\.floor\s*\(/g, 'rose_floor(')
+      .replace(/\bMath\.ceil\s*\(/g, 'rose_ceil(')
+      .replace(/\bMath\.(max|min|abs)\s*\(/g, '$1(')
+      .replace(/\bNumber\s*\(/g, 'rose_number(')
+      .replace(/\bparseInt\s*\(/g, 'rose_number(')
+      .replace(/\bparseFloat\s*\(/g, 'rose_number(')
+      .replace(/\bMath\.pow\s*\(/g, 'rose_pow(')
+      .replace(/\bMath\.sqrt\s*\(/g, 'rose_sqrt('),
+    (recv, d) => `rose_fixed(${recv}, ${d})`);
 }
-
 function pyExpr(code: string, ctx: PyCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
@@ -3354,34 +4360,56 @@ function pyExpr(code: string, ctx: PyCtx): string {
   // JS Math.* / toFixed have Python spellings; one pass serves templates and
   // handler bodies alike.
   out = pyMathCalls(out);
-  // R253: `rose_content_get("docs", "getting-started").html` - the content
+  // `rose_content_get("docs", "getting-started").html` - the content
   // read returns a dict, and the JS property read that followed the call stayed a
   // Python attribute (AttributeError: 'dict' object has no attribute 'html').
   // Convert only DATA properties on a content-call result: a method/length idiom
   // (.map(.length(.join()...) must stay for the passes below to find.
   out = rewriteContentCallMembers(out);
-  // R274: the four R273 constructs must translate BEFORE the `$`-name rewrite
+  // The four constructs must translate BEFORE the `$`-name rewrite
   // below - a template literal's `${name}` becomes `$rosezm_name` otherwise and
   // the interpolations never fire (the f-string probe showed them surviving as
   // literal text). The state getter rides `read`.
-  // R291: the string + search family rides the same gate. `join`/`split`/
+  // The string + search family rides the same gate. `join`/`split`/
   // `indexOf`/`every`/`startsWith`/`endsWith` have plain arguments and
   // `toUpperCase`/`toLowerCase` have none, so the single-method rewrite below
   // would otherwise emit `.uppercase()` - a Python AttributeError the label
   // turns into "This section failed to render."
   if (/`/.test(out) || /\?\./.test(out) || /\?\?/.test(out) || /\[[^\]]+\]/.test(out) || /\.(?:map|filter|reduce|find|some|every|slice|concat|join|split|indexOf|startsWith|endsWith|toUpperCase|toLowerCase)\s*\(/.test(out)) {
-    const translated = translateExpr(out, { ...PY_EXPR, read: (n) => (ctx.stateNames.has(n) && !ctx.loopVars?.has(n) ? `st.get('${n}')` : n) }, new Set());
+    const translated = translateExpr(out, { ...PY_EXPR, read: (n) => (n !== 'st' && ctx.stateNames.has(n) && !ctx.loopVars?.has(n) ? `st.get('${n}')` : n) }, new Set());
     if (translated !== null) return translated;
   }
-  // R202: a template may read a field BARE - `{mirror}`, `{sq}` - and the web
+  // A template may read a field BARE - `{mirror}`, `{sq}` - and the web
   // compiler callifies that read while this path never did, so the name reached
   // the file as a bare Python identifier. `rose_text` then swallowed the
   // NameError and rendered "This section failed to render." - every bare read on
   // the desktop target was blank. Spelling it as the getter call puts it back on
   // the two paths below that already know what to do with one: the derived
   // substitution and the state-getter unwrap.
-  out = callifyBareReads(out, (name) => (ctx.loopVars?.has(name) ? false : ctx.stateNames.has(name) || !!ctx.funcBinds?.has(name)), (name) => `${name}()`);
-  // R191: a `$derived` read is its own expression, re-evaluated on every read.
+  // `name !== 'st'` guards the page's own state *container*: the page declares a
+  // $state field literally named `st`, so `st` is both the container dict the
+  // build() closes over AND a state name. A bare `st` token is the container
+  // itself (the LHS of a setter the `set` dialect already spelled as
+  // `st['passShown']`); callifying it to `st()` lets the subscript/count passes
+  // turn that write target into `st.get('st').get('passShown')` - Python forbids
+  // assigning to a call, so the page collapsed to all-stubs. The field named `st`
+  // is read with the explicit `st['st']` / `st.get('st')` forms, never a bare `st`.
+  out = callifyBareReads(out, (name) => (ctx.loopVars?.has(name) ? false : (ctx.stateNames.has(name) || !!ctx.funcBinds?.has(name)) && name !== 'st'), (name) => `${name}()`);
+  // A page's accessor functions (`hs()`, `cfg()`, `stats()`...) return DICTS
+  // on this target. Their member reads (`hs().active`) are attributes on a
+  // Python dict - an AttributeError on the first render - so spell the safe
+  // `.get()` form. `.length` is NOT a dict key: the len() pass below owns it.
+  out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g,
+    (whole: string, fn: string, key: string) =>
+      key === 'length' || key === 'map' || key === 'filter' || key === 'join' || key === 'slice' || key === 'push'
+        ? whole
+        : `${fn}().get('${key}')`);
+  // The same accessor-as-dict rule, for SUBSCRIPT reads in a template:
+  // `caps()['block_reason']` is a KeyError on a Python dict, so spell `.get()`
+  // with the `or {}` guard that keeps the `|| fallback` idiom working.
+  out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\[\s*([^\]]*?)\s*\]/g,
+    (_whole: string, fn: string, sub: string) => `${fn}().get(${sub.trim()})`);
+  // A `$derived` read is its own expression, re-evaluated on every read.
   // Substituting it here - before the state-getter unwrap below, which would
   // otherwise turn `doubled()` into a snapshot read of a value computed once at
   // build time - is what keeps it live.
@@ -3405,21 +4433,21 @@ function pyExpr(code: string, ctx: PyCtx): string {
   out = out.replace(/\$(?:store|kv|cookies)\s*\(\s*\)/g, '{}');
   out = out.replace(/\b(?:getContext)\s*\(\s*\)/g, '{}');
   out = out.replace(/\$([A-Za-z_$][\w$]*)/g, 'rosezm_$1');
-  // R191: a collection chain (`items().map(...)`) is a JS arrow this expression
+  // A collection chain (`items().map(...)`) is a JS arrow this expression
   // path never translated, so it reached the file verbatim. The shared IR spells
   // it as a Python comprehension - but it needs the state getter still spelled as
   // a call, so this runs BEFORE the unwrap below. `read` supplies the map read the
-  // chain's seed needs. (R274: the four new constructs are handled at the top of
+  // chain's seed needs. (the four new constructs are handled at the top of
   // pyExpr, before the `$` rewrite - this residual gate keeps chains that only
-  // become visible after the earlier rewrites covered. R291: it carries the
+  // become visible after the earlier rewrites covered. it carries the
   // string + search family too, for the same reason.)
   if (/\.(?:map|filter|reduce|find|some|every|slice|concat|join|split|indexOf|startsWith|endsWith|toUpperCase|toLowerCase)\s*\(/.test(out)) {
-    const translated = translateExpr(out, { ...PY_EXPR, read: (n) => (ctx.stateNames.has(n) && !ctx.loopVars?.has(n) ? `st.get('${n}')` : n) }, new Set());
+    const translated = translateExpr(out, { ...PY_EXPR, read: (n) => (n !== 'st' && ctx.stateNames.has(n) && !ctx.loopVars?.has(n) ? `st.get('${n}')` : n) }, new Set());
     if (translated !== null) out = translated;
   }
   // A state read with a member access reads as nested map lookups: `user().name`.
-  // R191: the trailing `(?!\s*\()` matters as much as it does in the shared
-  // rewriteMemberReads (R177). Without it `name().toUpperCase()` matched with
+  // The trailing `(?!\s*\()` matters as much as it does in the shared
+  // rewriteMemberReads . Without it `name().toUpperCase()` matched with
   // key=`toUpperCase`, producing st.get('name', {}).get('toUpperCase')() - a dict
   // lookup of a method name, which is not Python at all. A method call on a state
   // value stays a call.
@@ -3431,14 +4459,14 @@ function pyExpr(code: string, ctx: PyCtx): string {
   // remaining `.key` into a dict lookup - `posts.length` is Python's len(posts),
   // not posts.get('length').
   out = rewriteLength(out, (e) => `len(${e})`);
-  // R202: `list.join(sep)` is Python with the separator FIRST - `sep.join(list)`.
+  // `list.join(sep)` is Python with the separator FIRST - `sep.join(list)`.
   // Left as written it raises AttributeError on a list, and rose_text swallows
   // that into "This section failed to render.", so a page that joins its
   // selection into a label shows the fallback text instead of the value.
   out = rewriteJoinCalls(out, (list, sep) => `${sep}.join(${list})`);
   // A JS ternary has a Python spelling: `c ? a : b` -> `a if c else b`.
   out = ternaryToPython(out);
-  // R204: the JS string-method family, through the shared pass. The map this
+  // The JS string-method family, through the shared pass. The map this
   // replaces knew five names and spelled `includes` as `__contains__`; Python's
   // real form is the `in` operator, and `trimStart`/`trimEnd` were not in it at
   // all, so `s.trimStart()` shipped as a bare AttributeError.
@@ -3449,7 +4477,18 @@ function pyExpr(code: string, ctx: PyCtx): string {
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   out = out.replace(/&&/g, ' and ').replace(/\|\|/g, ' or ');
   out = out.replace(/\?\?/g, ' or ').replace(/\?\./g, '.');
-  // R285: a bang inside a string literal is text, not a negation - the bare
+  // An inlined component's functions are emitted under instance-scoped def
+  // names; an inline handler or template expression that calls one follows
+  // the rename while its component's scope is active.
+  if (ctx.compScope && ctx.compInstance && ctx.compFns?.size) {
+    const pre = `${ctx.compScope}:${ctx.compInstance}:`;
+    for (const [key, info] of ctx.compFns) {
+      if (!key.startsWith(pre)) continue;
+      const orig = key.slice(pre.length);
+      out = out.replace(new RegExp(`(?<![.0-9A-Za-z_$])${escapeRe(orig)}\\s*\\(`, 'g'), `${info.py}(`);
+    }
+  }
+  // A bang inside a string literal is text, not a negation - the bare
   // regex turned `t + '!'` into `t + "not "`, silently wrong Python.
   out = replaceOutsideStrings(out, /!(?!=)\s*/g, () => 'not ');
   out = rewriteLength(out, (e) => `len(${e})`);
@@ -3457,13 +4496,44 @@ function pyExpr(code: string, ctx: PyCtx): string {
 }
 
 /**
- * Python's spelling of the JS string methods (R204). `trim`/`strip` is the only
+ * Python's spelling of the JS string methods . `trim`/`strip` is the only
  * one people remember; `includes` is an operator here, not a method, and the
  * case flips and prefix tests drop their camelCase. A boolean position needs no
  * wrapper because Python's own truthiness already means "not empty" for a str.
  */
+
+/** The offsets of every lambda PARAMETER list head (`lambda acc, item:`), so
+ *  the dict-key quoting pass leaves them alone. */
+function lambdaParamHeads(code: string): Set<number> {
+  const out = new Set<number>();
+  for (const m of code.matchAll(/\blambda\s+/g)) {
+    const at = m.index + m[0].length;
+    const colon = code.indexOf(':', at);
+    if (colon < 0) continue;
+    // Only a parameter list (no brackets, no quotes) counts.
+    const head = code.slice(at, colon);
+    if (/[\[\]{}()"']/.test(head)) continue;
+    for (const w of head.matchAll(/[A-Za-z_$][\w$]*/g)) out.add(at + w.index!);
+  }
+  return out;
+}
+
 const pyStringMethod: StringMethodSpell = (recv, method, args) => {
   if (method === 'includes') return `(${args[0]} in ${recv})`;
+  if (method === 'charAt' || method === 'at') return `rose_char_at(${recv}, ${args[0] ?? '0'})`;
+  // A list transform over a state list of maps: the lambda parameter is a
+  // dict, so the body's member reads are subscripts.
+  const pyMapBody = (arrow: { params: string[]; body: string }): string =>
+    arrow.body.replace(new RegExp(`\\b${arrow.params[0]}\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)\\b(?!\\s*\\()`, 'g'), (_m: string, k: string) => `${arrow.params[0]}['${k}']`);
+  if (method === 'map' || method === 'filter') {
+    const arrow = matchArrow(args[0] ?? '');
+    if (!arrow || !arrow.params.length) return null;
+    const b = pyMapBody(arrow);
+    return method === 'map' ? `[${b} for ${arrow.params[0]} in ${recv}]` : `[${arrow.params[0]} for ${arrow.params[0]} in ${recv} if ${b}]`;
+  }
+  if (method === 'repeat') return `(str(${recv}) * int(${args[0] ?? '0'}))`;
+  if (method === 'padStart') return `rosezm.rose_pad_start(${recv}, ${args[0] ?? '0'}${args[1] ? ', ' + args[1] : ''})`;
+  if (method === 'padEnd') return `rosezm.rose_pad_end(${recv}, ${args[0] ?? '0'}${args[1] ? ', ' + args[1] : ''})`;
   const py = method === 'trim' ? 'strip'
     : method === 'trimStart' ? 'lstrip'
     : method === 'trimEnd' ? 'rstrip'
@@ -3474,50 +4544,191 @@ const pyStringMethod: StringMethodSpell = (recv, method, args) => {
   return args.length ? `${recv}.${py}(${args.join(', ')})` : `${recv}.${py}()`;
 };
 
+/** Does `src` hold a ternary `?` at its OWN bracket depth (skipping strings
+ *  and `?.`)? Used to decide whether a parenthesised group converts. */
+function hasTopLevelQuestion(src: string): boolean {
+  let d = 0;
+  let q = '';
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (q) { if (ch === '\\') { i++; continue; } if (ch === q) q = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') d++;
+    else if (ch === ')' || ch === ']' || ch === '}') d--;
+    else if (ch === '?' && d === 0 && src[i + 1] !== '.') return true;
+  }
+  return false;
+}
+
 /** `cond ? a : b` -> `a if cond else b`, nested ternaries included. */
 function ternaryToPython(expr: string): string {
+  // Statement prefix (`return`) is NOT part of the condition.
+  const trimmed0 = expr.trim();
+  if (trimmed0.startsWith('return ') || trimmed0 === 'return') {
+    const rest = trimmed0.slice('return'.length).trim();
+    const conv = ternaryToPython(rest);
+    return conv === rest ? trimmed0 : `return ${conv}`;
+  }
+  // Innermost parenthesised ternary first: `(a ? b : c) + (d ? e : f)` has no
+  // convertible TOP-LEVEL `?` of its own until each group converts.
+  let promoted = expr;
+  for (let guard = 0; guard < 64; guard++) {
+    let done = true;
+    let i = 0;
+    while (i < promoted.length) {
+      const ch = promoted[i];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        let j = i + 1;
+        while (j < promoted.length) {
+          if (promoted[j] === '\\') { j += 2; continue; }
+          if (promoted[j] === ch) break;
+          j++;
+        }
+        i = j + 1;
+        continue;
+      }
+      if (ch !== '(') { i++; continue; }
+      // Only a GROUPING paren promotes. A call's paren (`f(x, y ? a : b, z)`)
+      // keeps its own depth context - promoting it lost the fact that the
+      // ternary sits in an argument list, and the arm then swallowed the
+      // next argument (`else 'e', z`).
+      const prevChar = promoted.slice(0, i).replace(/\s+$/, '').slice(-1);
+      if (/[A-Za-z0-9_$.\)\]]/.test(prevChar)) { i++; continue; }
+      let depthP = 1;
+      let close = -1;
+      let q2 = '';
+      let k = i + 1;
+      for (; k < promoted.length; k++) {
+        const c = promoted[k];
+        if (q2) {
+          if (c === '\\') { k++; continue; }
+          if (c === q2) q2 = '';
+          continue;
+        }
+        if (c === '"' || c === "'" || c === '`') { q2 = c; continue; }
+        if (c === '(') depthP++;
+        else if (c === ')') { depthP--; if (depthP === 0) { close = k; break; } }
+      }
+      if (close < 0) break;
+      const inner = promoted.slice(i + 1, close);
+      if (hasTopLevelQuestion(inner)) {
+        const conv = ternaryToPython(inner);
+        if (conv !== inner) {
+          promoted = promoted.slice(0, i + 1) + conv + promoted.slice(close);
+          done = false;
+          break;
+        }
+      }
+      i = close + 1;
+    }
+    if (done) break;
+  }
+  expr = promoted;
+  // Forward scan: first real `?` (skip strings and `?.`), recording the
+  // bracket depth at every position and whether it sits inside a string.
   let q = -1;
   let depth = 0;
   let quote = '';
+  const depths: number[] = [];
+  const inStr: boolean[] = [];
   for (let i = 0; i < expr.length; i++) {
     const ch = expr[i];
+    depths[i] = depth;
+    inStr[i] = quote !== '';
     if (quote) {
-      if (ch === '\\') { i++; continue; }
+      if (ch === '\\') { i++; depth = depth; inStr[++i] = true; continue; }
       if (ch === quote) quote = '';
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; continue; }
-    if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (ch === '?' && depth === 0) { q = i; break; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth--; continue; }
+    if (ch === '?' && expr[i + 1] !== '.') { q = i; break; }
   }
   if (q < 0) return expr;
-  const cond = expr.slice(0, q).trim();
+  // Condition start: at depth 0 the whole prefix is the condition; deeper
+  // (`f(a, b ? c : d)`) it must NOT swallow the callee or earlier arguments -
+  // walk back to the nearest same-level `,` or the enclosing `(`.
+  let condStart = 0;
+  {
+    const qDepth = depths[q] ?? 0;
+    let back = 0;
+    for (let i = q - 1; i >= 0; i--) {
+      if (inStr[i]) continue;
+      const c = expr[i];
+      if (c === ')' || c === ']' || c === '}') back++;
+      else if (c === '(' || c === '[' || c === '{') {
+        // The enclosing arg-list opener bounds a condition at depth > 0
+        // (`f(a, b ? c : d)` -> cond is `b`, not `f(a, b`).
+        if (back === 0 && qDepth > 0) { condStart = i + 1; break; }
+        back--;
+      } else if (c === ',' && back === 0 && qDepth > 0) {
+        // A comma separates arguments/elements - a condition inside an
+        // argument list NEVER spans one (JS binds `,` looser than `?:`).
+        // At depth 0 the comma operator binds looser still, so the condition
+        // may contain one (`a ? b : c, d` parses as `(a?b:c), d`).
+        condStart = i + 1;
+        break;
+      }
+    }
+    while (condStart < q && /\s/.test(expr[condStart])) condStart++;
+  }
+  const cond = expr.slice(condStart, q).trim();
+  const condD = depths[q] ?? 0;
   const rest = expr.slice(q + 1);
+  // Matching `:` at the same depth, counting nested `?`.
   let colon = -1;
-  depth = 0;
-  quote = '';
+  let d2 = 0;
+  let quote2 = '';
   let nested = 0;
   for (let i = 0; i < rest.length; i++) {
     const ch = rest[i];
-    if (quote) {
+    if (quote2) {
       if (ch === '\\') { i++; continue; }
-      if (ch === quote) quote = '';
+      if (ch === quote2) quote2 = '';
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; continue; }
-    if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (depth === 0 && ch === '?') nested++;
-    else if (depth === 0 && ch === ':') {
+    if (ch === '"' || ch === "'" || ch === '`') { quote2 = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') d2++;
+    else if (ch === ')' || ch === ']' || ch === '}') d2--;
+    // The arms sit at the SAME bracket level as the `?` - i.e. at delta 0
+    // on `rest` (the bracket state carries over from the `?`). Comparing
+    // against the ABSOLUTE depth of the condition mislocated every colon
+    // inside a call: f(x, y ? 's' : 'e', z).
+    else if (d2 === 0 && ch === '?' && rest[i + 1] !== '.') nested++;
+    else if (d2 === 0 && ch === ':') {
       if (nested === 0) { colon = i; break; }
       nested--;
     }
   }
   if (colon < 0) return expr;
-  const a = rest.slice(0, colon).trim();
-  const b = rest.slice(colon + 1).trim();
-  return `(${ternaryToPython(a)} if ${cond} else ${ternaryToPython(b)})`;
+  const a = rest.slice(0, colon).trim().replace(/;\s*$/, '').trim();
+  const afterColon = rest.slice(colon + 1);
+  // The arm extends to the matching depth-0-relative end; any suffix after the
+  // group (`) + x`) stays outside the produced parenthesised form.
+  let bEnd = afterColon.length;
+  let d3 = 0;
+  let quote3 = '';
+  let cut = -1;
+  for (let i = 0; i < afterColon.length; i++) {
+    const ch = afterColon[i];
+    if (quote3) {
+      if (ch === '\\') { i++; continue; }
+      if (ch === quote3) quote3 = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote3 = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') d3++;
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      if (d3 === 0 && condD > 0) { cut = i; break; }
+      d3--;
+    } else if (ch === ',' && d3 === 0) { cut = i; break; }
+  }
+  if (cut >= 0) bEnd = cut;
+  const b = afterColon.slice(0, bEnd).trim().replace(/;\s*$/, '').trim();
+  const suffix = afterColon.slice(bEnd);
+  const prefix = expr.slice(0, condStart);
+  return `${prefix}(${ternaryToPython(a)} if ${cond} else ${ternaryToPython(b)})${suffix}`;
 }
 
 function snake(s: string): string {
@@ -3538,6 +4749,7 @@ function scanState(script: string): ScriptFacts {
     facts.derived.push({ name: m[1], expr: sliceBalanced(script, open) });
   }
   for (const m of script.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$data\b(?:<[^>]*>)?\s*\(/g)) facts.data.push(m[1]);
+  for (const n of implicitStateNames(script)) if (!facts.state.includes(n)) facts.state.push(n);
   return facts;
 }
 
@@ -3554,9 +4766,15 @@ function initialOf(script: string, name: string, known: Set<string> = new Set())
 
 /** A JS literal is close to a Python one: quote object keys, keep the rest. */
 function pyLiteral(src: string, known: Set<string> = new Set()): string {
+  if (process.env.ROSEZM_JDBG) console.error('DBG-PYLIT:', JSON.stringify(src.slice(0, 60)));
   if (!src.trim()) return 'None';
   let out = src.trim();
-  // R177: a state initializer is a fourth code path with its own translator.
+  // The scalar spells the handler body gets: a $state initializer goes through
+  // this path too, and `String(Number('42'))` reaching Python raw is a
+  // NameError (the seed then silently degrades to None).
+  out = pyMathCalls(out);
+  out = out.replace(/\bString\s*\(/g, 'str(');
+  // A state initializer is a fourth code path with its own translator.
   out = rewriteInitializer(out, {
     empty: (n) => `str(${n}) != ''`,
     nullish: (l, r) => `(${l} if ${l} is not None else ${r})`,
@@ -3564,13 +4782,24 @@ function pyLiteral(src: string, known: Set<string> = new Set()): string {
     dialect: { translate: (e, p) => translateExpr(e, PY_EXPR, p) },
     query: (k) => `app.query.get(${JSON.stringify(k)}, '')`,
   });
+  // rewriteOrFallback spells the `||` fallback as a C-STYLE ternary
+  // (`str(s) != '' ? s : 'fallback'`) because most native targets share that
+  // shape. Python needs `s if str(s) != '' else 'fallback'` - convert it here
+  // or the STATE initializer is a SyntaxError and the whole page degrades.
+  out = out.replace(/\b(.+?)\s*\?\s*(.+?)\s*:\s*(.+?)(?=\s*(?:[,}\n]|$))/g,
+    (_m: string, cond: string, a: string, b: string) => `(${a.trim()} if ${cond.trim()} else ${b.trim()})`);
+  // The scalar spells again here: rewriteInitializer's dialect may refuse the
+  // String(Number(...)) wrapper, and the raw JS reaching Python is a NameError.
+  out = pyMathCalls(out);
+  out = out.replace(/\bString\s*\(/g, 'str(');
   // A framework rune in an initializer cannot be resolved at export time.
   out = out.replace(/\$(?:query|store|kv|cookies|actionError|actionPending|sessionCookie)\s*\([^)]*\)(?:\s*\.\s*[A-Za-z_$][\w$]*)?/g, 'None');
   out = out.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, "'$2'");
   out = out.replace(/\?\?/g, ' or ');
-  out = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, (_m, lead: string, key: string) => `${lead}'${key}':`);
+  const lambdaParams = lambdaParamHeads(out);
+  out = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, (_m: string, lead: string, key: string, off: number) => (lambdaParams.has(off + lead.length) ? `${lead}${key}:` : `${lead}'${key}':`));
   // A literal initializer reads module binds as maps: store.likes -> store['likes'].
-  // R253: the app/state/handle objects are NOT maps - Tk widgets implement `[]`
+  // The app/state/handle objects are NOT maps - Tk widgets implement `[]`
   // as an option lookup, so `app['query']` called `cget(-query)` and raised
   // TclError: unknown option. Their reads stay attribute access.
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)/g, (whole, obj: string, key: string) =>
@@ -3584,7 +4813,10 @@ function pyLiteral(src: string, known: Set<string> = new Set()): string {
   // and body, and a method name after a dot, are not module reads. `app`, `st`
   // and `parent` are the page's own runtime handles, spelled by the rewrites
   // above, so they are never module reads.
-  if (initializerLeak(out, known, ['len', 'str', 'int', 'float', 'list', 'dict', 'print', 'app', 'st', 'parent', 'rosezm']) !== null) return 'None';
+  // The kit's rose_* helpers the scalar spells emit (rose_number etc.) are
+  // legitimate here - without them a seed like str(rose_number('42')) reads as
+  // a leak and the state silently degrades to None.
+  if (initializerLeak(out, known, ['len', 'str', 'int', 'float', 'list', 'dict', 'print', 'app', 'st', 'parent', 'rosezm', 'rose_number', 'rose_floor', 'rose_ceil', 'rose_pow', 'rose_sqrt', 'rose_char_at', 'rose_fixed', 'rose_re_sub', 'rose_distinct', 'rose_max', 'rose_min', 'rose_abs', 'round']) !== null) return 'None';
   return out;
 }
 
@@ -3593,7 +4825,7 @@ function moduleBinds(script: string): Array<{ name: string; init: string }> {
   for (const m of script.matchAll(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^\n;]+)/gm)) {
     const init = m[2].trim();
     if (/^\$(?:state|derived|data|kv|persist)\b/.test(init)) continue;
-    // R252: `const docList = () => ...` is a module-level helper, not a literal.
+    // `const docList = () => ...` is a module-level helper, not a literal.
     // The literal guard below used to skip it, so every read of docList in the
     // template reached the page as an undeclared name (a NameError at render).
     const arrow = /^\(\s*([^)]*)\)\s*=>\s*(.*)$/.exec(init);
@@ -3647,9 +4879,9 @@ function escapeRe(s: string): string {
 }
 
 /** Script -> Python handler functions defined inside `build`. */
-function translateHandlers(script: string, facts: ScriptFacts, page: { route: string; name: string }, warnings: string[], bindNames0: string[] = [], effectNames: string[] = []): string {
+function translateHandlers(script: string, facts: ScriptFacts, page: { route: string; name: string }, warnings: string[], bindNames0: string[] = [], effectNames: string[] = [], fnInfo?: { asyncClean: string[]; asyncStub: string[]; sync: string[]; syncStub: string[] }): { defs: string; mountCalls: string } {
   const fileLabel = page.name;
-  if (!script.trim()) return '';
+  if (!script.trim()) return { defs: '', mountCalls: '' };
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
   try {
     code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
@@ -3658,7 +4890,7 @@ function translateHandlers(script: string, facts: ScriptFacts, page: { route: st
   }
   // A module bind is a dict: `store.likes` is a subscript, never a dot.
   for (const b of moduleBinds(script)) {
-    code = code.replace(new RegExp(`\\b${escapeRe(b.name)}\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, 'g'), `${b.name}['$1']`);
+    code = code.replace(new RegExp(`\\b${escapeRe(b.name)}\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)`, 'g'), `${b.name}['$1']`);
   }
   // State/derived/data declarations: they became STATE.
   for (const name of [...facts.state, ...facts.derived.map((d) => d.name), ...facts.data]) {
@@ -3679,13 +4911,15 @@ function translateHandlers(script: string, facts: ScriptFacts, page: { route: st
   void actions;
   // Top-level functions become closures inside build.
   const defs: string[] = [];
+  const declaredFns = new Set<string>();
   const knownNames = [...facts.state, ...facts.derived.map((d) => d.name), ...facts.data];
-  // R481: the renamed function's calls inside other bodies must follow it.
+  // The renamed function's calls inside other bodies must follow it.
   const renamed = new Map<string, string>();
-  for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
-    const name = m[1];
+  for (const m of code.matchAll(/^(?:(async)\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
+    const isAsync = !!m[1];
+    const name = m[2];
     if (name.startsWith('__')) continue;
-    // R481: the page's own entry point is `def build(app, st, parent)`. A user
+    // The page's own entry point is `def build(app, st, parent)`. A user
     // function named `build` would nest a second `def build()` inside it - a
     // hard error in Python (same name, different signature). Rename it.
     const pyName = name === 'build' ? 'build_' : name;
@@ -3694,7 +4928,45 @@ function translateHandlers(script: string, facts: ScriptFacts, page: { route: st
     const close = matchParen(code, open);
     if (close < 0) continue;
     const body = code.slice(open + 1, close);
-    defs.push(`    def ${pyName}(${m[2].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.split(':')[0].trim()).join(', ')}):\n${pyRenameCalls(translateBody(body, fileLabel, warnings, 8, knownNames, bindNames0), renamed)}`);
+    // esbuild drops a TypeScript optional marker (`vars?: X`), so a bare
+    // `def tr(key, vars):` forces a positional arg the caller may never supply
+    // (e.g. `tr()`). Recover the optionality from the RAW script (the
+    // un-transformed source still carries `?`) and give the missing params a
+    // `None` default - the same shape every other target spells for an optional.
+    const rawSig = new RegExp(`function\\s+${escapeRe(name)}\\s*\\(([^)]*)\\)`).exec(script);
+    const optionalNames = new Set<string>();
+    if (rawSig) {
+      for (const part of rawSig[1].split(',')) {
+        const t = part.trim();
+        if (/\?(\s*:|$|\s)/.test(t)) optionalNames.add(t.replace(/[?:].*$/, '').trim());
+      }
+    }
+    const params = m[3].split(',').map((p) => p.trim()).filter(Boolean)
+      .map((p) => { const n = p.split(':')[0].trim(); return optionalNames.has(n) ? `${n}=None` : n; })
+      .join(', ');
+    if (isAsync) {
+      // A page-local async function is a real coroutine on this target: the
+      // body keeps its awaits, and a delay promise lowers to asyncio.sleep.
+      // A body the target cannot express stays a stub - recorded so an
+      // {#await} head calling it degrades to the catch branch instead of
+      // handing the then branch a silent null. The stub itself is emitted
+      // sync: its body is only the refusal marker, and a bare `async def`
+      // as a Tk command would build a coroutine nobody awaits.
+      const out = translateBody(body, fileLabel, warnings, 8, knownNames, bindNames0, true, true, new Set(fnInfo?.asyncClean ?? []));
+      const stubbed = /handler body not translated/.test(out);
+      if (stubbed) fnInfo?.asyncStub.push(name);
+      else fnInfo?.asyncClean.push(name);
+      const glob = stubbed ? '' : pyGlobalDecl(body, out, bindNames0, knownNames);
+      defs.push(`    ${stubbed ? 'def' : 'async def'} ${pyName}(${params}):\n${glob}${pyRenameCalls(out, renamed)}`);
+    } else {
+      const out = translateBody(body, fileLabel, warnings, 8, knownNames, bindNames0, true, false, new Set(fnInfo?.asyncClean ?? []));
+      fnInfo?.sync.push(name);
+      const stubbed = /handler body not translated/.test(out);
+      if (stubbed) fnInfo?.syncStub.push(name);
+      const glob = stubbed ? '' : pyGlobalDecl(body, out, bindNames0, knownNames);
+      defs.push(`    def ${pyName}(${params}):\n${glob}${pyRenameCalls(out, renamed)}`);
+    }
+    declaredFns.add(pyName);
     if (pyName !== name) warnings.push(`${fileLabel}: the function "${name}" is renamed to "${pyName}" - the page's own entry point is called build`);
   }
   // A $effect body is the same kind of statement list, so it gets the same
@@ -3710,19 +4982,830 @@ function translateHandlers(script: string, facts: ScriptFacts, page: { route: st
       warnings.push(`${fileLabel}: an effect body the exporter could not read is skipped (${eff.arg.slice(0, 40)})`);
       continue;
     }
-    // A cleanup an effect returns needs a disposal moment this target does not
-    // have, and the arrow that carries it is the very shape the handler pass
-    // refuses. Cut only that statement: the body still runs, which is the part
-    // that keeps a mirrored field live.
+    // A cleanup an effect returns runs at the page's disposal moment on this
+    // target: show() drains the app's disposers before it destroys the page's
+    // widgets, and main() drains once more after mainloop returns. The dispose
+    // def nests INSIDE the effect def, so a cleanup that reads one of the
+    // effect's own locals closes over it exactly as the web arrow does.
     const [run, dispose] = cutEffectReturn(eff.body);
-    if (dispose) warnings.push(`${fileLabel}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
     const name = `__effect${effectNames.length}`;
     effectNames.push(name);
-    defs.push(`    def ${name}():\n${translateBody(run, fileLabel, warnings, 8, knownNames, bindNames0, false)}`);
+    let def = `    def ${name}():\n${translateBody(run, fileLabel, warnings, 8, knownNames, bindNames0, false, false, new Set(fnInfo?.asyncClean ?? []))}`;
+    const cleanup = cleanupStatements(dispose);
+    if (cleanup !== null) {
+      const out = translateBody(cleanup, fileLabel, warnings, 12, knownNames, bindNames0, false, false, new Set(fnInfo?.asyncClean ?? []));
+      if (/handler body not translated/.test(out)) {
+        warnings.push(`${fileLabel}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+      } else {
+        const disposeName = `__dispose${effectNames.length - 1}`;
+        def += `\n        def ${disposeName}():\n${out}\n        app.disposers.append(${disposeName})`;
+      }
+    } else if (dispose) {
+      warnings.push(`${fileLabel}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+    }
+    defs.push(def);
+  }
+  // The web lifecycle hooks. Both used to drop in silence here. onMount bodies
+  // run once per page frame: on this target every build() IS a fresh frame
+  // (show() drains the disposers and destroys the old widgets before
+  // rebuilding), so the call sits at the end of build(), where the web's
+  // post-wire moment is. onCleanup bodies register on the app's disposer list
+  // - the same drain the $effect cleanups ride, so the two compose. A body the
+  // translator refuses warns with the page and the reason instead of silence.
+  const mountCalls: string[] = [];
+  const mounts = lifecycleBodies(code, 'onMount');
+  const cleans = lifecycleBodies(code, 'onCleanup');
+  // The names a translated lifecycle body may legally read: page state, module
+  // binds, the page's own functions (and their auto-setter spellings), plus the
+  // builtins the translator itself emits. A translated body that reads anything
+  // else would raise NameError at its moment - esbuild renames a mount-local
+  // (`let x` inside onMount becomes x2) exactly when a sibling cleanup captures
+  // the old name, so the dangling reference is only visible after translation.
+  const resolvable = new Set<string>([
+    'if', 'elif', 'else', 'for', 'while', 'in', 'not', 'and', 'or', 'is', 'return', 'pass',
+    'None', 'True', 'False', 'try', 'except', 'finally', 'lambda', 'global', 'break', 'continue',
+    'print', 'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'set', 'tuple', 'range',
+    'round', 'max', 'min', 'abs', 'sum', 'sorted', 'enumerate', 'Exception', 'asyncio',
+    'app', 'st', 'parent', 'rosezm', 'roseThrow', 'rose_native', 'rose_floor', 'rose_ceil', 'rose_fixed',
+  ]);
+  for (const n of knownNames) { resolvable.add(n); resolvable.add('set' + n[0].toUpperCase() + n.slice(1)); }
+  for (const b of bindNames0) resolvable.add(b);
+  for (const f of declaredFns) resolvable.add(f);
+  let mountN = 0;
+  for (const hook of mounts) {
+    if (hook.unread) {
+      warnings.push(`${fileLabel}: an onMount argument the exporter could not read is not wired (${hook.body.slice(0, 40)})`);
+      continue;
+    }
+    if (hook.async) {
+      warnings.push(`${fileLabel}: an async onMount is not wired - a Tk callback chain cannot await a coroutine`);
+      continue;
+    }
+    if (hook.fn) {
+      const py = renamed.get(hook.fn) ?? hook.fn;
+      if (fnInfo?.asyncClean.includes(hook.fn)) {
+        warnings.push(`${fileLabel}: an onMount on the async function ${hook.fn}() is not wired - a Tk callback chain cannot await a coroutine`);
+        continue;
+      }
+      if (!declaredFns.has(py) && !bindNames0.includes(hook.fn)) {
+        warnings.push(`${fileLabel}: an onMount on ${hook.fn}() is not wired - the page declares no such function`);
+        continue;
+      }
+      mountCalls.push(`    ${py}()`);
+      continue;
+    }
+    const lowered = lowerIntervals(hook.body, {
+      defs, warnings, file: fileLabel, stateNames: knownNames, bindNames: bindNames0, renamed,
+      nextName: () => String(intervalN++), asyncNames: new Set(fnInfo?.asyncClean ?? []),
+    });
+    const out = translateBody(lowered, fileLabel, warnings, 8, knownNames, bindNames0, false, false, new Set(fnInfo?.asyncClean ?? []));
+    if (/handler body not translated/.test(out)) {
+      warnings.push(`${fileLabel}: the onMount body is not wired - ${refusalReason(out)}`);
+      continue;
+    }
+    const dangling = pyUnresolved(out, resolvable);
+    if (dangling.length) {
+      warnings.push(`${fileLabel}: the onMount body reads ${dangling.join(', ')}, which the desktop export cannot resolve (no page state, module bind or function by that name) - it is not wired`);
+      continue;
+    }
+    defs.push(`    def __mount${mountN}():\n${pyGlobalDecl(hook.body, out, bindNames0, knownNames)}${pyRenameCalls(out, renamed)}`);
+    mountCalls.push(`    __mount${mountN}()`);
+    mountN++;
+  }
+  let cleanupN = 0;
+  for (const hook of cleans) {
+    if (hook.unread) {
+      warnings.push(`${fileLabel}: an onCleanup argument the exporter could not read is not wired (${hook.body.slice(0, 40)})`);
+      continue;
+    }
+    if (hook.async) {
+      warnings.push(`${fileLabel}: an async onCleanup is not wired - a Tk callback chain cannot await a coroutine`);
+      continue;
+    }
+    if (hook.fn) {
+      const py = renamed.get(hook.fn) ?? hook.fn;
+      if (fnInfo?.asyncClean.includes(hook.fn)) {
+        warnings.push(`${fileLabel}: an onCleanup on the async function ${hook.fn}() is not wired - a Tk callback chain cannot await a coroutine`);
+        continue;
+      }
+      if (!declaredFns.has(py) && !bindNames0.includes(hook.fn)) {
+        warnings.push(`${fileLabel}: an onCleanup on ${hook.fn}() is not wired - the page declares no such function`);
+        continue;
+      }
+      defs.push(`    def __cleanup${cleanupN}():\n        ${py}()\n    app.disposers.append(__cleanup${cleanupN})`);
+      cleanupN++;
+      continue;
+    }
+    const out = translateBody(hook.body, fileLabel, warnings, 8, knownNames, bindNames0, false, false, new Set(fnInfo?.asyncClean ?? []));
+    if (/handler body not translated/.test(out)) {
+      warnings.push(`${fileLabel}: the onCleanup body is not wired - ${refusalReason(out)}`);
+      continue;
+    }
+    const dangling = pyUnresolved(out, resolvable);
+    if (dangling.length) {
+      warnings.push(`${fileLabel}: the onCleanup body reads ${dangling.join(', ')}, which the desktop export cannot resolve (no page state, module bind or function by that name) - it is not wired`);
+      continue;
+    }
+    defs.push(`    def __cleanup${cleanupN}():\n${pyGlobalDecl(hook.body, out, bindNames0, knownNames)}${pyRenameCalls(out, renamed)}\n    app.disposers.append(__cleanup${cleanupN})`);
+    cleanupN++;
   }
   // `let links = $state([...])` style declarations already removed; a leftover
   // module-level literal becomes a page-module constant, not a closure.
-  return [...actionDefs, ...defs].join('\n');
+  return { defs: [...actionDefs, ...defs].join('\n'), mountCalls: mountCalls.join('\n') };
+}
+
+/** The page's component set, transitively: a component may render another
+ *  component (in script imports OR bare in its template - the element pass
+ *  resolves any tag a scanned component names), and the inline model splices
+ *  both into the same page build. */
+function componentClosure(pageNodes: IrNode[], imports: string[], components: Array<{ name: string; nodes: IrNode[]; script: string | null }>): string[] {
+  const byLow = new Map(components.map((c) => [c.name.toLowerCase(), c.name] as const));
+  const wanted: string[] = [];
+  const seen = new Set<string>();
+  const queue: string[] = [];
+  const push = (name: string): void => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    wanted.push(name);
+    queue.push(name);
+  };
+  const harvest = (nodes: IrNode[]): void => {
+    for (const n of nodes) {
+      if (n.kind === 'element') {
+        const hit = byLow.get(n.tag.toLowerCase());
+        if (hit !== undefined) push(hit);
+        harvest(n.children);
+      } else if (n.kind === 'if') {
+        for (const b of n.branches) harvest(b.children);
+      } else if (n.kind === 'each' || n.kind === 'block') {
+        harvest(n.children);
+        if (n.fallback) harvest(n.fallback);
+      } else if (n.kind === 'await') {
+        harvest(n.pending); harvest(n.then); harvest(n.catch);
+      }
+    }
+  };
+  for (const name of imports) {
+    const hit = byLow.get(name.toLowerCase());
+    if (hit !== undefined) push(hit);
+  }
+  while (queue.length) {
+    const name = queue.shift()!;
+    const comp = components.find((c) => c.name === name);
+    if (!comp) continue;
+    for (const m of (comp.script ?? '').matchAll(/import\s+\w+\s+from\s+['"][^'"]*\/(\w+)\.rose['"]/g)) {
+      const hit = byLow.get(m[1].toLowerCase());
+      if (hit !== undefined) push(hit);
+    }
+    harvest(comp.nodes);
+  }
+  return wanted;
+}
+
+/** Component-level onMount/onCleanup for the inline model. A .rose component
+ *  has no instance on this target - its template is spliced into the parent
+ *  page's tree - so the hooks ride the parent's moments: the mount bodies are
+ *  translated with the SAME machinery as the page's own hooks (translateBody,
+ *  the dangling-name gate, the interval lowering) and armed once per
+ *  component+parent through a module-level one-shot set; the cleanups register
+ *  into the parent's dispose drain keyed by component, so a re-render replaces
+ *  the entry instead of stacking it. The component's own $state has no scope of
+ *  its own here, so a hook-declaring component's fields hoist into the page's
+ *  STATE under a comp_<name>_ prefix (the template's reads rename through the
+ *  same map), and a hook body nothing in the parent scope resolves is a named
+ *  warning, never silence. A mount/cleanup body's captured plain local (the
+ *  hoisted lifecycle field) lives in the module-level __COMP_FIELDS dict keyed
+ *  `<instanceId>:<field>`, seeded where the instance materializes. */
+/** One inlined component's script facts, parsed the first time one of its
+ *  call sites splices. */
+interface PyCompInfo {
+  script: string;
+  code: string;
+  label: string;
+  ownState: string[];
+  declared: Array<{ name: string; init: string }>;
+  site: Map<string, string>;
+  fns: Array<{ isAsync: boolean; name: string; params: string; open: number }>;
+  mounts: Array<{ body: string; fn: string | null; async: boolean; unread?: boolean }>;
+  cleans: Array<{ body: string; fn: string | null; async: boolean; unread?: boolean }>;
+  fields: string[];
+}
+
+/** Per-page accumulator for the inlined components. The element pass
+ *  materializes one INSTANCE per call site as it splices: the component's own
+ *  $state rides per-instance keys `<instanceId>:<name>` in the page's STATE
+ *  (a quoted placeholder through the translation passes, resolved to the real
+ *  key when the page module assembles), its functions and hooks emit once per
+ *  instance against those keys, and the mount one-shot and cleanup registry
+ *  key on the instance too - so two call sites of one component keep two
+ *  independent states. */
+interface PyCompLc {
+  defs: string[];
+  mountLines: string[];
+  seeds: Map<string, string>;
+  keyLits: Map<string, string>;
+  /** Per-row instances: a quoted placeholder -> the runtime key expression
+   *  (`__inst1 + ':likes'`) that replaces it in the assembled module. */
+  keyExprs: Map<string, string>;
+  /** Per-row instances: base instance id -> the build-local holding the
+   *  runtime id and the id expression it is assigned at the splice. */
+  instExprs: Map<string, { variable: string; expr: string }>;
+  compFns: Map<string, { py: string; async: boolean }>;
+  placeholders: string[];
+  instRenames: Map<string, Map<string, string>>;
+  seq: Map<string, number>;
+  globalSeq: number;
+  rowSeq: number;
+  instSeq: number;
+  /** The {#each} row counters a per-row component call site actually read -
+   *  only those loops emit the counter lines. */
+  rowUsers: Set<string>;
+  /** A per-row instance emitted lifecycle wiring (mounts, cleans or fields),
+   *  so the module-level __COMP_* declarations emit even without mountLines. */
+  runtimeLc: boolean;
+  drainPushed: boolean;
+  infos: Map<string, PyCompInfo | null>;
+  fieldSeeds: string[];
+  materialize(comp: { name: string; nodes: IrNode[]; script: string | null }, ctx: PyCtx): { instId: string; renames: Map<string, string> };
+}
+
+function translateComponentLifecycles(
+  page: { name: string; nodes: IrNode[] },
+  components: Array<{ name: string; nodes: IrNode[]; script: string | null }>,
+  wanted: string[],
+  warnings: string[],
+  knownNames: string[],
+  bindNames: string[],
+  factsState: string[],
+): PyCompLc {
+  const lc: PyCompLc = {
+    defs: [],
+    mountLines: [],
+    seeds: new Map(),
+    keyLits: new Map(),
+    keyExprs: new Map(),
+    instExprs: new Map(),
+    compFns: new Map(),
+    placeholders: [],
+    instRenames: new Map(),
+    seq: new Map(),
+    globalSeq: 0,
+    rowSeq: 0,
+    instSeq: 0,
+    rowUsers: new Set(),
+    runtimeLc: false,
+    drainPushed: false,
+    infos: new Map(),
+    fieldSeeds: [],
+    materialize: () => ({ instId: '', renames: new Map() }),
+  };
+  // A component's script parses once; null means it did not parse (or has
+  // nothing to wire or key), and its call sites splice without renames.
+  const info = (name: string): PyCompInfo | null => {
+    const low = name.toLowerCase();
+    if (lc.infos.has(low)) return lc.infos.get(low) ?? null;
+    let out: PyCompInfo | null = null;
+    const comp = components.find((c) => c.name === name);
+    if (comp) {
+      const script = comp.script ?? '';
+      let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
+      let parsed = true;
+      try {
+        code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
+      } catch {
+        warnings.push(`python: ${name} declares script code (functions or onMount/onCleanup) - its script did not parse as TypeScript, so the bodies are not wired`);
+        parsed = false;
+      }
+      const mounts = parsed ? lifecycleBodies(code, 'onMount') : [];
+      const cleans = parsed ? lifecycleBodies(code, 'onCleanup') : [];
+      const fns = parsed
+        ? [...code.matchAll(/^(?:(async)\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)]
+            .map((m) => ({ isAsync: !!m[1], name: m[2], params: m[3], open: (m.index ?? 0) + m[0].length - 1 }))
+            .filter((f) => !f.name.startsWith('__'))
+        : [];
+      const facts = parsed ? scanState(script) : null;
+      const ownState = facts ? facts.state : [];
+      if (mounts.length || cleans.length || fns.length || ownState.length) {
+        // The call site's props: the FIRST <Comp> in the page tree decides
+        // what a function or mount body sees - props stay call-site-agnostic
+        // on the inline model (only the own $state is per instance). An expr
+        // prop reads call-form (a prop IS a getter on the web), so a bare
+        // state name callifies - a literal dropped into `tag().length` would
+        // emit `"a"().length`, which is not Python.
+        const site = new Map<string, string>();
+        const callified = (raw: string): string => {
+          const t = raw.trim();
+          if (!t) return "''";
+          return /^[A-Za-z_$][\w$]*$/.test(t) ? `${t}()` : `(${t})`;
+        };
+        const visit = (nodes: IrNode[]): boolean => {
+          for (const n of nodes) {
+            if (n.kind === 'element') {
+              if (n.tag.toLowerCase() === low) {
+                for (const a of n.attrs) {
+                  // A text literal rides in PARENTHESIZED: `"a".length` has no
+                  // recoverable receiver for the len() pass, `("a").length` does.
+                  if (a.value.kind === 'expr') site.set(a.name, callified(a.value.code));
+                  else if (a.value.kind === 'text') site.set(a.name, `(${JSON.stringify(a.value.text)})`);
+                }
+                return true;
+              }
+              if (visit(n.children)) return true;
+            } else if (n.kind === 'if') {
+              for (const b of n.branches) if (visit(b.children)) return true;
+            } else if (n.kind === 'each' || n.kind === 'block') {
+              if (visit(n.children) || (n.fallback ? visit(n.fallback) : false)) return true;
+            } else if (n.kind === 'await') {
+              if (visit(n.pending) || visit(n.then) || visit(n.catch)) return true;
+            }
+          }
+          return false;
+        };
+        visit(page.nodes);
+        if (!site.size) {
+          // A nested component's call sites live in the parent component's
+          // template, not the page tree - walk the closure's templates too.
+          for (const other of wanted) {
+            const oc = components.find((c) => c.name === other);
+            if (oc && visit(oc.nodes)) break;
+          }
+        }
+        const declared = [...script.matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^;\n]+)/g)].map((m) => ({ name: m[1], init: m[2].trim() }));
+        // The hoisted lifecycle fields: a plain top-level `let` a mount or
+        // cleanup body ASSIGNS. Props and $state/$derived/$data names never
+        // qualify (the state collector owns its names), and a name a hook only
+        // reads is a constant, not a field.
+        const fields = parsed
+          ? scanCompFields(code, [...mounts, ...cleans], new Set([
+              ...declared.map((d) => d.name),
+              ...(facts ? [...facts.state, ...facts.derived.map((d) => d.name), ...facts.data] : []),
+            ]))
+          : [];
+        out = {
+          script,
+          code,
+          label: `${comp.name} (inlined into ${page.name})`,
+          ownState,
+          declared,
+          site,
+          fns,
+          mounts,
+          cleans,
+          fields,
+        };
+      }
+    }
+    lc.infos.set(low, out);
+    return out;
+  };
+  lc.materialize = (comp: { name: string; nodes: IrNode[]; script: string | null }, ctx: PyCtx): { instId: string; renames: Map<string, string> } => {
+    const low = comp.name.toLowerCase();
+    const n = (lc.seq.get(low) ?? 0) + 1;
+    lc.seq.set(low, n);
+    const instId = `${comp.name}${n}`;
+    const renames = new Map<string, string>();
+    const inf = info(comp.name);
+    if (inf) {
+      // A call site inside an {#each} with keyed state (own $state, hoisted
+      // lifecycle fields or hooks) materializes PER ROW: the instance id gains
+      // the row index at runtime, so every row keeps its own keyed state, its
+      // own mount one-shot and its own cleanup registry entry - like the web
+      // build. The row counters the splice reads mark their loops.
+      const rows = ctx.rowIndices ?? [];
+      const keyed = inf.ownState.length > 0 || inf.fields.length > 0 || inf.mounts.length > 0 || inf.cleans.length > 0;
+      const perRow = rows.length > 0 && keyed;
+      const instVar = perRow ? `__inst${++lc.instSeq}` : '';
+      const idExpr = perRow ? `'${instId}-' + ${rows.map((r) => `str(${r})`).join(" + '-' + ")}` : '';
+      if (perRow) {
+        for (const r of rows) lc.rowUsers.add(r);
+        lc.instExprs.set(instId, { variable: instVar, expr: idExpr });
+        emit(`${instVar} = ${idExpr}`, ctx);
+      }
+      // The instance's own $state: a quoted placeholder per name rides every
+      // translation pass; the page module resolves it to `<instId>:<name>`
+      // when it assembles, and the STATE seed is per full key. A per-row
+      // instance resolves the placeholder to the runtime id expression and
+      // seeds lazily at the splice (the first render of each row seeds it).
+      for (const s of inf.ownState) {
+        lc.globalSeq++;
+        const ph = `__rosek${lc.globalSeq}_${s}`;
+        renames.set(s, ph);
+        if (perRow) {
+          lc.keyExprs.set(ph, `${instVar} + ':${s}'`);
+          emit(`st.setdefault(${instVar} + ':${s}', ${initialOf(inf.script, s)})`, ctx);
+        } else {
+          lc.keyLits.set(ph, `${instId}:${s}`);
+          lc.seeds.set(ph, initialOf(inf.script, s));
+          factsState.push(ph);
+        }
+        lc.placeholders.push(ph);
+        ctx.stateNames.add(ph);
+      }
+      if (renames.size) lc.instRenames.set(instId, renames);
+      if (!inf.fns.length && !inf.mounts.length && !inf.cleans.length) return { instId, renames };
+      const known = [...knownNames, ...lc.placeholders];
+      const resolvable = new Set<string>([
+        'if', 'elif', 'else', 'for', 'while', 'in', 'not', 'and', 'or', 'is', 'return', 'pass',
+        'None', 'True', 'False', 'try', 'except', 'finally', 'lambda', 'global', 'break', 'continue',
+        'print', 'len', 'str', 'int', 'float', 'bool', 'list', 'dict', 'set', 'tuple', 'range',
+        'round', 'max', 'min', 'abs', 'sum', 'sorted', 'enumerate', 'Exception', 'asyncio',
+        'app', 'st', 'parent', 'rosezm', 'roseThrow', 'rose_native', 'rose_floor', 'rose_ceil', 'rose_fixed',
+      ]);
+      for (const nm of known) { resolvable.add(nm); resolvable.add('set' + nm[0].toUpperCase() + nm.slice(1)); }
+      for (const b of bindNames) resolvable.add(b);
+      if (perRow) resolvable.add(instVar);
+      const pyTag = instId.replace(/[^A-Za-z0-9_]/g, '_');
+      // The instance's functions become page closures - the same pipeline the
+      // hook bodies ride - so a template handler that names one resolves to a
+      // real def instead of a NameError. Every def is instance-prefixed, and
+      // each body keeps the SAME translation as the page's script functions:
+      // props substitute first (the first call site decides what a prop read
+      // sees), then the own-state reads and writes rename onto the
+      // per-instance keys - with the bare reads callified, because a
+      // rune-style write arrives as `$setState('k', k + 1)` and a bare `k` on
+      // the value side would reach the file as a NameError.
+      const fnRenamed = new Map<string, string>();
+      for (const f of inf.fns) {
+        const pyName = `comp_${pyTag}_${f.name}`;
+        fnRenamed.set(f.name, pyName);
+        resolvable.add(pyName);
+      }
+      const prepBody = (raw: string): string => {
+        let body = raw;
+        for (const d of inf.declared) {
+          if (!new RegExp(`\\b${escapeRe(d.name)}\\b`).test(body)) continue;
+          const value = inf.site.get(d.name) ?? `(${d.init})`;
+          body = replaceOutsideStrings(body, new RegExp(`\\b${escapeRe(d.name)}\\s*\\(\\s*\\)`, 'g'), () => value);
+          body = replaceOutsideStrings(body, new RegExp(`\\b${escapeRe(d.name)}\\b`, 'g'), () => value);
+        }
+        // The auto-setter spelling (`setCount(EXPR)`) becomes the canonical
+        // write first: the per-instance key would break it (no pass spells
+        // `set__rosek3_likes`).
+        for (const s of renames.keys()) body = compSetterCalls(body, [s]);
+        for (const [s, key] of renames) {
+          body = replaceOutsideStrings(body, new RegExp(`(?<![.0-9A-Za-z_$])${escapeRe(s)}\\b(?!\\s*[(])`, 'g'), () => `${s}()`);
+          body = body.replace(new RegExp(`\\$setState\\(\\s*(['"])${escapeRe(s)}\\1`, 'g'), `$setState($1${key}$1`);
+          body = replaceOutsideStrings(body, new RegExp(`\\b${escapeRe(s)}\\b`, 'g'), () => key);
+        }
+        return body;
+      };
+      for (const f of inf.fns) {
+        const close = matchParen(inf.code, f.open);
+        if (close < 0) {
+          warnings.push(`python: ${inf.label}: the function ${f.name}'s body could not be read`);
+          continue;
+        }
+        const raw = inf.code.slice(f.open + 1, close);
+        const body = prepBody(raw);
+        const pyName = fnRenamed.get(f.name)!;
+        const out0 = translateBody(body, inf.label, warnings, 8, known, bindNames, true, f.isAsync);
+        const stubbed = /handler body not translated/.test(out0);
+        const out = pyRenameCalls(out0, fnRenamed);
+        lc.compFns.set(`${low}:${instId}:${f.name}`, { py: pyName, async: f.isAsync && !stubbed });
+        const glob = stubbed ? '' : pyGlobalDecl(raw, out, bindNames, known);
+        const sig = perRow ? `${instVar}${f.params ? ', ' + f.params : ''}` : f.params;
+        lc.defs.push(`    ${f.isAsync && !stubbed ? 'async def' : 'def'} ${pyName}(${sig}):\n${glob}${out}`);
+      }
+      const wire = (hook: { body: string; fn: string | null; async: boolean; unread?: boolean }, hookName: string): string | null => {
+        if (hook.unread) {
+          warnings.push(`python: ${inf.label}: a ${hookName} argument the exporter could not read is not wired (${hook.body.slice(0, 40)})`);
+          return null;
+        }
+        if (hook.async) {
+          warnings.push(`python: ${inf.label}: an async ${hookName} is not wired - a Tk callback chain cannot await a coroutine`);
+          return null;
+        }
+        let body = hook.body;
+        // A hook parameter shadows a field of the same name - its body reads
+        // stay untouched.
+        const hookParams = new Set<string>();
+        if (hook.fn) {
+          const pm = new RegExp(`^(?:(?:async)\\s+)?function\\s+${escapeRe(hook.fn)}\\s*\\(([^)]*)\\)`, 'm').exec(inf.code);
+          if (pm) for (const p of pm[1].split(',')) { const n = p.trim().split(/[\s:=]/)[0]; if (n) hookParams.add(n); }
+        }
+        if (hook.fn) {
+          const m = new RegExp(`^(?:(async)\\s+)?function\\s+${escapeRe(hook.fn)}\\s*\\([^)]*\\)\\s*\\{`, 'm').exec(inf.code);
+          if (!m) {
+            warnings.push(`python: ${inf.label}: a ${hookName} on ${hook.fn}() is not wired - the component declares no such function`);
+            return null;
+          }
+          if (m[1]) {
+            warnings.push(`python: ${inf.label}: an async ${hookName} on ${hook.fn}() is not wired - a Tk callback chain cannot await a coroutine`);
+            return null;
+          }
+          const open = m.index + m[0].length - 1;
+          const close = matchParen(inf.code, open);
+          if (close < 0) {
+            warnings.push(`python: ${inf.label}: the ${hookName} on ${hook.fn}() is not wired - the function body could not be read`);
+            return null;
+          }
+          body = inf.code.slice(open + 1, close);
+        }
+        body = prepBody(body);
+        // The interval def's body needs the same field rewrite as the mount
+        // itself - a bare assignment inside `def __intervalK():` is a throwaway
+        // local. Per-row instances key on the runtime id expression, a literal
+        // instance keys on its id string.
+        const fieldRewrite = (code: string) => pyCompFieldRewrite(code, (f) => (perRow ? `${instVar} + ':${f}'` : JSON.stringify(`${instId}:${f}`)), inf.fields, hookParams);
+        const lowered = hookName === 'onMount'
+          ? lowerIntervals(body, { defs: lc.defs, warnings, file: inf.label, stateNames: known, bindNames, renamed: new Map(), nextName: () => String(intervalN++), instParam: perRow ? instVar : undefined, fieldRewrite })
+          : body;
+        const out0 = translateBody(lowered, inf.label, warnings, 8, known, bindNames, false);
+        if (/handler body not translated/.test(out0)) {
+          warnings.push(`python: ${inf.label}: the ${hookName} body is not wired - ${refusalReason(out0)}`);
+          return null;
+        }
+        const out = pyRenameCalls(out0, fnRenamed);
+        const outF = pyCompFieldRewrite(out, (f) => (perRow ? `${instVar} + ':${f}'` : JSON.stringify(`${instId}:${f}`)), inf.fields, hookParams);
+        const dangling = pyUnresolved(outF, resolvable);
+        if (dangling.length) {
+          warnings.push(`python: ${inf.label}: the ${hookName} body reads ${dangling.join(', ')}, which no parent-scope name resolves on this target - it is not wired`);
+          return null;
+        }
+        return `${pyGlobalDecl(hook.body, outF, bindNames, known)}${outF}`;
+      };
+      let k = 0;
+      for (const hook of inf.mounts) {
+        const out = wire(hook, 'onMount');
+        if (out === null) continue;
+        lc.defs.push(`    def __comp_${pyTag}_mount${k}(${perRow ? instVar : ''}):\n${out}`);
+        // A per-row instance mounts AT the splice: each row runs the mount once
+        // under its own runtime id - the one-shot set keys on that id.
+        if (perRow) {
+          emit(`if ${instVar} not in __COMP_MOUNTED:`, ctx);
+          emit(`    __COMP_MOUNTED.add(${instVar})`, ctx);
+          emit(`    __comp_${pyTag}_mount${k}(${instVar})`, ctx);
+          lc.runtimeLc = true;
+        } else {
+          lc.mountLines.push(`    if '${instId}' not in __COMP_MOUNTED:`, `        __COMP_MOUNTED.add('${instId}')`, `        __comp_${pyTag}_mount${k}()`);
+        }
+        k++;
+      }
+      k = 0;
+      for (const hook of inf.cleans) {
+        const out = wire(hook, 'onCleanup');
+        if (out === null) continue;
+        lc.defs.push(`    def __comp_${pyTag}_clean${k}(${perRow ? instVar : ''}):\n${out}`);
+        if (perRow) {
+          emit(`__COMP_CLEANUPS[${instVar}] = (lambda __ci=${instVar}: __comp_${pyTag}_clean${k}(__ci))`, ctx);
+          lc.runtimeLc = true;
+        } else {
+          lc.mountLines.push(`    __COMP_CLEANUPS['${instId}'] = __comp_${pyTag}_clean${k}`);
+        }
+        k++;
+      }
+      // The field store's per-instance seeds: every hoisted field starts at its
+      // declared initial value (None when the exporter cannot read one), so a
+      // cleanup that runs before the first mount reads None, not NameError. A
+      // per-row instance seeds lazily at the splice, per runtime id.
+      for (const f of inf.fields) {
+        if (perRow) {
+          emit(`__COMP_FIELDS.setdefault(${instVar} + ':${f}', ${compFieldSeed(inf.script, f)})`, ctx);
+          lc.runtimeLc = true;
+        } else {
+          lc.fieldSeeds.push(`__COMP_FIELDS[${JSON.stringify(`${instId}:${f}`)}] = ${compFieldSeed(inf.script, f)}`);
+        }
+      }
+      if ((lc.mountLines.length || lc.runtimeLc) && !lc.drainPushed) {
+        // The drain the component cleanups ride: show() empties app.disposers
+        // on every navigation, so one drainer per build is exactly one live
+        // at a time.
+        lc.drainPushed = true;
+        lc.defs.push(`    def __comp_drain():\n        for __fn in list(__COMP_CLEANUPS.values()):\n            __fn()\n        __COMP_CLEANUPS.clear()\n    app.disposers.append(__comp_drain)`);
+      }
+    }
+    return { instId, renames };
+  };
+  return lc;
+}
+
+/** One shared counter for the interval defs a page's lifecycle bodies lower. */
+let intervalN = 0;
+
+/** The reasons a translated body carries its refusal marker, for the
+ *  not-wired warning: the parenthesized `uses ...` text when present. */
+function refusalReason(out: string): string {
+  const m = /\(uses ([^)]*)\)/.exec(out);
+  return m ? `the translation refused it (${m[1]})` : 'the translation refused it';
+}
+
+/** Free names a translated body reads that nothing in the page defines - the
+ *  ones that would raise NameError the moment the body runs. String literals
+ *  and comments are skipped, as are member reads and the exporter's own
+ *  `__`-prefixed defs; a name the body assigns first is a local, not a read. */
+function pyUnresolved(out: string, resolvable: Set<string>): string[] {
+  const locals = new Set<string>();
+  for (const m of out.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*(?:=(?!=)|\+=|-=|\*=|\/=)/gm)) locals.add(m[1]);
+  const hits: string[] = [];
+  let quote = '';
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '#') { while (i < out.length && out[i] !== '\n') i++; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (!/[A-Za-z_$]/.test(ch) || /[\w$.]/.test(out[i - 1] ?? '')) continue;
+    const m = /^[A-Za-z_$][\w$]*/.exec(out.slice(i));
+    if (!m) continue;
+    const name = m[0];
+    if (name.startsWith('__') || name.startsWith('$')) continue;
+    if (locals.has(name) || resolvable.has(name)) continue;
+    if (!hits.includes(name)) hits.push(name);
+  }
+  return hits;
+}
+
+/** The component's hoisted lifecycle fields: the plain top-level `let`/`var`
+ *  declarations that a mount or cleanup body ASSIGNS (a name a hook only reads
+ *  is a constant, not per-instance storage). Props and $state/$derived/$data
+ *  names never qualify - the state collector already owns its names. */
+function scanCompFields(code: string, hooks: Array<{ body: string; fn: string | null }>, exclude: Set<string>): string[] {
+  const bodies = hooks.map((h) => {
+    if (h.body || !h.fn) return h.body;
+    const m = new RegExp(`^(?:(?:async)\\s+)?function\\s+${escapeRe(h.fn)}\\s*\\([^)]*\\)\\s*\\{`, 'm').exec(code);
+    if (!m) return '';
+    const close = matchParen(code, m.index + m[0].length - 1);
+    return close < 0 ? '' : code.slice(m.index + m[0].length, close);
+  });
+  const out: string[] = [];
+  for (const m of code.matchAll(/^(?:let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=/gm)) {
+    const name = m[1];
+    if (exclude.has(name) || out.includes(name)) continue;
+    const write = new RegExp(`(?<![.0-9A-Za-z_$])${escapeRe(name)}\\s*=(?!=)`, 'g');
+    if (!bodies.some((b) => replaceOutsideStrings(b, write, () => '\u0000').includes('\u0000'))) continue;
+      out.push(name);
+  }
+  return out;
+}
+
+/** A hoisted field's declared initial value as a Python literal, None when the
+ *  exporter cannot read one. */
+function compFieldSeed(script: string, name: string): string {
+  const m = new RegExp(`\\b(?:let|var)\\s+${escapeRe(name)}\\s*(?::[^=;\\n]*)?=\\s*([^;\\n]+)`).exec(script);
+  return m ? pyLiteral(m[1], new Set()) : 'None';
+}
+
+/** Rewrite a translated mount/cleanup body's bare lifecycle-field reads and
+ *  writes onto the per-instance store: an assignment lands in the dict (a bare
+ *  name would be a def-local Python discards on return, so the cleanup could
+ *  never see it), a read goes through .get so a not-yet-mounted instance reads
+ *  None instead of raising NameError. Strings and member reads are skipped;
+ *  parameters shadowing a field stay untouched. */
+function pyCompFieldRewrite(out: string, keyExpr: (f: string) => string, fields: string[], params: Set<string>): string {
+  let res = out;
+  for (const f of fields) {
+    if (params.has(f)) continue;
+    const kLit = keyExpr(f);
+    res = replaceOutsideStrings(res, new RegExp(`^([ \\t]*)${escapeRe(f)}[ \\t]*=(?!=)`, 'gm'), (m) => `${m[1]}__COMP_FIELDS[${kLit}] =`);
+    res = replaceOutsideStrings(res, new RegExp(`^([ \\t]*)${escapeRe(f)}[ \\t]*(\\+=|-=|\\*=|/=)`, 'gm'), (m) => `${m[1]}__COMP_FIELDS[${kLit}] = __COMP_FIELDS.get(${kLit}) ${m[2].slice(0, 1)} `);
+    res = replaceOutsideStrings(res, new RegExp(`(?<![.0-9A-Za-z_$])${escapeRe(f)}\\b`, 'g'), () => `__COMP_FIELDS.get(${kLit})`);
+  }
+  return res;
+}
+
+/** A write to a module bind inside a def is a Python local unless the def
+ *  declares `global` - and the web shape is one shared binding across mount,
+ *  cleanup and handlers. A name the body declares itself stays a local; only
+ *  the rebound module names take the line. */
+function pyGlobalDecl(raw: string, out: string, bindNames0: string[], stateNames: string[]): string {
+  const names = bindNames0
+    .filter((n) => !stateNames.includes(n))
+    .filter((n) => new RegExp(`\\b${escapeRe(n)}\\s*(?:=(?!=)|\\+=|-=|\\*=|/=)`).test(out))
+    .filter((n) => !new RegExp(`\\b(?:let|const|var)\\s+${escapeRe(n)}\\b`).test(raw));
+  return names.length ? `        global ${names.join(', ')}\n` : '';
+}
+
+/** The top-level onMount/onCleanup calls of a script: the web lifecycle hooks,
+ *  extracted before translation so they wire to the target's mount and
+ *  disposal moments. Comments and nested calls are skipped; the arg is either
+ *  an arrow (its statements) or a named function reference. */
+function lifecycleBodies(code: string, hook: string): Array<{ body: string; fn: string | null; async: boolean; unread?: boolean }> {
+  const out: Array<{ body: string; fn: string | null; async: boolean; unread?: boolean }> = [];
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '/' && code[i + 1] === '/') { while (i < code.length && code[i] !== '\n') i++; continue; }
+    if (ch === '/' && code[i + 1] === '*') { i += 2; while (i < code.length && !(code[i] === '*' && code[i + 1] === '/')) i++; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') { depth++; continue; }
+    if (ch === ')' || ch === ']' || ch === '}') { depth--; continue; }
+    if (depth !== 0 || !code.startsWith(hook, i)) continue;
+    if (i > 0 && /[\w$.]/.test(code[i - 1])) continue;
+    let j = i + hook.length;
+    while (j < code.length && /\s/.test(code[j])) j++;
+    if (code[j] !== '(') continue;
+    const close = matchParen(code, j);
+    if (close < 0) break;
+    const arg = code.slice(j + 1, close);
+    const parsed = parseLifecycleArg(arg);
+    out.push(parsed ?? { body: arg.trim(), fn: null, async: false, unread: true });
+    i = close;
+  }
+  return out;
+}
+
+function parseLifecycleArg(arg: string): { body: string; fn: string | null; async: boolean } | null {
+  const src = arg.trim();
+  if (!src) return null;
+  if (/^async\b\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*[\s\S]+$/.test(src)) return { body: '', fn: null, async: true };
+  const arrow = /^(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*([\s\S]+)$/.exec(src);
+  if (arrow) {
+    let body = arrow[1].trim();
+    if (body.startsWith('{')) {
+      const close = matchParen(body, 0);
+      if (close < 0) return null;
+      body = body.slice(1, close);
+    }
+    return { body: splitStatements(body), fn: null, async: false };
+  }
+  if (/^[A-Za-z_$][\w$]*$/.test(src)) return { body: '', fn: src, async: false };
+  return null;
+}
+
+/** Split a statement list at its top-level semicolons - translateBody works
+ *  line by line, and the extracted blocks are the web's `a; b;` shape. */
+function splitStatements(src: string): string {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote = '';
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === ';' && depth === 0) { parts.push(src.slice(start, i)); start = i + 1; }
+  }
+  parts.push(src.slice(start));
+  return parts.map((p) => p.trim()).filter(Boolean).join('\n');
+}
+
+/** `setInterval(cb, ms)` in a lifecycle body becomes a self-rescheduling def
+ *  on Tk's after(): the callback re-arms FIRST, then runs, so the id a cleanup
+ *  cancels is always the next pending tick - a page whose own tick re-renders
+ *  never doubles its timers. Every id the frame armed lands in one list, and a
+ *  cancel disposer registered on the app's disposers drains it, with or
+ *  without a user onCleanup beside it. The call site becomes
+ *  `__armK(app.after(ms, __intervalK))`, so the first pending tick is tracked
+ *  from the moment it is armed. */
+function lowerIntervals(
+  body: string,
+  ctx: { defs: string[]; warnings: string[]; file: string; stateNames: string[]; bindNames: string[]; renamed: Map<string, string>; nextName: () => string; instParam?: string; fieldRewrite?: (code: string) => string; asyncNames?: Set<string> },
+): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"' || ch === "'" || ch === '`') { const end = pySkipQuote(body, i); out += body.slice(i, end); i = end; continue; }
+    if (body.startsWith('setInterval', i) && !/[.\w$]/.test(body[i - 1] ?? '')) {
+      let j = i + 'setInterval'.length;
+      while (j < body.length && /\s/.test(body[j])) j++;
+      if (body[j] === '(') {
+        const close = matchParen(body, j);
+        if (close > 0) {
+          const args = splitArgs(body.slice(j + 1, close));
+          const cb = args[0]?.trim() ?? '';
+          const msRaw = (args[1] ?? '').trim();
+          const arrow = /^(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*([\s\S]+)$/.exec(cb);
+          if (arrow && msRaw) {
+            const k = ctx.nextName();
+            let cbSrc = arrow[1].trim();
+            if (cbSrc.startsWith('{')) {
+              const brace = matchParen(cbSrc, 0);
+              if (brace > 0) cbSrc = cbSrc.slice(1, brace);
+            }
+            cbSrc = splitStatements(cbSrc);
+            const msOut = translateBody(msRaw, ctx.file, ctx.warnings, 0, ctx.stateNames, ctx.bindNames, true, false, ctx.asyncNames ?? new Set());
+            const ms = /handler body not translated/.test(msOut) ? msRaw : msOut;
+            const cbOut = translateBody(cbSrc, ctx.file, ctx.warnings, 8, ctx.stateNames, ctx.bindNames, true, false, ctx.asyncNames ?? new Set());
+            const cbOutF = ctx.fieldRewrite ? ctx.fieldRewrite(cbOut) : cbOut;
+            // A per-row mount's timer reads the row id: the def takes the
+            // instance id as a parameter and the arm binds it at arm time, so
+            // one row is one timer keyed to that row's state.
+            const defHead = ctx.instParam ? `def __interval${k}(${ctx.instParam}):` : `def __interval${k}():`;
+            const armCb = ctx.instParam ? `(lambda __ip=${ctx.instParam}: __interval${k}(__ip))` : `__interval${k}`;
+            ctx.defs.push(
+              `    __armed${k} = []\n` +
+              `    ${defHead}\n` +
+              `        __armed${k}.append(app.after(${ms}, __interval${k}))\n` +
+              `${pyGlobalDecl(cbSrc, cbOutF, ctx.bindNames, ctx.stateNames)}${pyRenameCalls(cbOutF, ctx.renamed)}\n` +
+              `    def __arm${k}(__aid):\n        __armed${k}.append(__aid)\n        return __aid\n` +
+              `    def __cancel${k}():\n        for __aid in __armed${k}:\n            app.after_cancel(__aid)\n        __armed${k}.clear()\n` +
+              `    app.disposers.append(__cancel${k})`,
+            );
+            out += `__arm${k}(app.after(${ms}, ${armCb}))`;
+            i = close + 1;
+            continue;
+          }
+        }
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
 
 /** Split an effect body at its top-level `return`: [the statements, the cleanup]. */
@@ -3742,6 +5825,21 @@ function cutEffectReturn(body: string): [string, string] {
   return [body, ''];
 }
 
+/** The statements a returned cleanup runs: the block of `() => { ... }`, or a
+ *  bare arrow expression as one statement. Null when the return value is not
+ *  an arrow - the web runtime ignores a non-function return, so there is
+ *  nothing to wire (and nothing to warn about). */
+function cleanupStatements(dispose: string): string | null {
+  const src = dispose.trim();
+  if (!src) return null;
+  const arrow = /^(?:\([^)]*\)|[A-Za-z_$][\w$]*)?\s*=>\s*([\s\S]*)$/.exec(src);
+  if (!arrow) return null;
+  const rest = arrow[1].trim();
+  if (!rest.startsWith('{')) return `${rest};`;
+  const close = matchParen(rest, 0);
+  return close > 0 ? rest.slice(1, close) : null;
+}
+
 const PY_EXPR: ExprDialect = {
   get: (o, k) => `${o}['${k}']`,
   count: (e) => `len(${e})`,
@@ -3753,11 +5851,11 @@ const PY_EXPR: ExprDialect = {
     : `[${body} for ${ps[0]} in ${l}]`,
   filter: (l, ps, pred) => `[${ps[0]} for ${ps[0]} in ${l} if ${pred}]`,
   slice: (l, from, to) => (to === null ? `${l}[${from}:]` : `${l}[${from}:${to}]`),
-  // R287: `next()` takes a GENERATOR - a comprehension inside it yields the
+  // `next()` takes a GENERATOR - a comprehension inside it yields the
   // whole filtered list, which is not the first element.
   find: (l, ps, pred) => `next((${ps[0]} for ${ps[0]} in ${l} if ${pred}), None)`,
   some: (l, ps, pred) => `any(${pred} for ${ps[0]} in ${l})`,
-  // R291: the string + search family. Python already owns five of these under
+  // The string + search family. Python already owns five of these under
   // a differently-cased name, so no kit helper is needed - a generated page
   // that upper-cases a label or tests a prefix is real Python, not a stub.
   // Only two need a thought:
@@ -3796,7 +5894,7 @@ const PY_EXPR: ExprDialect = {
   // Python spells the conditional expression the other way round.
   ternary: (c, a, b) => `(${a}) if (${c}) else (${b})`,
   lit: (v) => v,
-  // R274: the four R273 constructs, in Python's spelling. The template
+  // The four constructs, in Python's spelling. The template
   // literal becomes an f-string (a literal part with braces is escaped by
   // doubling them, or the f-string would read them as fields); the nullish
   // default is `or` on falsy terms - Python has no null/undefined split, and
@@ -3817,7 +5915,7 @@ const PY_EXPR: ExprDialect = {
 
 
 /**
- * R291: the eight string + search members inside a handler BODY.
+ * The eight string + search members inside a handler BODY.
  *
  * A handler is its own code path: the template half and the state-initializer
  * half both reach `translateExpr`, but a plain statement
@@ -3829,7 +5927,7 @@ const PY_EXPR: ExprDialect = {
  *
  * So this scan finds each call whose ARGUMENTS balance, hands the call to the
  * SAME translator the other paths use, and splices the result in. Only the
- * eight R291 names are named, so `.trim()` (already correct, `strip()`) is not
+ * eight names are named, so `.trim()` (already correct, `strip()`) is not
  * dragged through the IR. A construct outside the subset is left verbatim so
  * the caller's webOnly gate still refuses it honestly instead of silently
  * emitting something that cannot run.
@@ -3889,58 +5987,7 @@ function pyChainStart(s: string, at: number): number {
 }
 
 /**
- * R292: string-concat coercion that never touches an assignment's LEFT side.
- *
- * `coerceStringConcat` walks a line as one expression, which is right for a
- * template value and wrong for a statement: `const label = 'x' + text()`
- * reached it as `label = "x" + text()` and came back as
- * `str(label = "x") + str(st.get('text')` - the `=` was inside an operand, the
- * `str(` wrapper swallowed the assignment, and the closing paren vanished. That
- * is not a bad value, it is a page that does not parse.
- *
- * So a statement whose top level has a single `=` is split there exactly once:
- * the `name = ` prefix is emitted verbatim, the right-hand side goes through the
- * shared pass (which is what makes `'Item ' + n + 1` coerce correctly). A line
- * with no top-level `=` - a bare call, a `return`, an augmented `+=` (not an
- * assignment we may split) - goes through unchanged.
- */
-function coerceStringConcatInAssignments(src: string, wrap: (e: string) => string): string {
-  return src.split('\n').map((line) => {
-    const eq = topLevelAssign(line);
-    if (eq < 0) return coerceStringConcat(line, wrap);
-    const lhs = line.slice(0, eq + 1);
-    const rhs = line.slice(eq + 1);
-    return lhs + coerceStringConcat(rhs, wrap);
-  }).join('\n');
-}
-
-/** Index of a single top-level `=` that is a plain assignment, or -1.
- *  `==`, `!=`, `<=`, `>=`, `+=`, `-=`, `=>` and a `=` inside brackets or a
- *  string are NOT assignment operators, so they never split a line. */
-function topLevelAssign(src: string): number {
-  let depth = 0;
-  let quote = '';
-  let found = -1;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
-    if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
-    if (c === '(' || c === '[' || c === '{') { depth++; continue; }
-    if (c === ')' || c === ']' || c === '}') { depth--; continue; }
-    if (c !== '=' || depth !== 0) continue;
-    const prev = src[i - 1] ?? '';
-    const next = src[i + 1] ?? '';
-    if (next === '=' || next === '>') { i++; continue; }
-    if ('=!<>+-*/%&|^'.includes(prev)) continue;
-    // A second top-level `=` means this is not a plain `name = expr` statement.
-    if (found >= 0) return -1;
-    found = i;
-  }
-  return found;
-}
-
-/**
- * R292: `setCount(EXPR)` -> `st['count'] = EXPR`, consuming the MATCHED closer.
+ * `setCount(EXPR)` -> `st['count'] = EXPR`, consuming the MATCHED closer.
  *
  * The old spelling replaced only the opening `setCount(` with `st['count'] = `,
  * so the call's closing paren stayed in the text and became a stray `)` - the
@@ -3984,7 +6031,40 @@ function rewriteStateSetters(code: string, stateNames: string[]): string {
 }
 
 /**
- * R292: `n++` / `n--` as a STATEMENT -> `n += 1` / `n -= 1`.
+ * The component-script form of `rewriteStateSetters`: `setCount(EXPR)` becomes
+ * the canonical `$setState('count', EXPR)` while the state names are still the
+ * component's own - once they rename onto the hoisted `comp_<low>_<s>` keys,
+ * no pass can spell the auto-setter of the new key.
+ */
+function compSetterCalls(body: string, names: string[]): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '"' || ch === "'" || ch === '`') { const end = pySkipQuote(body, i); out += body.slice(i, end); i = end; continue; }
+    let hit: { name: string; open: number; close: number } | null = null;
+    if (/[A-Za-z_$]/.test(ch) && !/[.\w$]/.test(body[i - 1] ?? '')) {
+      for (const name of names) {
+        const setter = 'set' + name[0].toUpperCase() + name.slice(1);
+        if (!body.startsWith(setter, i) || !/^\s*\(/.test(body.slice(i + setter.length))) continue;
+        const open = i + setter.length + (/^\s+/.exec(body.slice(i + setter.length))?.[0].length ?? 0);
+        const close = matchParen(body, open);
+        if (close > 0) { hit = { name, open, close }; break; }
+      }
+    }
+    if (hit) {
+      out += `$setState('${hit.name}', ` + body.slice(hit.open + 1, hit.close) + ')';
+      i = hit.close + 1;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
+ * `n++` / `n--` as a STATEMENT -> `n += 1` / `n -= 1`.
  *
  * Python has no increment operator, so a handler that counts in a loop emitted
  * `n++;` - a SyntaxError. A `for (...)` head is copied through untouched: its
@@ -4040,7 +6120,7 @@ function rangeBound(expr: string): string {
 }
 
 /**
- * R292: the C-style counting loop -> Python's `range`.
+ * The C-style counting loop -> Python's `range`.
  *
  * `for (let i = 0; i < 10; i++)` was copied through verbatim as
  * `for i = 0; i < 10; i++:` - unrepresentable Python. Only the counting shape
@@ -4089,7 +6169,7 @@ function forRange(inner: string): string | null {
 }
 
 /**
- * R292: the first `for (...)` head this target cannot lower, or null.
+ * The first `for (...)` head this target cannot lower, or null.
  *
  * A C-style `for` has no Python spelling at all - Python iterates a sequence,
  * not an initializer/test/step triple - so the ONLY honest outcomes are the
@@ -4144,14 +6224,289 @@ function pyReceiverStart(s: string): number {
 }
 
 
-function translateBody(body: string, file: string, warnings: string[], indentSpaces: number, stateNames: string[] = [], bindNames0: string[] = [], keepRender = true): string {
+/**
+ * `new Promise((r) => setTimeout(r, ms))` -> `asyncio.sleep(ms / 1000)`.
+ *
+ * The one promise constructor an async def can spell natively on this target:
+ * the executor's arrow must resolve through exactly the delay idiom, or the
+ * constructor stays verbatim and the caller's web-only refusal stubs the
+ * function loudly. A worker thread runs the loop, so sleeping there never
+ * freezes the Tk main loop.
+ */
+function rewritePyPromiseDelay(body: string): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const at = body.indexOf('new Promise(', i);
+    if (at < 0) { out += body.slice(i); break; }
+    out += body.slice(i, at);
+    const open = at + 'new Promise'.length;
+    const close = matchParen(body, open);
+    if (close < 0) { out += body.slice(at); break; }
+    const inner = body.slice(open + 1, close);
+    const arrow = /^\s*\(\s*([^()]*?)\s*\)\s*=>\s*([\s\S]+)$/.exec(inner);
+    let replacement: string | null = null;
+    if (arrow) {
+      const params = arrow[1].split(',').map((p) => p.trim()).filter(Boolean);
+      let tail = arrow[2].trim();
+      const braced = /^\{([\s\S]*)\}$/.exec(tail);
+      if (braced) tail = braced[1].trim().replace(/;$/, '');
+      const call = /^\s*setTimeout\s*\(/.exec(tail);
+      if (params.length >= 1 && call) {
+        const argOpen = tail.indexOf('(');
+        const argClose = matchParen(tail, argOpen);
+        const args = argClose > 0 ? splitArgs(tail.slice(argOpen + 1, argClose)) : [];
+        if (args.length === 2 && args[0].trim() === params[0]) {
+          replacement = `asyncio.sleep(${args[1].trim()} / 1000)`;
+        }
+      }
+    }
+    out += replacement ?? body.slice(at, close + 1);
+    i = close + 1;
+  }
+  return out;
+}
+
+/**
+ * Expand shorthand fields inside object literals: `{ text, kind, 'ts': v }`
+ * -> `{ text: text, kind: kind, 'ts': v }`. A brace block qualifies when at
+ * least one of its top-level fields carries a `key:` pair (a block has no
+ * colon-separated fields of its own); pure shorthand is covered because a
+ * lone `{ id }` cannot be a statement block with a value.
+ */
+function expandShorthandFields(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const end = pySkipQuote(src, i);
+      out += src.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch !== '{') { out += ch; i++; continue; }
+    // find the matching close (strings already skipped by the scan below)
+    let depth = 0;
+    let close = -1;
+    let q = '';
+    for (let k = i; k < src.length; k++) {
+      const c = src[k];
+      if (q) {
+        if (c === '\\') { k++; continue; }
+        if (c === q) q = '';
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) { close = k; break; } }
+    }
+    if (close < 0) { out += ch; i++; continue; }
+    const inner = src.slice(i + 1, close);
+    const fields = splitTopLevelFields(inner);
+    const isObjectish = fields.some((f) => {
+      const t = f.trim();
+      if (!t || t.startsWith('...')) return false;
+      // a top-level `key:` - the colon outside any brackets/strings
+      let d = 0;
+      let qq = '';
+      for (let c = 0; c < t.length; c++) {
+        const ch2 = t[c];
+        if (qq) { if (ch2 === '\\') { c++; continue; } if (ch2 === qq) qq = ''; continue; }
+        if (ch2 === '"' || ch2 === "'" || ch2 === '`') { qq = ch2; continue; }
+        if (ch2 === '(' || ch2 === '[' || ch2 === '{') d++;
+        else if (ch2 === ')' || ch2 === ']' || ch2 === '}') d--;
+        else if (ch2 === ':' && d === 0 && !/^\s*[?]/.test(t.slice(c))) return true;
+      }
+      return false;
+    });
+    // A lone `{ args }` (no `key:` pairs at all) is STILL a JS shorthand
+    // object - `{args}` in Python is a set, so it needs the same expansion.
+    // A statement block is never a bare identifier enclosed in braces on the
+    // same expression line, and string literals were skipped above.
+    const pureShorthand = fields.length === 1 && /^[A-Za-z_$][\w$]*$/.test(fields[0].trim());
+    if (isObjectish || pureShorthand) {
+      const spelled = fields.map((f) => {
+        const t = f.trim();
+        return /^[A-Za-z_$][\w$]*$/.test(t) ? `${t}: ${t}` : t;
+      });
+      out += '{' + spelled.join(', ') + '}';
+    } else {
+      out += src.slice(i, close + 1);
+    }
+    i = close + 1;
+  }
+  return out;
+}
+
+/**
+ * A `try:`/`except:`/`if:` with no body is a Python SyntaxError: the JS
+ * source may legally hold an empty or comment-only block, and a trailing
+ * auto-render can land at the OUTER indent. Look ahead to the first real
+ * statement; when its indent does not exceed the header's, the block is
+ * empty and gets a `pass`.
+ */
+function padEmptyExcept(out: string): string {
+  const lines = out.split('\n');
+  const result: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    result.push(lines[i]);
+    const m = /^(\s*)(try:|except(?:\s+[^:]+)?:|else:|finally:|if\s+.*:|for\s+.*:|while\s+.*:)\s*$/.exec(lines[i]);
+    if (!m) continue;
+    const pad = m[1].length;
+    let j = i + 1;
+    while (j < lines.length && (lines[j].trim() === '' || /^\s*\/\//.test(lines[j]))) j++;
+    if (j >= lines.length) {
+      result.push(`${m[1]}    pass`);
+      continue;
+    }
+    const jIndent = (lines[j].match(/^(\s*)/)?.[1] ?? '').length;
+    if (jIndent <= pad) result.push(`${m[1]}    pass`);
+  }
+  return result.join('\n');
+}
+
+/**
+ * `fetch(url)` -> `rose_fetch(url)`; `fetch(url, { method, headers, body })`
+ * -> `rose_fetch(url, method, body)`. The kit's runtime takes the three
+ * positionally, so the options object is dismantled here (top-level fields
+ * only, tracked through strings and nested brackets) instead of being left
+ * as the second argument. A non-literal second argument (a Request) is
+ * passed through untouched.
+ */
+function rewriteFetchCalls(body: string): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const at = body.indexOf('fetch(', i);
+    if (at < 0) { out += body.slice(i); break; }
+    const prev = body[at - 1] ?? '';
+    // Everything between the cursor and the call - `const r = await `, an
+    // object key, a `return` - belongs to the output BEFORE the rewrite.
+    const prefix = body.slice(i, at);
+    // Only a bare `fetch(` (not `.fetch(`, not the `rose_fetch(` we emit, not
+    // an identifier ending in fetch).
+    const bare = !/[\w$.]/.test(prev);
+    if (!bare) { out += prefix + body.slice(at, at + 6); i = at + 6; continue; }
+    const open = at + 5;
+    const close = matchParen(body, open);
+    if (close < 0) { out += prefix + body.slice(at, at + 6); i = at + 6; continue; }
+    const inner = body.slice(open + 1, close);
+    const parts = splitArgs(inner);
+    const url = parts[0]?.trim() ?? "''";
+    let methodExpr: string | null = null;
+    let bodyExpr: string | null = null;
+    if (parts.length >= 2) {
+      const second = parts[1].trim();
+      if (second.startsWith('{')) {
+        for (const field of splitTopLevelFields(second)) {
+          const m = /^['"]?([A-Za-z_$][\w$]*)['"]?\s*:\s*([\s\S]+)$/.exec(field.trim());
+          if (!m) continue;
+          if (m[1] === 'method') methodExpr = m[2].trim().replace(/,$/, '');
+          if (m[1] === 'body') bodyExpr = m[2].trim().replace(/,$/, '');
+        }
+        // headers and any other fetch option have no rose_fetch spelling -
+        // the kit sets its own Content-Type when a body is present.
+        if (bodyExpr !== null && methodExpr === null) methodExpr = "'GET'";
+        out += prefix + (methodExpr !== null || bodyExpr !== null
+          ? `rose_fetch(${url}, ${methodExpr ?? "'GET'"}, ${bodyExpr ?? 'None'})`
+          : `rose_fetch(${url})`);
+      } else {
+        out += prefix + `rose_fetch(${url}, ${second})`;
+      }
+    } else {
+      out += prefix + `rose_fetch(${url})`;
+    }
+    i = close + 1;
+  }
+  return out;
+}
+
+/** Split `{ a: 1, b: { c: 2 }, d }` (or without the braces) at TOP-level commas. */
+function splitTopLevelFields(src: string): string[] {
+  const inner = src.startsWith('{') && src.endsWith('}') ? src.slice(1, -1) : src;
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let quote = '';
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (quote) {
+      if (ch === '\\') { i++; continue; }
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '{' || ch === '(' || ch === '[') depth++;
+    else if (ch === '}' || ch === ')' || ch === ']') depth--;
+    else if (ch === ',' && depth === 0) {
+      out.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  const tail = inner.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
+function translateBody(body: string, file: string, warnings: string[], indentSpaces: number, stateNames: string[] = [], bindNames0: string[] = [], keepRender = true, asyncBody = false, asyncNames: Set<string> = new Set()): string {
+  // `void call()` is a fire-and-forget statement; Python has no operator for
+  // it. Drop the prefix (a value `void 0` would need None and is rare here).
+  body = body.replace(/^(\s*)void\s+(?=[A-Za-z_$])/gm, '$1');
+  // esbuild lowers `x ||= y` to `x or (x = y)`; Python accepts neither.
+  body = rewriteLoweredLogicalAssign(body, (read, op, rhs) => {
+    if (!stateNames.includes(read)) return null;
+    // The single-line `if (cond) stmt` shape: the body's indent engine spells
+    // it as a Python if/colon block itself.
+    if (op === '||') return `if (not st.get('${read}')) st['${read}'] = ${rhs}`;
+    if (op === '&&') return `if (st.get('${read}')) st['${read}'] = ${rhs}`;
+    return `if (st.get('${read}') is None) st['${read}'] = ${rhs}`;
+  })
+  // A regex literal is a pattern string for re.sub (backslashes preserved).
+  body = rewriteRegexReplace(body, (recv, pat, repl, global) => {
+    const p = pat.replace(/'/g, "\\'");
+    return global ? `rose_re_sub(${recv}, r'${p}', ${repl})` : `rose_re_sub(${recv}, r'${p}', ${repl}, count=1)`;
+  });;
+  // esbuild keeps `x?.['k']` intact, but the member/subscript passes each own one
+  // side of it - the optional-chain index is spelled here, once, instead.
+  body = rewriteOptionalIndex(body, (recv, key) => `(${recv}).get('${key}')`);
+  body = rewriteSetDedupe(body, (l) => `rose_distinct(${l})`);
+  body = rewriteObjectAssign(body, (a, b) => `rose_assign(${a}, ${b})`);
+  // The Python emitter appends the block colon itself.
+  body = rewriteForOf(body, (name, list) => `for ${name} in ${list}`);
+  body = rewriteSwitchToIf(body);
+  // Python has no fetch: the kit's request (cookie, wall, JSON) is the call.
+  // The options object is REWRITTEN into rose_fetch's positional (url, method,
+  // body) args - a plain rename used to pass the dict as `method` and leave its
+  // nested braces unbalanced in the emitter (a syntax error in the page).
+  body = rewriteFetchCalls(body);
+  // rose_fetch returns the DECODED body (a dict), not a Response - the web's
+  // `await r.json()` has no Python spelling there, so the awaited call collapses
+  // to its receiver. The shape is deliberately narrow: only `await ident.json()`.
+  body = body.replace(/\bawait\s+([A-Za-z_$][\w$]*)\.json\(\)/g, '$1');
+  // esbuild collapses `{ args: args }` into `{ args }`; in Python that is a
+  // set literal, not a dict. expandShorthandFields spells the shorthand back
+  // to `args: args` - a BALANCED scan that skips string literals, so an i18n
+  // placeholder inside `tr()` is never mistaken for an object.
+  body = expandShorthandFields(body);
+  // `JSON.stringify(x)` has one honest Python spelling; the kit module already
+  // imports json, so the qualified form needs no page-level import.
+  body = body.replace(/\bJSON\.stringify\s*\(/g, 'rosezm.json.dumps(');
+  // Belt-and-braces for the exact idiom esbuild produces inside a fetch body:
+  // `JSON.stringify({ args })` (shorthand). In Python `{args}` is a SET, not
+  // a dict - json.dumps would serialise nothing useful. The balanced expander
+  // above handles object literals in general; this catches the one shape that
+  // can be regenerated by the fetch-options rewrite after it ran.
+  body = body.replace(/(rosezm\.json\.dumps|JSON\.stringify)\s*\(\s*\{\s*([A-Za-z_$][\w$]*)\s*\}\s*\)/g,
+    (_m: string, fn: string, key: string) => `${fn}({ '${key}': ${key} })`);
   const pad = ' '.repeat(indentSpaces);
   const stateSet = new Set(stateNames);
   const webOnly: Array<[RegExp, string]> = [
     [/\bFormData\(/, 'FormData'],
     [/\bdocument\.|\bwindow\./, 'the DOM'],
     [/\bnew\s+[A-Z]/, 'new'],
-    [/\.map\(/, '.map('],
+    // `.map(` has a Python spelling now (the collection-chain pass owns it) -
+    // the refusal would stub a handler the pass can translate.
     [/=>/, 'an arrow function'],
   ];
   // The rewrites come first: a translatable construct must never trip the
@@ -4159,6 +6514,10 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   // read becomes the state read before anything looks for JS leftovers.
   body = rewriteThrowNew(rewriteFormReads(body));
   body = rewritePromiseExprs(body);
+  // Only an async def can spell a delay honestly: the promise constructor
+  // becomes the loop's own sleep. Any other `new Promise` shape keeps its
+  // constructor and the web-only refusal below stubs the function loudly.
+  if (asyncBody) body = rewritePyPromiseDelay(body);
   // useNative('camera', opts) becomes the kit's rose_native call - one dispatch
   // shared by every page. Done before the refusal list so the call is never
   // mistaken for a construct Tk cannot express.
@@ -4171,7 +6530,7 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   }).code;
   // A mapper setter ($setState('k', p => EXPR)) is translated before the
   // refusal: the target's own state pass then never sees the JS arrow.
-  // R288: a direct mutation (`items().push(x); setItems(items())`) lowers to
+  // A direct mutation (`items().push(x); setItems(items())`) lowers to
   // the spread/filter write every target can already spell.
   {
     let n = 0;
@@ -4186,7 +6545,9 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
     const value = `${key}()`;
     return `st['${key}'] = ${out}`.replace(new RegExp(`\\b${param}\\b`, 'g'), value);
   });
-  // R285: the auto-setter form - `setTodos(todos().map(...))` is what real
+  // The standalone collection chains (map/filter/reduce NOT inside a
+  // $setState mapper): Python's own comprehensions.
+  // The auto-setter form - `setTodos(todos().map(...))` is what real
   // handlers write; without this the raw arrow reached the refusal and the
   // whole handler was stubbed ("a handler uses .map(").
   body = rewriteAutoSetterWrites(
@@ -4196,7 +6557,7 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
       return setter.length > 3 && stateSet.has(key) ? key : null;
     },
     (key, expr) => {
-      const out = translateExpr(expr, { ...PY_EXPR, read: (n) => (stateSet.has(n) ? `st.get('${n}')` : n) }, new Set());
+      const out = translateExpr(expr, { ...PY_EXPR, read: (n) => (n !== 'st' && stateSet.has(n) ? `st.get('${n}')` : n) }, new Set());
       return out === null ? null : `st['${key}'] = ${out}`;
     },
   );
@@ -4204,10 +6565,44 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   // A state read inside the value must be the dict read (`st.get('count')`),
   // because Python's state lives in the page dict, not in a local name.
   body = rewriteDirectSetValue(body, (key, expr) => {
-    const out = translateExpr(expr, { ...PY_EXPR, read: (n) => (stateSet.has(n) ? `st.get('${n}')` : n) }, new Set());
+    const out = translateExpr(expr, { ...PY_EXPR, read: (n) => (n !== 'st' && stateSet.has(n) ? `st.get('${n}')` : n) }, new Set());
     return out === null ? null : `st['${key}'] = ${out}`;
   });
-  // R291: the string + search family inside a HANDLER body - a fourth code path
+  body = rewriteLocalArrow(body, (name, params, b) => {
+    const kw = /^(?:False|None|True|and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield)$/;
+    const safe = kw.test(name) ? `${name}_` : name;
+    const { names, body: bb } = spellArrowParams(params, b, kw, (x) => x);
+    return [`${safe} = lambda ${names.join(', ')}: ${bb}`, safe];
+  });
+  body = rewriteCollectionChain(body, (method, recv, args) => {
+    const mapBody = (arrow: { params: string[]; body: string }): string =>
+      arrow.body.replace(new RegExp(`\\b${arrow.params[0]}\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)\\b(?!\\s*\\()`, 'g'), (_m: string, k: string) => `${arrow.params[0]}['${k}']`);
+    if (method === 'map' || method === 'filter') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || !arrow.params.length) return null;
+      const b = mapBody(arrow);
+      return method === 'map' ? `[${b} for ${arrow.params[0]} in ${recv}]` : `[${arrow.params[0]} for ${arrow.params[0]} in ${recv} if ${b}]`;
+    }
+    if (method === 'reduce') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || arrow.params.length !== 2) return null;
+      const seed = args[1]?.trim();
+      // The SECOND parameter is renamed first: the first one's name is a
+      // prefix of it in real code (`a` / `acc`), and renaming the first would
+      // rewrite the second's name too.
+      const b = arrow.body.trim()
+        .replace(new RegExp(`\\b${arrow.params[1]}\\b`, 'g'), 'item')
+        .replace(new RegExp(`\\b${arrow.params[0]}\\b`, 'g'), 'acc');
+      const num = new RegExp(`^${arrow.params[0]}\\s*\\+\\s*${arrow.params[1]}$`).exec(arrow.body.trim());
+      const bodyExpr = num ? `rose_number(acc) + rose_number(item)` : b;
+      return seed !== undefined
+        ? `__rose_reduce(lambda acc, item: ${bodyExpr}, ${recv}, ${seed})`
+        : `__rose_reduce(lambda acc, item: ${bodyExpr}, ${recv})`;
+    }
+    if (method === 'join') return `rose_join(${recv}, ${args[0] ?? '","'})`;
+    return null;
+  });
+  // The string + search family inside a HANDLER body - a fourth code path
   // (after the template, the state initializer and the inline handler). Without
   // this pass three different wrong things happened to one page: `.indexOf(`
   // survived as a JS method on a Python list (a silent AttributeError the label
@@ -4218,14 +6613,18 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   // member is spelled through the SAME PY_EXPR the template path uses, so this
   // export carries one shape for all eight. A refusal leaves the call verbatim,
   // which lets the webOnly gate below still fire honestly.
-  body = rewritePySearchOps(body, { ...PY_EXPR, read: (n) => (stateSet.has(n) ? `st.get('${n}')` : n) });
+  body = rewritePySearchOps(body, { ...PY_EXPR, read: (n) => (n !== 'st' && stateSet.has(n) ? `st.get('${n}')` : n) });
+  // The string-method family in a handler body: the expression path had it
+  // (and owns `.map(`/`.filter(` through the comprehension arms), the body
+  // path never did - so a handler's `.map(` reached the refusal.
+  body = rewriteStringMethods(body, pyStringMethod);
   for (const [re, what] of webOnly) {
     if (re.test(body)) {
       warnings.push(`python: ${file}: a handler uses ${what}, which has no Python equivalent - emitted as a stub`);
       return `${pad}# rosezm: handler body not translated (uses ${what}).\n${pad}pass`;
     }
   }
-  // R292: a `for (...)` head is the one control shape with no default Python
+  // A `for (...)` head is the one control shape with no default Python
   // spelling. The counting loop lowers to `range`; anything else must fail
   // LOUDLY here - the old pass copied the head verbatim (`for i = 0; i < 10;
   // i++:`) which is not Python at all, so a whole page died on a syntax error
@@ -4236,7 +6635,7 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
     return `${pad}# rosezm: handler body not translated (uses an unsupported loop shape).\n${pad}pass`;
   }
   let out = rewriteSetState(body.trim());
-  // R292: `n++` / `n--` are statements, not expressions: Python spells them
+  // `n++` / `n--` are statements, not expressions: Python spells them
   // `n += 1` / `n -= 1`. This runs before the `+` concatenation coercion, which
   // would otherwise read the `+` of `+=` as an operator to balance.
   out = rewriteIncrements(out);
@@ -4244,16 +6643,92 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   // semicolon languages; Python has no such terminator, so a state write that
   // carries one is a SyntaxError. Strip only at a statement end.
   out = out.replace(/^(\s*st\[[^\]]+\][^;]*);\s*$/gm, '$1');
-  out = out.replace(/\bawait\s+/g, '');
+  if (asyncBody) {
+    // rose_native is a synchronous kit dispatch (stripping its await is safe).
+    // rose_fetch returns a RoseFetchResult - an AWAITABLE dict - so the web's
+    // `await fetch(...)` spelling is RESTORED here (earlier passes may have
+    // dropped `await` while rewriting the call): `await rose_fetch(...)`
+    // works, and r['ok'] still reads the decoded body.
+    out = out.replace(/\bawait\s+(?=rose_native\s*\()/g, '');
+    out = out.replace(/(?<![.\w$])(?<!await\s)rose_fetch\s*\(/g, 'await rose_fetch(');
+  } else {
+    out = out.replace(/\bawait\s+/g, '');
+  }
   out = out.replace(/\$action\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `__action('${name}')`);
   out = out.replace(/\$t\s*\(/g, 'rosezm.t(');
+  // esbuild merges `{ text: text }` into the shorthand `{ text }` (its default
+  // syntax optimisation), and a bare identifier inside a brace block that ALREADY
+  // carries a `key:` pair can only be a shorthand field of that object - a Python
+  // dict needs its key spelled. Expand `id` -> `id: id` there, so the quoting
+  // pass below then spells `'id': id`.
+  out = expandShorthandFields(out);
   // A JS object literal is a Python dict: bare keys need quotes.
-  out = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, (_m, lead: string, key: string) => `${lead}'${key}':`);
+  const lambdaParams = lambdaParamHeads(out);
+  out = out.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, (_m: string, lead: string, key: string, off: number) => (lambdaParams.has(off + lead.length) ? `${lead}${key}:` : `${lead}'${key}':`));
   out = out.replace(/\brefresh\s*\(\s*\)/g, 'app.render()');
+  // A local bound from a dict literal or rose_assign is a dict: its member
+  // reads are subscripts (Python has no `t.x` on a dict).
+  {
+    const pyObjLocals = new Set<string>();
+    for (let guard = 0; guard < 32; guard++) {
+      // By this point `const x = st.get('st') || {}` is already Python:
+      // `x = st.get('st')  or  {}` (the `const` and `||` passes ran first).
+      // Recognise BOTH spellings, so a state-derived local dict gets the
+      // same safe `.get()` member reads as a literal object local.
+      const m = /(?:\b(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:\{|rose_assign\(|st\.get\([^)]*\)\s*or\s*\{|(?:[^\n]*?\s+or\s+\{))/.exec(out);
+      if (!m) break;
+      pyObjLocals.add(m[1]);
+      if (m[0].endsWith('{')) {
+        const open = m.index + m[0].length - 1;
+        let depth = 0;
+        let close = -1;
+        for (let k = open; k < out.length; k++) {
+          if (out[k] === '{') depth++;
+          else if (out[k] === '}') { depth--; if (depth === 0) { close = k; break; } }
+        }
+        if (close < 0) break;
+        out = out.slice(0, m.index) + `${m[1]} = ${out.slice(open, close + 1)}` + out.slice(close + 1);
+      }
+    }
+    if (pyObjLocals.size) {
+      const names = [...pyObjLocals].map((n) => n.replace(/\$/g, '\$&')).join('|');
+      // A dict local needs a SAFE lookup: `raw.admin` on a dict whose key
+      // is missing must answer None (JS undefined), not raise KeyError. The
+      // old spelling `raw['admin']` raised on a first-render empty state.
+      out = out.replace(new RegExp(`\\b(${names})\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)\\b(?!\\s*\\()`, 'g'), (whole: string, obj: string, key: string, off: number) => {
+        const after = out.slice(off + whole.length);
+        return /^\s*(?:=[^=]|\+=|-=|\*=|\/=|%=)/.test(after) ? whole : `${obj}.get('${key}')`;
+      });
+    }
+  }
   out = out.replace(/\bconsole\.(?:log|warn|error)\(/g, 'print(');
+  // The one Array idiom every ported page uses: Python's spelling is isinstance.
+  out = out.replace(/\bArray\.isArray\s*\(/g, '__rose_isarray(');
+  out = out.replace(/__rose_isarray\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g,
+    (_m, arg) => `isinstance(${arg}, list)`);
+  // The one-shot timer family is Tk's after(): a delay arms one, a clear
+  // cancels one. (The repeating setInterval lowers to a self-rescheduling def
+  // where the lifecycle bodies are extracted; a raw setInterval outside that
+  // path keeps its JS spelling, which fails loudly at import instead of
+  // half-working.) The lookbehind keeps a method call like panel.setTimeout
+  // untouched, and a callback arrow still trips the refusal above.
+  out = out.replace(/(?<![.\w$])clearInterval\s*\(/g, 'app.after_cancel(');
+  out = out.replace(/(?<![.\w$])clearTimeout\s*\(/g, 'app.after_cancel(');
+  out = out.replace(/(?<![.\w$])setTimeout\s*\(/g, 'app.after(');
+  // A desktop page has no global object. The app carries one dict for the
+  // module-level scratch an effect's cleanup bumps: reads resolve through
+  // .get so a first read of an unset key answers None like the web's
+  // `undefined`, writes take the assignment, and compound assignments
+  // re-form as an explicit store.
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)/g, (_m, k: string) => `app.globals['${k}'] = `);
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*(\+=|-=|\*=|\/=)/g, (_m, k: string, op: string) => `app.globals['${k}'] = app.globals.get('${k}') ${op[0]} `);
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, k: string) => `app.globals.get('${k}')`);
+  out = out.replace(/\bglobalThis\b/g, 'app.globals');
   // A form read is the state read the widgets bind to; `String(x)` is a cast.
   out = out.replace(/\$formRead\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `st.get('${name}')`);
   out = out.replace(/\bString\(/g, '(');
+  // JS Boolean(x) is Python's bool(x), qualified through the kit.
+  out = out.replace(/\bBoolean\(/g, 'rosezm.rose_bool(');
   out = rewriteStringMethods(out, pyStringMethod);
   out = out.replace(/\bnull\b/g, 'None').replace(/\bundefined\b/g, 'None');
   out = out.replace(/\btrue\b/g, 'True').replace(/\bfalse\b/g, 'False');
@@ -4261,31 +6736,68 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   out = out.replace(/\|\|/g, ' or ').replace(/&&/g, ' and ');
   out = out.replace(/\?\?/g, ' or ');
   out = out.replace(/\?\./g, '.');
-  out = out.replace(/`([^`]*)`/g, "'$1'");
+  // A JS template literal becomes a Python single-quoted string. Its body may
+  // ALREADY contain single quotes from earlier rewrites (`st.get('items')`),
+  // which would terminate the literal early and leave a SyntaxError - the
+  // safety net then degraded the whole page to stubs. Escape them.
+  out = out.replace(/`([^`]*)`/g, (_m: string, body: string) => "'" + body.replace(/'/g, "\\'") + "'");
   out = out.replace(/\{\.\.\./g, '{**');
   out = out.replace(/\bapp\.render\(\)/g, 'app.render()');
   for (const name of stateNames) {
-    // R253: `d().skin` - a state read with member access becomes the same nested
+    // `d().skin` - a state read with member access becomes the same nested
     // dict lookup the template path spells, with `or {}` so a $data page with no
     // server (state absent, or seeded None) degrades to None instead of raising
     // AttributeError and killing the render. (/mirror404, /docs)
     // ...but only for DATA properties: `.length`/`.map(` must stay for the
     // len()/string-method passes that run later in this function.
     out = out.replace(
-      new RegExp(`\\b${escapeRe(name)}\\s*\\(\\s*\\)\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])`, 'g'),
+      new RegExp(`\\b${escapeRe(name)}\\s*\\(\\s*\\)\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)(?![0-9A-Za-z_$])`, 'g'),
       (whole, key: string, off: number) =>
         (/^(?:length|map|filter|reduce|find|some|every|slice|concat|join|split|indexOf|startsWith|endsWith|toUpperCase|toLowerCase|forEach|push|includes)$/.test(key)
           ? whole
           : `(st.get('${name}') or {}).get('${key}')`),
     );
+    // `name()[key]` - a state read as a dict, subscripted by a key (string
+    // literal or bare identifier). JS `tbl[k]` raises KeyError on a Python dict,
+    // so it must spell the `.get()` form too, with the same `or {}` guard.
+    // `tr()` does `i18nTable()[key] || key`: without this the `|| key` fallback
+    // never runs because the subscript already threw, and the whole i18n path
+    // renders "This section failed to render." The key is preserved verbatim, so
+    // a literal `'x'` stays a literal and a variable `k` stays a variable.
+    // SKIP an assignment LHS: a setter reached here as `st()['k'] = x` would
+    // become `(st.get('..') or {}).get('k') = x` - Python forbids assigning to a
+    // function call, and the page collapses to stubs. The balanced setter scan
+    // (rewriteStateSetters) already owns LHS writes; this pass only fixes reads.
+    out = out.replace(
+      new RegExp(`\\b${escapeRe(name)}\\s*\\(\\s*\\)\\s*\\[\\s*([^\\]]*?)\\s*\\]`, 'g'),
+      (_whole: string, sub: string, off: number) =>
+        /^\s*=/.test(out.slice(off + _whole.length)) ? _whole : `(st.get('${name}') or {}).get(${sub.trim()})`,
+    );
     out = out.replace(new RegExp(`\\b${escapeRe(name)}\\s*\\(\\s*\\)`, 'g'), `st.get('${name}')`);
   }
-  // R292: the setters are rewritten by a BALANCED scan, not by replacing the
+  // The setters are rewritten by a BALANCED scan, not by replacing the
   // opener alone. The old one-line regex left the call's closing paren in the
   // text (`st['count'] = st.get('count') + 1);`), so every handler that wrote a
   // state field produced a page that could not even parse. It also had to be
   // blind to `foo.setCount(` and to a `setCount` inside a string.
   out = rewriteStateSetters(out, stateNames);
+  // A bare `$state` READ in a handler body (`if (busy)`, `not busy`, a RHS
+  // `n + 1`) was never rewritten to `st.get('busy')` on this path - the
+  // template path calls callifyBareReads but translateBody did not, so the name
+  // reached the file verbatim and rose_text swallowed the NameError as
+  // "This section failed to render." Running it AFTER rewriteStateSetters means
+  // assignments are already `st['busy'] = ...` (their LHS is a string literal,
+  // skipped) and only genuine reads remain bare. Writes keep `st['busy'] = x`;
+  // reads become `st.get('busy')`.
+  if (stateNames.length) {
+    // `name !== 'st'` guards the page's own state *container*: the accessor
+    // transform above already rewrote `st()` to `st.get('st')` (container `st`
+    // reading the field also named `st`). Re-running callifyBareReads on that
+    // output would see the bare `st` token and rewrite it a second time into
+    // `st.get('st').get('st')`, which AttributeErrors when the field is None.
+    // The container is the dict itself, never a bare read, so it stays literal.
+    out = callifyBareReads(out, (name) => stateNames.includes(name) && name !== 'st', (name) => `st.get('${name}')`);
+  }
   // `.length` is a real Python len() now that the state reads above are dicts.
   out = rewriteLength(out, (e) => `len(${e})`);
   // Math.* and toFixed in a handler body, same spelling as the template path.
@@ -4295,13 +6807,48 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   out = out.replace(/\{\s*\.\.\./g, '{**');
   out = out.replace(/\[\s*\.\.\./g, '[*');
   out = out.replace(/, \s*\.\.\./g, ', *');
-  // `!x` is `not x` (`!=` is unaffected by the lookahead). R285: skip string
+  // `!x` is `not x` (`!=` is unaffected by the lookahead). skip string
   // literals - a handler that appends a bang to text (`t + '!'`) must keep it.
   out = replaceOutsideStrings(out, /!(?!=)\s*/g, () => 'not ');
-  out = out.split('\n').map((l) => (l.trim().startsWith('return ') ? ternaryToPython(l) : l)).join('\n');
+  // Every LINE can carry a ternary - a `return` line, an assignment's right
+  // hand side, or a bare expression. The scan used to cover `return` lines
+  // only. LOOP until stable: a call with two ternary arguments
+  // (`f(a ? b : c, d ? e : f)`) converts one per pass because the converter
+  // returns after its first match and leaves the rest as a suffix.
+  const convLine = (l: string): string => {
+    let out = l;
+    for (let guard = 0; guard < 8; guard++) {
+      if (!out.includes('?')) break;
+      const trimmed = out.trim();
+      // A STATEMENT HEADER is not an expression: `if (!x) return a ? b : c`
+      // is one line whose guarded statement carries the ternary - the
+      // single-line-if path below owns it.
+      if (/^(?:if|for|while|elif|else|do|try|catch|finally|switch|case|default)\b/.test(trimmed)) break;
+      let next: string;
+      if (trimmed.startsWith('return ')) next = ternaryToPython(out);
+      else {
+        const eq = topLevelAssign(out);
+        if (eq >= 0) {
+          const lhs = out.slice(0, eq + 1);
+          const rhs = out.slice(eq + 1);
+          // The RHS may ITSELF contain an assignment (`const dns = p.dns ? a : b`
+          // arrives here as `dns = p.dns ? a : b`). Strip its prefix too, or
+          // the condition reads `dns = p.dns` and Python gets `if dns = ...`.
+          const rm = /^(\s*[A-Za-z_$][\w$]*\s*=\s*)([\s\S]+)$/.exec(rhs);
+          const rhs2 = rm ? rm[2] : rhs;
+          const rhsLead = rm ? rm[1] : '';
+          next = rhs2.includes('?') ? lhs + rhsLead + ternaryToPython(rhs2) : out;
+        } else next = ternaryToPython(out);
+      }
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  };
+  out = out.split('\n').map(convLine).join('\n');
   // JS `+` coerces to string; Python does not. Coerce every string-bearing chain
   // so `'Item ' + n + 1` runs instead of raising.
-  // R292: only the RIGHT-HAND SIDE of an assignment, per statement. The shared
+  // Only the RIGHT-HAND SIDE of an assignment, per statement. The shared
   // pass treats the whole line as one expression, so for `const label = 'x' +
   // text()` it saw the `=` as part of an operand and wrapped half the statement
   // (`str(label = "x") + str(st.get('text');`) - broken Python for every local
@@ -4309,12 +6856,18 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   // `name = ` prefix untouched.
   out = coerceStringConcatInAssignments(out, (e) => `str(${e})`);
   // `st['x'] = st['x'] + 1; app.render()` - re-render after a mutation.
-  // R189: a handler body is a THIRD code path (after the template and the state
+  // A handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it. `store.likes`
   // reached the file verbatim, which is not valid Python: a module bind is a
   // dict, so the read must be store['likes'].
   const bindNames = bindNames0.filter((n) => !stateNames.includes(n));
   if (bindNames.length) out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)/g, (whole, obj: string, key: string) => (bindNames.includes(obj) ? `${obj}['${key}']` : whole));
+  // An awaited value is a decoded dict: `r.ok` is the subscript read, the same
+  // rule a module bind gets.
+  const awaited = [...out.matchAll(/\b([A-Za-z_$][\w$]*)\s*=\s*await\s+\w+/g)].map((m) => m[1]);
+  for (const name of new Set(awaited)) {
+    out = out.replace(new RegExp(`\\b${name}\\s*\\.\\s*([A-Za-z_$][0-9A-Za-z_$]*)`, 'g'), (_m, key: string) => `${name}['${key}']`);
+  }
   const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
   // An effect closure runs INSIDE build(), and build() is the render: a
   // re-render call from there is recursion, so a body the caller marks as an
@@ -4333,7 +6886,7 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
   let depth = 0;
   const at = () => pad + '    '.repeat(depth);
   for (const line of lines) {
-    // R292: a brace can CLOSE mid-line. `if (c) { set(...); }` on one source line
+    // A brace can CLOSE mid-line. `if (c) { set(...); }` on one source line
     // arrives here as `if (c) { st['x'] = ... }` after the rewrites, and the old
     // pass only recognised a lone `}` - the trailing brace rode into the emitted
     // statement (`st['count'] = st.get('count') + 1};`), a SyntaxError. Strip
@@ -4343,7 +6896,7 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
     for (;;) {
       const m = /\}\s*;?\s*$/.exec(body2);
       if (!m) break;
-      // R293: a trailing `}` is only a BLOCK close when the braces on this line
+      // A trailing `}` is only a BLOCK close when the braces on this line
       // do not balance. `return { likes: store.likes };` also ends in `}` -
       // the old unconditional strip ate it and emitted
       // `return { 'likes': store['likes']` (unbalanced dict, a SyntaxError that
@@ -4355,19 +6908,32 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
       // A line that is ONLY closes (`}` / `};`) has nothing to emit.
       if (!body2) break;
     }
-    if (!body2) { depth = Math.max(0, depth - closes); continue; }
-    // R292: Python has no statement terminator. A `let`/assignment/`+=` line got
+    // A line can also CLOSE a block and open the next one: `} catch (e) {` and
+    // `} finally {` arrive with a leading close-brace. Unwind it before the
+    // rest of the line is read, or the `}` rides into the emitted statement.
+    {
+      for (;;) {
+        const lead = /^\}\s*;?\s*/.exec(body2);
+        if (!lead) break;
+        closes++;
+        body2 = body2.slice(lead[0].length);
+      }
+    }
+    // The close-braces belong to the line's OWN level: `} catch (e) {` is the
+    // sibling of `try {`, so the depth drops before this head is written.
+    depth = Math.max(0, depth - closes);
+    if (!body2) continue;
+    // Python has no statement terminator. A `let`/assignment/`+=` line got
     // its `;` here until now, which is legal Python but not the point of an
     // export - and inside a call it read as `");"`, indistinguishable from the
     // stray-paren class of bug this round is fixing. Strip it once, outside
     // strings only, so `x = "a;b"` keeps its literal.
     body2 = stripTrailingSemicolon(body2);
-    const braceOpen = /^(if|for|while|else\s+if|else)\b[\s\S]*\{\s*;?$/.exec(body2);
+    const braceOpen = /^(if|for|while|else\s+if|else|try|catch|finally)\b[\s\S]*\{\s*;?$/.exec(body2);
     if (braceOpen) {
       const head = body2.slice(0, body2.lastIndexOf('{')).replace(/;\s*$/, '').trim();
       pyLines.push(at() + headToStmt(head));
       depth++;
-      depth = Math.max(0, depth - closes);
       continue;
     }
     // A single-line guarded statement: `if (cond) stmt` with no brace left.
@@ -4383,21 +6949,109 @@ function translateBody(body: string, file: string, warnings: string[], indentSpa
       }
       if (d === 0) {
         const cond = body2.slice(open[0].length, i);
-        const stmt = body2.slice(i + 1).trim().replace(/;$/, '');
+        const stmt0 = body2.slice(i + 1).trim().replace(/;$/, '');
+        // The line scan runs BEFORE this split, so a ternary inside the guarded
+        // statement never saw it - convert right here (`return` is handled
+        // inside ternaryToPython).
+        const stmt = stmt0.includes('?') ? ternaryToPython(stmt0) : stmt0;
         if (cond && stmt && !stmt.endsWith('{')) {
           pyLines.push(at() + 'if ' + cond + ':', at() + '    ' + stmt);
-          depth = Math.max(0, depth - closes);
           continue;
         }
       }
     }
     pyLines.push(at() + body2);
-    depth = Math.max(0, depth - closes);
   }
-  return pyLines.join('\n');
+  let joined = pyLines.join('\n');
+  // A template literal was turned into a single-quoted string BEFORE a state
+  // read inside `${...}` was rewritten to `st.get('x')`: the inner quotes
+  // then terminated the literal early (`'n=${st.get('items').length}'`).
+  // Repair by escaping every single quote that sits inside a `${...}` group
+  // of an already single-quoted string.
+  joined = joined.split('\n').map((line) => {
+    // Only lines that carry an interpolation can have this shape.
+    if (!line.includes('${')) return line;
+    // The quoted literal starts AFTER the assignment `= '`; a leading
+    // `st['s']` subscript also carries quotes and must not be treated as the
+    // string opener (escaping it produced `st['s\']` - a SyntaxError).
+    const eq = line.indexOf('=');
+    const first = eq >= 0 ? line.indexOf("'", eq + 1) : line.indexOf("'");
+    const last = line.lastIndexOf("'");
+    if (first < 0 || last <= first) return line;
+    const head = line.slice(0, first + 1);
+    const body = line.slice(first + 1, last);
+    const tail = line.slice(last);
+    // Any single quote INSIDE the quoted body came from a later state/member
+    // rewrite (`st.get('items')`) - escape it so the literal stays intact.
+    return head + body.replace(/'/g, "\\'") + tail;
+  }).join('\n');
+  // The kit request returns an AWAITABLE dict (RoseFetchResult). Restore the
+  // web's `await fetch(...)` spelling for async function bodies on the FINAL
+  // body text, where no later pass can undo it. `await rose_fetch(...)` both
+  // keeps the framework's export contract and actually works in Python.
+  if (asyncBody) {
+    joined = joined.replace(/(?<![.\w$])(?<!await\s)rose_fetch\s*\(/g, 'await rose_fetch(');
+  }
+  // A subscript read off an accessor (`caps()['can_host']`) is a dict lookup
+  // that raises KeyError on the first render; spell the safe `.get()` form.
+  // SKIP an assignment LHS - a setter that reached here as `st()['k'] = x`
+  // would become `st().get('k') = x`, and Python forbids assigning to a call.
+  // (The balanced setter scan already owns writes.) The lookahead (not a
+  // lookbehind) is required because the `=` sits at the line start, before the
+  // function name, not immediately before the match.
+  joined = joined.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\[\s*['"]([^'"]+)['"]\s*\]/g,
+    (_m: string, fn: string, key: string, off: number) =>
+      /^\s*=/.test(joined.slice(off + _m.length)) ? _m : `${fn}().get('${key}')`);
+  // The same accessor rule in the BODY path: `hs().active` inside a script
+  // function is a dict attribute read. Spell it `.get('active')` so a missing
+  // key answers None (JS undefined) instead of raising KeyError. `.length`
+  // and the collection methods belong to the len()/chain passes.
+  joined = joined.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g,
+    (whole: string, fn: string, key: string) =>
+      key === 'length' || key === 'map' || key === 'filter' || key === 'join' || key === 'slice' || key === 'push'
+        ? whole
+        : `${fn}().get('${key}')`);
+  // The INLINE form of a state-derived dict: `(st.get('x') or {}).key`.
+  // A dict has no attributes, and `['key']` raises KeyError on the first
+  // render (state is null/empty then). Spell the safe lookup like pyExpr
+  // does for its own member pass.
+  joined = joined.replace(/(\(st\.get\([^)]*\)\s*or\s*\{\}\))\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g,
+    (_m: string, recv: string, key: string) => `${recv}.get('${key}')`);
+  // A local bound from a dict literal or a state value is a DICT in Python:
+  // `const raw = st() || {}; raw.admin` must become `raw.get('admin')`, or
+  // a first render (empty state) raises AttributeError. The expression path
+  // (pyExpr) owns its own copy of this rule; the body path needs it too.
+  {
+    const dictLocals = new Set<string>();
+    for (const m of joined.matchAll(/(?:\b(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(?:\{|st\.get\([^)]*\)\s*or\s*\{|[^\n]*\s+or\s+\{)/g)) {
+      dictLocals.add(m[1]);
+    }
+    for (const n of dictLocals) {
+      const re = new RegExp(`\\b${n.replace(/\$/g, '\\$&')}\\.([A-Za-z_$][0-9A-Za-z_$]*)\\b(?!\\s*\\()`, 'g');
+      // A WRITE target (`o.b = 2`) must stay a subscript-able assignment, not
+      // `o.get('b') = 2` - Python cannot assign to a function call. Skip any
+      // match followed by an assignment/compound-assignment operator.
+      joined = joined.replace(re, (whole: string, key: string, off: number) => {
+        const after = joined.slice(off + whole.length);
+        return /^\s*(?:=[^=]|\+=|-=|\*=|\/=|%=)/.test(after) ? whole : `${n}.get('${key}')`;
+      });
+    }
+  }
+  if (asyncNames.size) {
+    // A BARE call of an async def (`boot();`, `pullState();` in a timer) would
+    // leave a coroutine unwoken in Python - Tk never awaits it. Schedule it on
+    // the kit's loop. `await x()` already has its own spelling, a `def x():`
+    // line is the definition itself, and a receiver call is not ours to touch.
+    const pat = [...asyncNames].map(escapeRe).join('|');
+    joined = joined.replace(
+      new RegExp(`(?<!await\\s)(?<!def\\s)(?<![.0-9A-Za-z_$])(${pat})\\(\\)`, 'g'),
+      (_m, n: string) => `rosezm.rose_schedule(${n}())`,
+    );
+  }
+  return padEmptyExcept(joined);
 }
 
-/** R292: drop one trailing JS statement terminator, unless it is inside a
+/** Drop one trailing JS statement terminator, unless it is inside a
  *  string literal (`x = "a;b"` keeps its text). */
 /** Net `{`-`}` balance of one line, ignoring braces inside string literals.
  *  Returns 0 for a balanced line (a dict literal), a NEGATIVE number when the
@@ -4427,10 +7081,74 @@ function stripTrailingSemicolon(line: string): string {
 }
 
 /** A control-flow head -> the Python statement line (`if cond:`, `else:`). */
+/** Python 3.9 (this target's floor) has no `match`, so a JS `switch` becomes
+ *  the if/elif chain the indentation pass already understands. Cases without a
+ *  `break` are spelled as their own arm — fallthrough is not translated. */
+function rewriteSwitchToIf(code: string): string {
+  let out = code;
+  for (let guard = 0; guard < 16; guard++) {
+    const at = /\bswitch\s*\(/.exec(out);
+    if (!at) break;
+    const open = at.index + at[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < out.length; i++) {
+      if (out[i] === '(') depth++;
+      else if (out[i] === ')' && --depth === 0) { close = i; break; }
+    }
+    if (close < 0) break;
+    const subject = out.slice(open + 1, close).trim();
+    let braceOpen = close + 1;
+    while (braceOpen < out.length && /\s/.test(out[braceOpen])) braceOpen++;
+    if (out[braceOpen] !== '{') break;
+    let d = 0;
+    let braceClose = -1;
+    for (let i = braceOpen; i < out.length; i++) {
+      if (out[i] === '{') d++;
+      else if (out[i] === '}' && --d === 0) { braceClose = i; break; }
+    }
+    if (braceClose < 0) break;
+    const body = out.slice(braceOpen + 1, braceClose);
+    const arms: Array<{ test: string | null; body: string }> = [];
+    let cur: { test: string | null; body: string } | null = null;
+    let start = 0;
+    let q = '';
+    let dep = 0;
+    for (let i = 0; i <= body.length; i++) {
+      const ch = body[i];
+      if (q) { if (ch === '\\') i++; else if (ch === q) q = ''; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') { dep++; continue; }
+      if (ch === ')' || ch === ']' || ch === '}') { dep--; continue; }
+      if (dep !== 0) continue;
+      const m = /^(?:case\s+([^:]+):|default\s*:)/.exec(body.slice(i));
+      if (!m) continue;
+      if (cur) cur.body = body.slice(start, i);
+      cur = { test: /^default/.test(m[0]) ? null : (m[1] ?? '').trim(), body: '' };
+      arms.push(cur);
+      i += m[0].length - 1;
+      start = i + 1;
+    }
+    if (cur) cur.body = body.slice(start);
+    if (!arms.length) break;
+    let built = '';
+    let first = true;
+    for (const arm of arms) {
+      const stmts = arm.body.split(';').map((x) => x.replace(/\bbreak\b/g, '').trim()).filter(Boolean);
+      const head = arm.test === null ? (first ? 'if (true)' : '} else') : `${first ? 'if' : '} else if'} (${subject} == ${arm.test})`;
+      built += `${head} {\n${stmts.join('\n')}\n`;
+      first = false;
+    }
+    built += '}\n';
+    out = out.slice(0, at.index) + built + out.slice(braceClose + 1);
+  }
+  return out;
+}
+
 function headToStmt(head: string): string {
   const cond = /^(?:if|else\s+if)\s*\(([\s\S]*)\)$/.exec(head);
   if (cond) return `${head.startsWith('else') ? 'elif' : 'if'} ${cond[1]}:`;
-  // R292: a C-style counting loop is `range`; anything else this target cannot
+  // A C-style counting loop is `range`; anything else this target cannot
   // lower was already refused by firstUnlowerableLoop, so a `for` that reaches
   // here is the `in`/`of` form Python spells directly.
   const forHead = /^for\s*\(([\s\S]*)\)$/.exec(head);
@@ -4442,6 +7160,12 @@ function headToStmt(head: string): string {
   const loop = /^(while)\s*\(([\s\S]*)\)$/.exec(head);
   if (loop) return `while ${loop[2]}:`;
   if (head === 'else') return 'else:';
+  // The error shapes: `try {` / `catch (e) {` / `finally {`.
+  if (head === 'try') return 'try:';
+  if (head === 'finally') return 'finally:';
+  const except = /^catch\s*\(([\s\S]*)\)$/.exec(head);
+  if (except) return except[1].trim() ? `except Exception as ${except[1].trim()}:` : 'except Exception:';
+  if (head === 'catch') return 'except Exception:';
   return head + ':';
 }
 

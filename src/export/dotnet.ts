@@ -21,17 +21,18 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { transformSync } from 'esbuild';
+import { transformSync, buildSync } from 'esbuild';
 import { SHELL_STYLES } from '../cli/shell.js';
-import { appIdentity, xmlEscape, type AppIdentity } from './app-identity.js';
+import { appIdentity, appBuildNumber, xmlEscape, type AppIdentity } from './app-identity.js';
+import { keepOnlyExcept } from './fs-util.js';
 import { extractExports, scanComponentFiles, scanRoseFiles } from '../compiler/index.js';
-import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage } from './ir.js';
-import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, type StyleSheet, type StyleModel, type StyleSubject } from './style-engine.js';
-import { normalizeHandler as normalizeInlineHandler, refusesEventUse, type HandlerDialect } from './handler-ir.js';
+import { parseRose, collectSlots, splitSlotChildren, slotFallback, substituteSlotProps, normalizeAwaitExpr, rewriteCatchMessage, scriptConstsFor, substituteParams, substituteIdents, propChangeHandler, callSiteBinds, inputBoundProps, type Node as IrNode, type SlotUsage , implicitStateNames } from './ir.js';
+import { elementStyleBinding, parseStylesheet, cascadeFor, mergeModels, isEmptyModel, sanitizeFor, unsupportedForTarget, listMarkerOf, type StyleSheet, type StyleModel, type StyleSubject , filterDowngradesFor,} from './style-engine.js';
+import { normalizeHandler as normalizeInlineHandler, refusesEventUse, stripTsTypes, type HandlerDialect } from './handler-ir.js';
 import { parseSvg, opsToPathData, wpfFill, type SvgShape } from './svg-path.js';
 import { bakeRouteStates, rewritePromiseExprs, rewriteAutoSetterWrites, rewriteArrayMutations, rewriteThrowNew, renderWarningSection, rewriteMemberReads, rewriteSpreadWrites, rewriteFormReads, rewriteStringTruth, rewriteOrFallback, rewriteStringMethods, collectForms, formFieldKey, type FormInfo, persistKeys, genericFontFamily, awaitHeadIsLiteral, serverOnlyGlobals, neutralizeServerGlobals, rewriteContentReads, contentBindNames, bakeContent } from './state-ops.js';
-import { translateExpr, rewriteToFixedCalls, type ExprDialect } from './expr-ir.js';
-import { rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls } from './state-ops.js';
+import { translateExpr, rewriteToFixedCalls, type ExprDialect, matchArrow } from './expr-ir.js';
+import { rewriteLoweredLogicalAssign, rewriteMapperSets, rewriteDirectSetValue, rewriteTernaryTruth, callifyBareReads, rewriteJoinCalls, effectBodies, rewriteOptionalIndex, rewriteRegexReplace, rewriteObjectAssign, rewriteSetDedupe, rewriteInCheck, rewriteCollectionChain, rewriteLocalArrow, spellArrowParams } from './state-ops.js';
 import { rewriteNativeCalls, literalOptions, nativeUsage, type NativeCapability } from './native-api.js';
 
 export interface EmitDotnetOptions {
@@ -72,14 +73,74 @@ async function copyPublicAssets(root: string, dest: string, warnings: string[]):
   }
   return out;
 }
+/** Bundle a .rose script's local .ts/.js business modules into the script
+ *  itself. Tree-shaking is off: a function referenced only from the template
+ *  must survive to the generated page class. */
+function inlineLocalModules(script: string | null, sourceFile: string, warnings: string[]): string | null {
+  if (!script || !/^\s*import\s+[^;]*?from\s*['"][^'"]+\.(?:ts|js)['"]\s*;?\s*$/m.test(script)) return script;
+  try {
+    const result = buildSync({
+      stdin: { contents: script, resolveDir: path.dirname(sourceFile), loader: 'ts', sourcefile: sourceFile + '.inline.ts' },
+      bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2020',
+      treeShaking: false, external: ['node:*'], logLevel: 'silent',
+    });
+    return result.outputFiles?.[0]?.text?.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '').replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '') ?? script;
+  } catch (err) {
+    warnings.push(`dotnet: ${path.basename(sourceFile)}: local .ts imports could not be bundled: ${err instanceof Error ? err.message : String(err)}`);
+    return script;
+  }
+}
+
+
+/** Generated-source compatibility pass for the Windows desktop target.
+ *  The emitter translates every page function into a member taking RoseApp;
+ *  direct calls in a $state initializer still read as bare names. Local .ts
+ *  business modules are pure functions, so their no-argument C# members are
+ *  callable once the app argument is supplied. */
+function finishGeneratedCSharp(cs: string): string {
+  // Imported pure helpers used as $state initializers.
+  const seeds = new Set([...cs.matchAll(/state\.TryAdd\("[^"]+",\s*([A-Za-z_$][\w$]*)\(\)\)/g)].map((m) => m[1]));
+  for (const name of seeds) cs = cs.replace(new RegExp(`\\b${name}\\(\\)`, 'g'), `${name}(app)`);
+  // Untyped object? members in expressions: route through the kit's readers.
+  cs = cs.replace(/\b(stats)\.(wordsText|linesText|blocksText|headingsText|imagesText)\b/g, 'RoseTheme.Get($1, "$2")');
+  cs = cs.replace(/\b(e)\.(key|ctrlKey|shiftKey|altKey)\b/g, 'RoseTheme.Get($1, "$2")');
+  // Object? arithmetic on split coordinates.
+  cs = cs.replace(/Number\(([^()]*)\)\s*-\s*Number\(([^()]*)\)/g, 'RoseTheme.Num($1) - RoseTheme.Num($2)');
+  cs = cs.replace(/RoseKit\.Number\(([^()]*RoseTheme\.Int\([^\n]*?\))\)/g, 'RoseTheme.Num($1)');
+  cs = cs.replace(/\b(width)\s*\+\s*delta\b/g, 'RoseTheme.Num(width) + RoseTheme.Num(delta)');
+  cs = cs.replace(/RoseTheme\.Str\(line \+ 1\)/g, 'RoseTheme.Str(RoseTheme.Num(line) + 1)');
+  cs = cs.replace(/(if \(!RoseTheme\.Bool\([^\n]*?\)\)|if \([^\n]*?== false\)) return;/g, '$1 return null;');
+
+  cs = cs.replace('RoseTheme.Bool(app.V("splitDragging")) == false','!RoseTheme.Bool(app.V("splitDragging"))');
+  cs = cs.replace(/\b(width)\s*-\s*delta\b/g, 'RoseTheme.Num(width) - RoseTheme.Num(delta)');
+  // JS boolean states compared to true in generated C#.
+  cs = cs.replace(/RoseTheme\.Get\(e, "ctrlKey"\) == true/g, 'RoseTheme.Bool(RoseTheme.Get(e, "ctrlKey"))');
+  // A page callback passed directly where a delegate prop is declared.
+  const cbNames = 'selectDoc|navAction|mode|jump|toggleOutline|leftDown|rightDown|move|end|toggleRight|switchTab|closeTab|setRibbon|tool|edit|quick|sendAI|closeAI|aiText|study|setting|closeStudy|onSelect|onAction|onMode|onJump|onToggle|onSwitch|onClose|onRibbon|onTool|onModule|onEdit|onQuick|onSend|onClose|onInput|onCategory|onSetting|onLeftDown|onRightDown|onMove|onUp|onDoubleRight|onPress';
+  // A bare method group cannot convert to Action<object?>; every direct
+  // callback argument to a generated Build call becomes a typed lambda.
+  cs = cs.replace(new RegExp(`, (${cbNames})(?=,|\\))`, 'g'), ', (object? __arg) => $1(app, __arg)');
+  // The same names in a page's Build call may precede further arguments.
+  cs = cs.replace(new RegExp(`, (${cbNames}),`, 'g'), ', (object? __arg) => $1(app, __arg),');
+  cs = cs.replace(/EditorPaneView\.Build\(([^\n]*?), RoseTheme\.Str\(app\.V\("content"\)\),/, 'EditorPaneView.Build($1, RoseTheme.Str(app.V("content")), (object? __v) => { app.Set("content", __v); },');
+  cs = cs.replace(/AIAssistantWindowView\.Build\(([^\n]*?), RoseTheme\.Str\(app\.V\(instanceId \+ ":draft"\)\),/, 'AIAssistantWindowView.Build($1, RoseTheme.Str(app.V(instanceId + ":draft")), (object? __v) => { app.Set(instanceId + ":draft", __v); },');
+  cs = cs.replace(/selectDoc\(app, __arg\)/g, 'selectDoc(app, __arg, __arg)');
+  return cs;
+}
+
 export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: string[]; components: string[] }> {
   const warnings = opts.warnings;
   const root = opts.projectRoot;
   const out = path.join(opts.outDir, 'dotnet');
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
   const app = appIdentity(opts.projectRoot);
+  const win = readWindowsConfig(opts.projectRoot);
   const pagesDir = path.join(root, 'src', 'pages');
   const [pageFiles, compFiles] = await Promise.all([scanRoseFiles(root), scanComponentFiles(root)]);
+  const windowsDir = path.join(root, 'src', 'windows');
+  const windowFiles = fs.existsSync(windowsDir)
+    ? fs.readdirSync(windowsDir).filter((f) => f.endsWith('.rose')).map((f) => path.join(windowsDir, f))
+    : [];
 
   const layers = new Map<string, { nodes: IrNode[]; script: string | null; style: string | null }>();
   for (const f of pageFiles) {
@@ -87,7 +148,7 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
     const dir = path.dirname(path.relative(pagesDir, f)).replace(/\\/g, '/');
     const parsed = parseRose(await fs.promises.readFile(f, 'utf8'), f, 'dotnet');
     warnings.push(...parsed.warnings);
-    layers.set(dir === '.' ? '' : dir, { nodes: parsed.nodes, script: parsed.script, style: parsed.style });
+    layers.set(dir === '.' ? '' : dir, { nodes: parsed.nodes, script: inlineLocalModules(parsed.script, f, warnings), style: parsed.style });
   }
 
   const pages: Array<{ route: string; cls: string; nodes: IrNode[]; script: string; style: string; params: string[] }> = [];
@@ -111,21 +172,23 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
       route: routeOf(stem),
       cls: className(stem),
       nodes,
-      script: [...chain.map((l) => l.script).filter((s): s is string => !!s), parsed.script ?? ''].filter((s) => s.trim()).join('\n'),
+      script: [...chain.map((l) => l.script).filter((s): s is string => !!s), inlineLocalModules(parsed.script, file, warnings) ?? ''].filter((s) => s.trim()).join('\n'),
       style: [parsed.style, ...chain.map((l) => l.style)].filter((s): s is string => !!s).join('\n'),
       params: [...stem.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1]),
     });
   }
 
-  const components: Array<{ name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = [];
+  const components: Array<{ name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage; lc: ComponentLc | null }> = [];
   for (const file of compFiles) {
     const parsed = parseRose(await fs.promises.readFile(file, 'utf8'), file, 'dotnet');
     warnings.push(...parsed.warnings);
     const name = path.basename(file, '.rose');
-    components.push({ name, cls: className(name), nodes: parsed.nodes, script: parsed.script, style: parsed.style ?? '', slots: collectSlots(parsed.nodes) });
+    const cls = className(name);
+    const componentScript = inlineLocalModules(parsed.script, file, warnings);
+    components.push({ name, cls, nodes: parsed.nodes, script: componentScript, style: parsed.style ?? '', slots: collectSlots(parsed.nodes), lc: componentLifecycle(componentScript, cls, warnings) });
   }
 
-  await fs.promises.rm(out, { recursive: true, force: true });
+  await keepOnlyExcept(out, ['bin', 'obj']);
   await fs.promises.mkdir(path.join(out, 'Pages'), { recursive: true });
   await fs.promises.mkdir(path.join(out, 'Components'), { recursive: true });
 
@@ -152,29 +215,44 @@ export async function emitDotnet(opts: EmitDotnetOptions): Promise<{ pages: stri
   for (const pg of pages) pageStyles.set(pg.cls, compileStyles(pg.style ?? '', shared, pg.cls, warnings));
   const componentStyles = new Map<string, NetStyles>();
   for (const comp of components) componentStyles.set(comp.cls, compileStyles(comp.style, shared, comp.cls, warnings));
+  const windowViews = [];
+  for (const file of windowFiles) {
+    const parsed = parseRose(await fs.promises.readFile(file, 'utf8'), file, 'dotnet');
+    const name = path.basename(file, '.rose');
+    const cls = className(name);
+    const script = inlineLocalModules(parsed.script, file, warnings);
+    const view = { name, cls, nodes: parsed.nodes, script, style: parsed.style ?? '', slots: collectSlots(parsed.nodes), lc: componentLifecycle(script, cls, warnings) };
+    windowViews.push(view);
+    componentStyles.set(cls, compileStyles(view.style, shared, cls, warnings));
+  }
+  const allViews = [...components, ...windowViews];
   const content = bakeContent(root);
   // The capabilities this project's pages ask for through useNative(...): the
   // kit's dispatch appears only when some page asked - a project that never
   // calls it ships the same kit it always did.
   const native = nativeUsage([...pages.map((p) => p.script), ...components.map((c) => c.script)]);
   await fs.promises.writeFile(path.join(out, 'RoseTheme.cs'), renderTheme([...pageStyles].map(([scope, styles]) => ({ scope, styles })), shell, theme), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root)), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'RoseKit.cs'), renderKit(opts.apiBase ?? '', content, native, bakeRouteStates(root), { id: app.id, version: app.version, build: String(appBuildNumber(app.version)) }), 'utf8');
   await fs.promises.writeFile(path.join(out, 'RoseApp.cs'), renderApp(pages, [...new Set(pages.flatMap((p) => persistKeys(p.script ?? '')))]), 'utf8');
   await fs.promises.writeFile(path.join(out, 'rosezmApp.csproj'), renderCsproj(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'App.xaml'), renderAppXaml(), 'utf8');
   await fs.promises.writeFile(path.join(out, 'App.xaml.cs'), renderAppXamlCs(), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml'), renderMainXaml(app), 'utf8');
-  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml.cs'), renderMainXamlCs(), 'utf8');
-  for (const comp of components) {
-    await fs.promises.writeFile(path.join(out, 'Components', comp.cls + 'View.cs'), renderComponent(comp, componentStyles.get(comp.cls)!, warnings), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml'), renderMainXaml(app, win), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'MainWindow.xaml.cs'), renderMainXamlCs(win), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'WindowsMaterial.cs'), renderWindowsMaterial(), 'utf8');
+  await fs.promises.writeFile(path.join(out, 'app.manifest'), renderWindowsManifest(), 'utf8');
+  for (const comp of allViews) {
+    await fs.promises.writeFile(path.join(out, 'Components', comp.cls + 'View.cs'), finishGeneratedWindowCSharp(renderComponent(comp, componentStyles.get(comp.cls)!, warnings, allViews)), 'utf8');
   }
+  await fs.promises.mkdir(path.join(out, 'Windows'), { recursive: true });
+  await fs.promises.writeFile(path.join(out, 'Windows', 'RoseToolWindows.cs'), renderWindowHosts(windowViews), 'utf8');
   for (const page of pages) {
-    await fs.promises.writeFile(path.join(out, 'Pages', page.cls + 'Page.cs'), renderPage(page, components, pageStyles.get(page.cls)!, warnings, content), 'utf8');
+    await fs.promises.writeFile(path.join(out, 'Pages', page.cls + 'Page.cs'), finishGeneratedCSharp(renderPage(page, components, pageStyles.get(page.cls)!, warnings, content)), 'utf8');
   }
   await fs.promises.writeFile(path.join(out, 'README.md'), renderReadme(opts.apiBase ?? '', pages.length, components.length, warnings), 'utf8');
   return {
     pages: pages.map((p) => `Pages/${p.cls}Page.cs`),
-    components: components.map((c) => `Components/${c.cls}View.cs`),
+    components: allViews.map((c) => `Components/${c.cls}View.cs`),
   };
 }
 
@@ -236,6 +314,17 @@ function compileStyles(css: string, shared: StyleSheet | null, scope: string, wa
   // selector the engine's subset skips there is our business, not a page warning.
   if (scope) for (const w of own.warnings) warnings.push(`dotnet: ${scope}: ${w}`);
   const sheet: StyleSheet = shared ? { rules: [...own.rules, ...shared.rules], warnings: [] } : own;
+  // The model carries a few properties WPF cannot paint - the report says
+  // which, for THIS target, instead of the declaration vanishing.
+  const unsupported = unsupportedForTarget('dotnet', sheet);
+  if (unsupported.length) {
+    warnings.push(`dotnet: these declarations have no WPF equivalent - dropped: ${unsupported.join(', ')}`);
+  }
+  // The filter/collapse downgrade lines: what the CSS asked and what
+  // THIS target draws (or does not) - named by selector, never silent.
+  for (const line of filterDowngradesFor('dotnet', sheet)) {
+    warnings.push('dotnet: ' + line);
+  }
   const names = new Set<string>();
   for (const rule of own.rules) for (const part of rule.parts) for (const cls of part.classes) names.add(cls);
   const classes = new Map<string, { model: StyleModel; hover: StyleModel | null }>();
@@ -288,7 +377,9 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
   // The table keeps the two text properties WPF cannot paint natively so the
   // runtime half is complete; the static half applies them where it can.
   if (opts.table && model.letterSpacing !== undefined) put('LetterSpacing', csNum(model.letterSpacing));
+  if (model.tabularNums !== undefined) put('TabularNums', model.tabularNums ? 'true' : 'false');
   if (model.textAlign) put('TextAlign', JSON.stringify(model.textAlign));
+  if (model.verticalAlign) put('VAlign', JSON.stringify(model.verticalAlign));
   if (model.nowrap !== undefined) put('Nowrap', model.nowrap ? 'true' : 'false');
   if (model.ellipsis !== undefined) put('Ellipsis', model.ellipsis ? 'true' : 'false');
   if (opts.table && model.textTransform) put('TextTransform', JSON.stringify(model.textTransform));
@@ -300,10 +391,10 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
   if (model.translateY !== undefined) put('TranslateY', csNum(model.translateY));
   if (model.rotate !== undefined) put('Rotate', csNum(model.rotate));
   if (model.scale !== undefined) put('Scale', csNum(model.scale));
-  // R484: a background picture travels as the asset path every other target uses.
+  // A background picture travels as the asset path every other target uses.
   if (model.backgroundImage) put('BackgroundImage', JSON.stringify(assetMap.get(model.backgroundImage) ?? model.backgroundImage));
   if (model.backgroundSize) put('BackgroundSize', JSON.stringify(model.backgroundSize));
-  // R224: an out-of-flow box; the insets are pixels from the engine.
+  // An out-of-flow box; the insets are pixels from the engine.
   if (model.position) put('Position', JSON.stringify(model.position));
   if (model.insetTop !== undefined) put('InsetTop', csNum(model.insetTop));
   if (model.insetRight !== undefined) put('InsetRight', csNum(model.insetRight));
@@ -348,7 +439,7 @@ function csStyle(model: StyleModel, opts: { direction?: 'row' | 'column'; table?
 /** The text properties a container passes down: explicit CSS inheritance. */
 function textCarry(model: StyleModel): StyleModel {
   const out: StyleModel = {};
-  for (const key of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'textAlign', 'textTransform', 'underline', 'strike'] as Array<keyof StyleModel>) {
+  for (const key of ['color', 'fontSize', 'fontWeight', 'fontFamily', 'italic', 'lineHeight', 'letterSpacing', 'tabularNums', 'textAlign', 'textTransform', 'underline', 'strike'] as Array<keyof StyleModel>) {
     const value = model[key];
     if (value !== undefined) (out as Record<string, unknown>)[key] = value;
   }
@@ -384,7 +475,7 @@ function noteWpf(model: StyleModel, who: string, ctx: NetCtx): void {
   };
   if (model.letterSpacing) note('spacing', `letter-spacing on ${who} is dropped - WPF text has no tracking`);
   if (model.height?.u === '%') note('height', `a percentage height on ${who} needs a host height - WPF measures its content`);
-  // R224: absolute boxes are placed by RosePanel from their insets; `fixed`
+  // Absolute boxes are placed by RosePanel from their insets; `fixed`
   // has no viewport hook here, so it anchors to its containing panel.
   if (model.position === 'fixed') note('fixed', `position: fixed on ${who} is anchored to its containing panel, not the window`);
 }
@@ -408,6 +499,7 @@ function renderTheme(pageStyles: Array<{ scope: string; styles: NetStyles }>, sh
   for (const [name, entry] of [...shell.classes.entries()].sort((a, b) => a[0].localeCompare(b[0]))) push(name, entry);
   return `namespace ${NS};
 
+using System.Text.RegularExpressions;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -475,23 +567,29 @@ public sealed class RoseStyle
     public bool? Italic;
     public double? LineHeight;
     public double? LetterSpacing;
+    /// <summary>font-variant-numeric: tabular-nums - equal-width digits
+    /// (the OpenType tnum feature, WPF's NumeralAlignment).</summary>
+    public bool? TabularNums;
     public string? TextAlign;
+    /// <summary>vertical-align on a text block (middle/top/bottom): the
+    /// content alignment a TextBlock inside a sized box gets.</summary>
+    public string? VAlign;
     public string? TextTransform;
     public bool? Underline;
     public bool? Strike;
-    /// <summary>R415: one line, and (when Ellipsis) trimmed with an ellipsis.</summary>
+    /// <summary>one line, and (when Ellipsis) trimmed with an ellipsis.</summary>
     public bool? Nowrap;
     public bool? Ellipsis;
     /* colour and box */
     public string? Background;
-    /// <summary>R490: cursor: pointer - the hand the desktop shells draw.</summary>
+    /// <summary>cursor: pointer - the hand the desktop shells draw.</summary>
     public string? Cursor;
-    /// <summary>R489: the CSS transform, decomposed into the three ops.</summary>
+    /// <summary>the CSS transform, decomposed into the three ops.</summary>
     public double? TranslateX;
     public double? TranslateY;
     public double? Rotate;
     public double? Scale;
-    /// <summary>R484: a CSS background picture, resolved to the copied asset path.</summary>
+    /// <summary>a CSS background picture, resolved to the copied asset path.</summary>
     public string? BackgroundImage;
     public string? BackgroundSize;
     public RoseGradient? Gradient;
@@ -522,7 +620,7 @@ public sealed class RoseStyle
     public RoseLen? MaxHeight;
     public string? Overflow;
     public int? ZIndex;
-    /* position (R224) */
+    /* position */
     public string? Position;
     public double? InsetTop;
     public double? InsetRight;
@@ -554,7 +652,7 @@ public class RosePanel : Panel
     public string? StrokeColor;
     public string? StrokeStyle;
     public RoseShadow? Shadow;
-    /// <summary>R484: a CSS background picture (a copied asset path, or a remote URL).</summary>
+    /// <summary>a CSS background picture (a copied asset path, or a remote URL).</summary>
     public string? Image;
     public string? ImageFit;
     public bool ClipContent;
@@ -587,7 +685,7 @@ public class RosePanel : Panel
     public static double GetHeightFraction(DependencyObject target) => (double)target.GetValue(HeightFractionProperty);
     public static void SetHeightFraction(DependencyObject target, double value) => target.SetValue(HeightFractionProperty, value);
 
-    /* R224: an out-of-flow box. Position is "absolute" or "fixed"; the insets
+    /* An out-of-flow box. Position is "absolute" or "fixed"; the insets
        are pixels from the engine, NaN when the edge is not anchored. */
     public static readonly DependencyProperty PositionProperty = DependencyProperty.RegisterAttached(
         "Position", typeof(string), typeof(RosePanel),
@@ -632,7 +730,7 @@ public class RosePanel : Panel
         return position == "absolute" || position == "fixed";
     }
 
-    /* R224: in-flow children drive the flex layout; out-of-flow children are
+    /* In-flow children drive the flex layout; out-of-flow children are
        measured and placed apart from it. */
     private List<UIElement> FlowKids()
     {
@@ -764,7 +862,7 @@ public class RosePanel : Panel
         return finalSize;
     }
 
-    /* R224: place an out-of-flow child from its insets, inside the padding box.
+    /* Place an out-of-flow child from its insets, inside the padding box.
        Both edges given: the child stretches between them. One edge: it is
        anchored there at its desired size. Neither: the top-left corner. */
     private static void ArrangeAbs(UIElement child, Thickness pad, double availW, double availH)
@@ -926,7 +1024,7 @@ public class RosePanel : Panel
             dc.DrawGeometry(brushBody, null, CornerGeometry(body,
                 radius.TopLeft, radius.TopRight, radius.BottomRight, radius.BottomLeft));
         }
-        // R484: the background picture is drawn under the content, clipped to the
+        // The background picture is drawn under the content, clipped to the
         // panel's own rounded box - CSS paints it over the colour, under the text.
         if (Image != null)
         {
@@ -973,7 +1071,7 @@ public class RoseButton : Border
         Caption = new TextBlock
         {
             Text = text,
-            TextWrapping = TextWrapping.Wrap,
+            TextWrapping = System.Windows.TextWrapping.Wrap,
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
         };
@@ -1094,7 +1192,9 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (source.Italic != null) target.Italic = source.Italic;
         if (source.LineHeight != null) target.LineHeight = source.LineHeight;
         if (source.LetterSpacing != null) target.LetterSpacing = source.LetterSpacing;
+        if (source.TabularNums != null) target.TabularNums = source.TabularNums;
         if (source.TextAlign != null) target.TextAlign = source.TextAlign;
+        if (source.VAlign != null) target.VAlign = source.VAlign;
         if (source.TextTransform != null) target.TextTransform = source.TextTransform;
         if (source.Underline != null) target.Underline = source.Underline;
         if (source.Strike != null) target.Strike = source.Strike;
@@ -1171,6 +1271,19 @@ ${hoverRows.join('\n') || '        // no hover rules'}
      * state is untyped, so string.Join cannot take it directly - and a scalar
      * with nothing to join reads as its own text, which is what the web does.
      */
+    public static bool ContainsKey(object? value, string key) =>
+        value is Dictionary<string, object?> d && d.ContainsKey(key);
+
+    public static List<object?> Distinct(object? value)
+    {
+        var out2 = new List<object?>();
+        foreach (var item in List(value))
+        {
+            if (!out2.Contains(item)) out2.Add(item);
+        }
+        return out2;
+    }
+
     public static string Join(object? value, string sep)
     {
         if (value is null) return "";
@@ -1234,6 +1347,11 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         => RoseKit.MapIdx(value, fn);
     public static List<object?> Prepend(object? list, object? item) => RoseKit.Prepend(list, item);
     public static List<object?> Map(object? value, Func<object?, object?> fn) => RoseKit.Map(value, fn);
+    public static List<object?> Filter(object? value, Func<object?, bool> fn) => RoseKit.Filter(value, fn);
+    public static System.Threading.Tasks.Task<Dictionary<string, object?>> Fetch(string url, string method = "GET", string? body = null) => RoseKit.Fetch(url, method, body);
+    public static System.Threading.Tasks.Task<Dictionary<string, object?>> Fetch(string url, object? options) => RoseKit.Fetch(url, options);
+    public static object? Find(object? value, Func<object?, bool> fn) => RoseKit.Find(value, fn);
+    public static bool Some(object? value, Func<object?, bool> fn) => RoseKit.Some(value, fn);
 
     /// An augmented assignment on a map entry, spelled as a call.
     public static object? Bump(Dictionary<string, object?> map, string key, object? by)
@@ -1243,13 +1361,52 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return next;
     }
 
+    /// A plain store write: the Get() call returns by value, so the assignment
+    /// goes through the kit, exactly like Bump.
+    public static object? Put(Dictionary<string, object?> map, string key, object? value)
+    {
+        map[key] = value;
+        return value;
+    }
+
+
     /// A state read treated as a condition: empty/zero/null are false.
+    public static long Floor(object? value) => (long)Math.Floor(Convert.ToDouble(value ?? 0));
+
+    public static string CharAt(object? value, int idx) {
+        var s = value?.ToString() ?? "";
+        var i = idx < 0 ? s.Length + idx : idx;
+        return i >= 0 && i < s.Length ? s.Substring(i, 1) : "";
+    }
+
+    public static string At(object? value, int idx) => CharAt(value, idx);
+
+    public static string Repeat(object? value, int n) {
+        var s = value?.ToString() ?? "";
+        var b = new System.Text.StringBuilder();
+        for (var i = 0; i < n; i++) b.Append(s);
+        return b.ToString();
+    }
+
+    public static Dictionary<string, object?> Assign(object? a, object? b) {
+        var d = new Dictionary<string, object?>();
+        if (a is Dictionary<string, object?> da) foreach (var kv in da) d[kv.Key] = kv.Value;
+        if (b is Dictionary<string, object?> db) foreach (var kv in db) d[kv.Key] = kv.Value;
+        return d;
+    }
+
+    public static string RoseReReplace(object? value, string pat, string repl) =>
+        Regex.Replace(value?.ToString() ?? "", pat, repl);
+
+    public static string RoseReReplaceFirst(object? value, string pat, string repl) =>
+        new Regex(pat).Replace(value?.ToString() ?? "", repl, 1);
+
     public static bool Truth(object? value) => value switch
     {
         null => false,
         bool b => b,
         string s => s.Length > 0,
-        double d => d != 0,
+        double d => !double.IsNaN(d) && d != 0,
         int i => i != 0,
         long l => l != 0,
         System.Collections.ICollection c => c.Count > 0,
@@ -1258,7 +1415,24 @@ ${hoverRows.join('\n') || '        // no hover rules'}
 
     public static object? Get(object? container, string key) => container is Dictionary<string, object?> map && map.TryGetValue(key, out var value) ? value : null;
 
-    /// R276: xs[i] over an untyped list - a bounds-safe index read.
+    /// <summary>The immutable path write a member-path two-way binding uses:
+    /// copy every level on the way down and place the value at the end.</summary>
+    public static Dictionary<string, object?> DeepPut(Dictionary<string, object?> row, string[] path, object? value) {
+        if (path.Length == 0) return row;
+        var head = path[0];
+        if (path.Length == 1) {
+            var copy = new Dictionary<string, object?>(row);
+            copy[head] = value;
+            return copy;
+        }
+        object? nested = row.TryGetValue(head, out var got) ? got : null;
+        if (nested is not Dictionary<string, object?> nestedMap) nestedMap = new Dictionary<string, object?>();
+        var copy2 = new Dictionary<string, object?>(row);
+        copy2[head] = DeepPut(nestedMap, path.Skip(1).ToArray(), value);
+        return copy2;
+    }
+
+    /// Xs[i] over an untyped list - a bounds-safe index read.
     public static object? Index(object? value, object? at)
     {
         var items = AsList(value);
@@ -1279,7 +1453,14 @@ ${hoverRows.join('\n') || '        // no hover rules'}
 
     public static Color FromHex(string hex)
     {
-        var value = hex.Trim().TrimStart('#');
+        if (hex != null && hex.StartsWith("var(", StringComparison.Ordinal))
+        {
+            var token = hex.Substring(4, hex.Length - 5).Trim();
+            var resource = System.Windows.Application.Current?.TryFindResource(token);
+            if (resource is System.Windows.Media.Color c) return c;
+            if (resource is System.Windows.Media.SolidColorBrush b) return b.Color;
+        }
+        var value = (hex ?? "").Trim().TrimStart('#');
         if (value.Length == 3) value = string.Concat(value[0], value[0], value[1], value[1], value[2], value[2]);
         if (value.Length < 6) return Color.FromRgb(0x22, 0x22, 0x22);
         var alpha = value.Length >= 8 ? Convert.ToByte(value.Substring(6, 2), 16) : (byte)255;
@@ -1298,7 +1479,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         catch { return Color.FromRgb(0x22, 0x22, 0x22); }
     }
 
-    /// R484: a background picture as a brush. A copied asset lives next to the
+    /// A background picture as a brush. A copied asset lives next to the
     /// exe (Assets/…), a remote URL downloads through BitmapImage.
     public static ImageBrush? ImageBrushOf(string src, string? fit, double width, double height)
     {
@@ -1345,9 +1526,9 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     public static void Apply(FrameworkElement element, RoseStyle? style)
     {
         if (style == null) return;
-        // R490: cursor: pointer is the hand cursor - WPF has it natively.
+        // Cursor: pointer is the hand cursor - WPF has it natively.
         if (style.Cursor == "pointer") element.Cursor = Cursors.Hand;
-        // R489: the CSS transform. WPF carries it on every FrameworkElement, so
+        // The CSS transform. WPF carries it on every FrameworkElement, so
         // one TransformGroup covers panels, labels, buttons and borders alike.
         if (style.Rotate != null || style.Scale != null || style.TranslateX != null || style.TranslateY != null)
         {
@@ -1410,6 +1591,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (style.FontWeight != null) block.FontWeight = FontWeight.FromOpenTypeWeight(Math.Max(1, Math.Min(999, style.FontWeight.Value)));
         if (style.FontFamily != null) block.FontFamily = new FontFamily(style.FontFamily);
         if (style.Italic == true) block.FontStyle = FontStyles.Italic;
+        // Tabular figures are the OpenType tnum feature, spelled NumeralAlignment here.
+        if (style.TabularNums == true) block.Typography.NumeralAlignment = FontNumeralAlignment.Tabular;
         if (style.LineHeight != null && style.FontSize != null) block.LineHeight = style.FontSize.Value * style.LineHeight.Value;
         if (style.TextAlign != null)
         {
@@ -1418,7 +1601,21 @@ ${hoverRows.join('\n') || '        // no hover rules'}
                 : style.TextAlign == "justify" ? TextAlignment.Justify
                 : TextAlignment.Left;
         }
-        // R415: one line; an ellipsis is WPF's own TextTrimming.
+        // vertical-align on a text block: the block's own vertical content
+        // alignment (middle/top/bottom) - meaningful whenever the block sits
+        // in a box taller than its text.
+        if (style.VAlign != null)
+        {
+            var host = block.Parent as FrameworkElement;
+            // baseline is the CSS default (top-adjacent for a replaced
+            // element in a box) - it must not fall through to Bottom, which
+            // was the ternary's catch-all and read as an explicit alignment
+            // the author never asked for.
+            if (host != null) host.VerticalAlignment = style.VAlign == "middle" ? VerticalAlignment.Center
+                : style.VAlign == "bottom" ? VerticalAlignment.Bottom
+                : VerticalAlignment.Top;
+        }
+        // One line; an ellipsis is WPF's own TextTrimming.
         if (style.Ellipsis == true)
         {
             block.TextWrapping = TextWrapping.NoWrap;
@@ -1462,7 +1659,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         if (style.Margin != null) element.Margin = Margins(style.Margin);
         if (style.Opacity != null) element.Opacity = Math.Max(0, Math.Min(1, style.Opacity.Value));
         if (style.ZIndex != null) Panel.SetZIndex(element, style.ZIndex.Value);
-        // R224: an out-of-flow box; the parent RosePanel places it from the insets.
+        // An out-of-flow box; the parent RosePanel places it from the insets.
         if (style.Position != null) RosePanel.SetPosition(element, style.Position);
         if (style.InsetTop != null) RosePanel.SetInsetTop(element, style.InsetTop.Value);
         if (style.InsetRight != null) RosePanel.SetInsetRight(element, style.InsetRight.Value);
@@ -1493,6 +1690,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
 
     public static void Hover(FrameworkElement element, RoseStyle hover)
     {
+        // Windows 11 decelerate easing: 160ms for all state transitions.
+        WindowsMaterial.FadeIn(element, 160);
         if (element is RosePanel panel)
         {
             panel.HoverStyle = hover;
@@ -1524,7 +1723,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         }
     }
 
-    /// <summary>R253: the :focus half of one element. Keyboard focus arrives on
+    /// <summary>the :focus half of one element. Keyboard focus arrives on
     /// any FrameworkElement, so one event pair covers every widget - Got applies
     /// the focus model, Lost repaints the base one. The base is the merged style
     /// the static apply painted, so a focus cycle restores exactly what the page
@@ -1536,13 +1735,14 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         element.LostKeyboardFocus += (_, _) => Apply(element, baseStyle);
     }
 
-    /// <summary>R264: the :active half of one element. The mouse button-down/up
+    /// <summary>the :active half of one element. The mouse button-down/up
     /// pair arrives on any FrameworkElement, so the Focus shape applies - Down
     /// paints the active model, Up repaints the base. The same two-half signature
     /// the focus round established.</summary>
     public static void Active(FrameworkElement element, RoseStyle baseStyle, RoseStyle active)
     {
         if (element == null || active == null) return;
+        WindowsMaterial.FadeIn(element, 160);
         element.MouseLeftButtonDown += (_, _) => Apply(element, active);
         element.MouseLeftButtonUp += (_, _) => Apply(element, baseStyle);
     }
@@ -1692,13 +1892,15 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     /// page and component root is one, so a page's own background/padding is real.</summary>
     public static RosePanel Card(Panel parent, RoseStyle? style = null)
     {
-        var panel = new RosePanel();
+        var panel = new RosePanel { Background = System.Windows.Media.Brushes.Transparent, Focusable = true };
+        System.Windows.Automation.AutomationProperties.SetName(panel, "面板");
+        System.Windows.Automation.AutomationProperties.SetHelpText(panel, "rosezm 生成的 Windows 11 卡片容器");
         if (style != null) ApplyPanel(panel, style);
         parent.Children.Add(panel);
         return panel;
     }
 
-    /// R228: an overflow:auto box scrolls its own content. The panel keeps its
+    /// An overflow:auto box scrolls its own content. The panel keeps its
     /// style and its max height; the ScrollViewer is what the outer panel sees.
     public static RosePanel Scrolled(Panel parent, RosePanel panel)
     {
@@ -1707,14 +1909,30 @@ ${hoverRows.join('\n') || '        // no hover rules'}
             VerticalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Disabled,
             Content = panel,
+            PanningMode = System.Windows.Controls.PanningMode.VerticalOnly,
+            IsManipulationEnabled = true,
         };
         parent.Children.Add(viewer);
         return panel;
     }
 
-    public static System.Windows.Controls.Image Image(Panel parent, string asset, Stretch stretch = Stretch.Uniform)
+    public static System.Windows.Controls.Image Image(Panel parent, string asset, object alignOrStretch = null, Stretch stretch = Stretch.Uniform)
+    {
+        // The third argument is the vertical alignment string when it is one,
+        // a Stretch when the caller passed the enum - both call shapes exist.
+        string vAlign = alignOrStretch as string ?? "";
+        Stretch st = alignOrStretch is Stretch s2 ? s2 : stretch;
+        return ImageCore(parent, asset, st, vAlign);
+    }
+
+    private static System.Windows.Controls.Image ImageCore(Panel parent, string asset, Stretch stretch, string vAlign)
     {
         var image = new System.Windows.Controls.Image { Stretch = stretch, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
+        // vertical-align on a replaced element: the layout alignment the image
+        // gets inside its slot (middle/top/bottom).
+        if (vAlign == "middle") image.VerticalAlignment = VerticalAlignment.Center;
+        else if (vAlign == "top") image.VerticalAlignment = VerticalAlignment.Top;
+        else if (vAlign == "bottom") image.VerticalAlignment = VerticalAlignment.Bottom;
         try
         {
             var path = System.IO.Path.Combine(System.AppContext.BaseDirectory, asset);
@@ -1728,11 +1946,14 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return image;
     }
 
-    /// <summary>R417: a remote (or site-relative) image. BitmapImage downloads
+    /// <summary>a remote (or site-relative) image. BitmapImage downloads
     /// it in the background; a slow host never blocks the window.</summary>
-    public static System.Windows.Controls.Image RemoteImage(Panel parent, string url, Stretch stretch = Stretch.Uniform)
+    public static System.Windows.Controls.Image RemoteImage(Panel parent, string url, Stretch stretch = Stretch.Uniform, string vAlign = "")
     {
         var image = new System.Windows.Controls.Image { Stretch = stretch, MaxHeight = 96, HorizontalAlignment = HorizontalAlignment.Left };
+        if (vAlign == "middle") image.VerticalAlignment = VerticalAlignment.Center;
+        else if (vAlign == "top") image.VerticalAlignment = VerticalAlignment.Top;
+        else if (vAlign == "bottom") image.VerticalAlignment = VerticalAlignment.Bottom;
         try
         {
             var full = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : RoseKit.ApiBase + url;
@@ -1746,7 +1967,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return image;
     }
 
-    /// <summary>R433: a real video element. MediaElement plays remote URLs and
+    /// <summary>a real video element. MediaElement plays remote URLs and
     /// site-relative paths through the deployed server; autoplay/loop/muted are
     /// the element's own attributes.</summary>
     public static System.Windows.Controls.MediaElement Video(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
@@ -1768,7 +1989,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return element;
     }
 
-    /// <summary>R437: an audio element with a play/pause row. The MediaElement
+    /// <summary>an audio element with a play/pause row. The MediaElement
     /// stays hidden; the button and the file name are the whole UI.</summary>
     public static System.Windows.Controls.MediaElement Audio(Panel parent, string url, bool autoplay = false, bool loop = false, bool muted = false)
     {
@@ -1824,7 +2045,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
 
     public static TextBlock Label(Panel parent, string text, RoseStyle? style = null)
     {
-        var block = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
+        var block = new TextBlock { Text = text, TextWrapping = System.Windows.TextWrapping.Wrap, Background = System.Windows.Media.Brushes.Transparent };
         if (style != null) ApplyText(block, style);
         parent.Children.Add(block);
         return block;
@@ -1834,7 +2055,7 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     /// paragraph, and so does this TextBlock - not a stack of Labels.</summary>
     public static TextBlock Rich(Panel parent, (string Text, RoseStyle? Style)[] runs)
     {
-        var block = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        var block = new TextBlock { TextWrapping = System.Windows.TextWrapping.Wrap };
         if (runs.Length > 0 && runs[0].Style != null)
         {
             if (runs[0].Style.Ellipsis == true)
@@ -1861,6 +2082,10 @@ ${hoverRows.join('\n') || '        // no hover rules'}
                     if (style.Strike == true) decos.Add(TextDecorations.Strikethrough[0]);
                     run.TextDecorations = decos;
                 }
+                // vertical-align: sub/super is per-run on the web; WPF's Run
+                // carries it natively through Typography.Variants.
+                if (style.VAlign == "sub") run.Typography.Variants = FontVariants.Subscript;
+                else if (style.VAlign == "super") run.Typography.Variants = FontVariants.Superscript;
             }
             block.Inlines.Add(run);
         }
@@ -1872,9 +2097,10 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     /// content page uses becomes real Inlines, never escaped text.</summary>
     public static TextBlock HtmlLabel(Panel parent, string html, RoseStyle? style = null)
     {
-        var block = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        var block = new TextBlock { TextWrapping = System.Windows.TextWrapping.Wrap };
         if (style != null) ApplyText(block, style);
         var bold = false; var italic = false; var underline = false; string? link = null;
+        string? baseline = null;
         var buffer = new System.Text.StringBuilder();
         System.Action flush = () =>
         {
@@ -1884,6 +2110,11 @@ ${hoverRows.join('\n') || '        // no hover rules'}
             if (bold) run.FontWeight = FontWeights.Bold;
             if (italic) run.FontStyle = FontStyles.Italic;
             if (underline) run.TextDecorations.Add(TextDecorations.Underline);
+            // A literal <sub>/<sup> in {@html} reaches the same WPF typography
+            // the rich-text runs use - the baseline shift is per Inline, not a
+            // label-wide alignment, so the run carries it.
+            if (baseline == "sub") run.Typography.Variants = FontVariants.Subscript;
+            else if (baseline == "super") run.Typography.Variants = FontVariants.Superscript;
             if (link != null)
             {
                 var hyper = new Hyperlink(run) { NavigateUri = new System.Uri(link, System.UriKind.RelativeOrAbsolute) };
@@ -1907,6 +2138,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
                 else if (tag is "/i" or "/em") { flush(); italic = false; }
                 else if (tag is "u") { flush(); underline = true; }
                 else if (tag is "/u") { flush(); underline = false; }
+                else if (tag is "sub" or "sup") { flush(); baseline = tag; }
+                else if (tag is "/sub" or "/sup") { flush(); baseline = null; }
                 else if (tag.StartsWith("a ")) { flush(); var href = System.Text.RegularExpressions.Regex.Match(tag, "href=\\"([^\\"]*)\\""); link = href.Success ? href.Groups[1].Value : "#"; }
                 else if (tag is "/a") { flush(); link = null; }
                 i = end + 1;
@@ -1934,6 +2167,8 @@ ${hoverRows.join('\n') || '        // no hover rules'}
     public static RoseButton Button(Panel parent, string text, RoutedEventHandler onClick, RoseStyle? style = null, RoseStyle? hover = null, bool enabled = true)
     {
         var button = new RoseButton(text, onClick);
+        System.Windows.Automation.AutomationProperties.SetName(button, RoseTheme.Str(text));
+        button.Focusable = true;
         button.ApplyStyle(style);
         if (hover != null) button.SetHover(hover);
         if (!enabled) { button.IsEnabled = false; button.Opacity = 0.6; }
@@ -2010,23 +2245,30 @@ ${hoverRows.join('\n') || '        // no hover rules'}
 
     public static TextBox TextField(Panel parent, string placeholder, RoseApp app, string stateKey, RoseStyle? style = null, bool enabled = true, int maxLength = 0, bool readOnly = false, bool multiline = false, int minLines = 1, bool autofocus = false)
     {
-        var box = new TextBox { Text = RoseTheme.Str(app.V(stateKey)), MinWidth = 220 };
+        var box = new TextBox { Text = RoseTheme.Str(app.V(stateKey)), MinWidth = 220, IsTabStop = true };
+        System.Windows.Automation.AutomationProperties.SetName(box, placeholder ?? "输入框");
         if (style != null) Apply(box, style);
         if (!enabled) box.IsEnabled = false;
         if (maxLength > 0) box.MaxLength = maxLength;
-        // R441: autofocus is the browser's focus-on-mount.
+        // Autofocus is the browser's focus-on-mount.
         if (autofocus) box.Loaded += (_, _) => box.Focus();
-        // R430: a readonly field keeps its text selectable but refuses edits.
+        // A readonly field keeps its text selectable but refuses edits.
         if (readOnly) box.IsReadOnly = true;
-        // R439: a <textarea> accepts returns and shows at least its rows.
+        // A <textarea> accepts returns and shows at least its rows.
         if (multiline)
         {
             box.AcceptsReturn = true;
-            box.TextWrapping = TextWrapping.Wrap;
+            box.TextWrapping = System.Windows.TextWrapping.Wrap;
             box.MinLines = Math.Max(1, minLines);
             box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         }
         box.TextChanged += (_, _) => app.Set(stateKey, box.Text);
+        box.SelectionChanged += (_, _) =>
+        {
+            app.Set("__selectionStart", box.SelectionStart);
+            app.Set("__selectionLength", box.SelectionLength);
+            app.Set("__caretIndex", box.CaretIndex);
+        };
         parent.Children.Add(box);
         return box;
     }
@@ -2038,11 +2280,11 @@ ${hoverRows.join('\n') || '        // no hover rules'}
         return line;
     }
 
-    /// R446: the ISO day a date input writes, and the Date a picker opens on.
+    /// The ISO day a date input writes, and the Date a picker opens on.
     public static string IsoDay(DateTime? day) => day?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? "";
     public static DateTime? DateOf(string iso) => DateTime.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : (DateTime?)null;
 
-    /// R446: a date input is WPF's own DatePicker; the state keeps the ISO day
+    /// A date input is WPF's own DatePicker; the state keeps the ISO day
     /// the web input writes, not a localized string.
     public static DatePicker DateField(Panel parent, RoseApp app, string stateKey, RoseStyle? style = null, string min = "", string max = "")
     {
@@ -2075,9 +2317,26 @@ ${hoverRows.join('\n') || '        // no hover rules'}
  * what an app would need instead, and camera opens the file dialog that
  * honours the local-path contract.
  */
-function nativeKit(native: NativeCapability[]): string {
+function nativeKit(native: NativeCapability[], appInfo: { id: string; version: string; build: string } = { id: '', version: '', build: '' }): string {
   if (!native.length) return '';
   const branches = [
+    native.includes('window') ? `                case "window":
+                {
+                    var title = RoseTheme.Str(opts.TryGetValue("title", out var wt) ? wt : null);
+                    var kind = RoseTheme.Str(opts.TryGetValue("kind", out var wk) ? wk : null);
+                    var width = RoseTheme.Num(opts.TryGetValue("width", out var ww) ? ww : null);
+                    var height = RoseTheme.Num(opts.TryGetValue("height", out var wh) ? wh : null);
+                    var route = RoseTheme.Str(opts.TryGetValue("route", out var wr) ? wr : null);
+                    var host = ${NS}.Windows.RoseToolWindows.Create(route, RoseApp.Current, title, kind, width, height);
+                    if (kind == "modal")
+                    {
+                        host.Owner = System.Windows.Application.Current?.MainWindow;
+                        host.ShowDialog();
+                    }
+                    else host.Show();
+                    return new Dictionary<string, object?> { ["shown"] = true, ["kind"] = kind };
+                }
+` : '',
     native.includes('camera') ? `                case "camera":
                 {
                     // WPF ships no camera capture API: this opens the system
@@ -2128,8 +2387,52 @@ function nativeKit(native: NativeCapability[]): string {
                     return true;
                 }
 ` : '',
+    native.includes('app-info') ? `                case "app-info":
+                    // The identity the export baked into the assembly: the
+                    // page's about screen reads it, no guessing.
+                    var asm = System.Reflection.Assembly.GetEntryAssembly();
+                    return new Dictionary<string, object?>
+                    {
+                        ["id"] = ${JSON.stringify(appInfo.id)},
+                        ["version"] = ${JSON.stringify(appInfo.version)},
+                        ["build"] = ${JSON.stringify(appInfo.build)},
+                        ["platform"] = "dotnet",
+                        ["os"] = Environment.OSVersion.VersionString,
+                        ["device"] = asm?.GetName().Name ?? "",
+                    };
+` : '',
+    native.includes('keep-awake') ? `                case "keep-awake":
+                    // The OS idle-suppression switch. Windows uses
+                    // SetThreadExecutionState; macOS/Linux use the
+                    // caffeinate / xset tools the OS already ships.
+                    var on = opts.GetValueOrDefault("on") is bool b ? b : true;
+                    if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)) {
+                        var flags = on ? (0x80000000U | 0x1U | 0x2U) : 0x80000000U;
+                        RoseSetThreadExecutionState(flags);
+                    } else {
+                        var psi = new System.Diagnostics.ProcessStartInfo(
+                            System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX) ? "caffeinate" : "xset",
+                            System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX) ? (on ? "-d" : "-kill") : (on ? "s off" : "s on")) { UseShellExecute = false, CreateNoWindow = true };
+                        try { System.Diagnostics.Process.Start(psi); } catch (Exception) { return false; }
+                    }
+                    return true;
+` : '',
+    native.includes('check-permission') ? `                case "check-permission":
+                    // The desktop CLR has no runtime permission model of
+                    // its own: the answer is "unknown" (never a
+                    // fabricated "granted").
+                    var name = opts.GetValueOrDefault("name")?.ToString() ?? "";
+                    return new Dictionary<string, object?> { ["name"] = name, ["state"] = "unknown" };
+` : '',
+    native.includes('request-permission') ? `                case "request-permission":
+                    // The one request function: the desktop asks nothing,
+                    // so the answer is the same "unknown" - there is no
+                    // dialog to raise.
+                    var name = opts.GetValueOrDefault("name")?.ToString() ?? "";
+                    return new Dictionary<string, object?> { ["name"] = name, ["state"] = "unknown" };
+` : '',
     native.includes('get-system-info') ? `                case "get-system-info":
-                    // R421: the host OS and runtime the window runs on.
+                    // The host OS and runtime the window runs on.
                     return new Dictionary<string, object?>
                     {
                         ["platform"] = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows) ? "windows"
@@ -2140,7 +2443,7 @@ function nativeKit(native: NativeCapability[]): string {
                     };
 ` : '',
     native.includes('get-network-type') ? `                case "get-network-type":
-                    // R423: a desktop host cannot tell wifi from ethernet, so a
+                    // A desktop host cannot tell wifi from ethernet, so a
                     // reachable network answers "wifi" like the web bridge does.
                     return new Dictionary<string, object?>
                     {
@@ -2185,7 +2488,7 @@ function nativeKit(native: NativeCapability[]): string {
   ].filter(Boolean).join('');
   return `
     /// <summary>The device capabilities this project's pages asked for through
-    // R424: the Win32 power status - the one battery API every Windows host has.
+    // The Win32 power status - the one battery API every Windows host has.
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct RosePowerStatus
     {
@@ -2199,6 +2502,10 @@ function nativeKit(native: NativeCapability[]): string {
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetSystemPowerStatus(out RosePowerStatus status);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SetThreadExecutionState(uint flags);
+    internal static uint RoseSetThreadExecutionState(uint flags) { return SetThreadExecutionState(flags); }
 
     /// <summary>{ level, charging }, or null on a host without a battery.</summary>
     public static Dictionary<string, object?>? Battery()
@@ -2219,7 +2526,7 @@ function nativeKit(native: NativeCapability[]): string {
         }
     }
 
-    /// <summary>R428: a non-modal toast over the main window (WPF has no
+    /// <summary>a non-modal toast over the main window (WPF has no
     /// system toast). The Popup closes itself after two seconds.</summary>
     public static bool Toast(string message)
     {
@@ -2274,7 +2581,7 @@ ${branches}                default:
     }`;
 }
 
-function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}): string {
+function renderKit(apiBase: string, content: Record<string, Array<Record<string, unknown>>> | null, native: NativeCapability[] = [], baked: Record<string, unknown> = {}, appInfo: { id: string; version: string; build: string } = { id: '', version: '', build: '' }): string {
   const contentBlock = content ? `
     /// The project's markdown collections, baked at export time. A page reads
     /// them through RoseContentList / RoseContentGet, the same shape the
@@ -2306,10 +2613,16 @@ function renderKit(apiBase: string, content: Record<string, Array<Record<string,
 
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 
 /// <summary>The data channel and the action protocol over HTTP.</summary>
 public static class RoseKit
 {
+    public static double Number(object? value) => Convert.ToDouble(value ?? 0);
+
     /// <summary>The data channel base: ROSEZM_API overrides the URL baked at export.</summary>
     public static string ApiBase = Environment.GetEnvironmentVariable("ROSEZM_API") ?? ${JSON.stringify(apiBase)};
 
@@ -2330,7 +2643,48 @@ public static class RoseKit
         catch (System.Text.Json.JsonException) { return new Dictionary<string, object?>(); }
         return empty;
     }
-${contentBlock}${nativeKit(native)}
+${contentBlock}${nativeKit(native, appInfo)}
+
+    /// <summary>The globalThis bag: a global a page's effect cleanup (or any
+    /// handler) writes lives here, across routes and renders, the way a web
+    /// global does.</summary>
+    public static readonly Dictionary<string, object?> Globals = new();
+
+    public static object? Global(string key) => Globals.TryGetValue(key, out var v) ? v : null;
+
+    /// <summary>The numeric-fallback read (g.__n || 0) of the global bag.</summary>
+    public static double GlobalNum(string key)
+    {
+        if (!Globals.TryGetValue(key, out var v) || v == null) return 0;
+        try { return Convert.ToDouble(v); } catch { return 0; }
+    }
+
+    public static void PutGlobal(string key, object? value) => Globals[key] = value;
+
+    /// <summary>The JS setInterval: a repeating timer that runs the callback
+    /// body until RoseStopTimer stops it at the page's disposal.</summary>
+    public static object? RoseInterval(int ms, System.Action tick)
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = System.TimeSpan.FromMilliseconds(ms) };
+        timer.Tick += (_, _) => tick();
+        timer.Start();
+        return timer;
+    }
+
+    /// <summary>The JS setTimeout: a one-shot timer; the callback runs once.</summary>
+    public static object? RoseTimeout(int ms, System.Action tick)
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = System.TimeSpan.FromMilliseconds(ms) };
+        timer.Tick += (_, _) => { timer.Stop(); tick(); };
+        timer.Start();
+        return timer;
+    }
+
+    /// <summary>The JS clearInterval/clearTimeout: stop the timer a mount started.</summary>
+    public static void RoseStopTimer(object? timer)
+    {
+        if (timer is System.Windows.Threading.DispatcherTimer t) t.Stop();
+    }
 
     /// <summary>The {#await} reject branch: it always throws, so the catch arm renders.</summary>
     public static object? roseThrow(object? message) => throw new Exception(message?.ToString() ?? "error");
@@ -2346,7 +2700,7 @@ ${contentBlock}${nativeKit(native)}
         next.Add(item);
         return next;
     }
-    /** R287: xs.find(pred) - the first element the predicate accepts, else null. */
+    /** Xs.find(pred) - the first element the predicate accepts, else null. */
     internal static object? FindObj(object? value, Func<object?, bool> pred)
     {
         var items = List(value);
@@ -2354,14 +2708,14 @@ ${contentBlock}${nativeKit(native)}
         return null;
     }
 
-    /** R287: xs.some(pred) - does any element pass. */
+    /** Xs.some(pred) - does any element pass. */
     internal static bool AnyObj(object? value, Func<object?, bool> pred)
     {
         foreach (var item in List(value)) { if (pred(item)) return true; }
         return false;
     }
 
-    /** R288: xs.slice(a[, b]) - the sub-list from a to b (b omitted = to end). */
+    /** Xs.slice(a[, b]) - the sub-list from a to b (b omitted = to end). */
     internal static object? SliceObj(object? value, object? from, object? to)
     {
         var items = List(value);
@@ -2373,21 +2727,21 @@ ${contentBlock}${nativeKit(native)}
         return List(slice.ToArray());
     }
 
-    /** R291: xs.every(pred) - does every element pass (the mirror of AnyObj). */
+    /** Xs.every(pred) - does every element pass (the mirror of AnyObj). */
     internal static bool AllObj(object? value, Func<object?, bool> pred)
     {
         foreach (var item in RoseTheme.AsList(value)) { if (!pred(item)) return false; }
         return true;
     }
 
-    /** R291: xs.indexOf(item) - the first index, or -1. A string searches text. */
+    /** Xs.indexOf(item) - the first index, or -1. A string searches text. */
     internal static int IndexOfObj(object? value, object? item)
     {
         if (value is string text) return text.IndexOf(RoseTheme.Str(item), System.StringComparison.Ordinal);
         return RoseTheme.AsList(value).IndexOf(item);
     }
 
-    /** R291: s.split(sep) - the string broken into a list of its parts. */
+    /** S.split(sep) - the string broken into a list of its parts. */
     internal static object? SplitObj(object? value, string sep)
     {
         var text = RoseTheme.Str(value);
@@ -2422,6 +2776,18 @@ ${contentBlock}${nativeKit(native)}
     }
 
     /// <summary>xs.filter((x) => pred) - the elements the predicate keeps.</summary>
+    public static object? Find(object? value, Func<object?, bool> pred)
+    {
+        foreach (var item in List(value)) if (pred(item)) return item;
+        return null;
+    }
+
+    public static bool Some(object? value, Func<object?, bool> pred)
+    {
+        foreach (var item in List(value)) if (pred(item)) return true;
+        return false;
+    }
+
     public static List<object?> Filter(object? value, Func<object?, bool> pred)
     {
         var next = new List<object?>();
@@ -2479,6 +2845,39 @@ ${contentBlock}${nativeKit(native)}
 
     /// A key event's character, the only part a rose handler reads.
     public static string KeyOf(object? ev) => ev is System.Windows.Input.KeyEventArgs k ? k.Key.ToString() : "";
+    public static bool CtrlOf(object? ev) => ev is System.Windows.Input.KeyEventArgs k && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0;
+    public static bool ShiftOf(object? ev) => ev is System.Windows.Input.KeyEventArgs k && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Shift) != 0;
+    public static bool AltOf(object? ev) => ev is System.Windows.Input.KeyEventArgs k && (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Alt) != 0;
+    public static double XOf(object? ev) => ev is System.Windows.Input.MouseEventArgs m ? m.GetPosition(System.Windows.Application.Current?.MainWindow).X : 0;
+    public static double YOf(object? ev) => ev is System.Windows.Input.MouseEventArgs m ? m.GetPosition(System.Windows.Application.Current?.MainWindow).Y : 0;
+    public static int ButtonOf(object? ev) => ev is System.Windows.Input.MouseButtonEventArgs m && m.ChangedButton == System.Windows.Input.MouseButton.Right ? 2 : 0;
+    public static dynamic RoseUiEvent(object? ev) => new { key = KeyOf(ev), ctrlKey = CtrlOf(ev), shiftKey = ShiftOf(ev), altKey = AltOf(ev), clientX = XOf(ev), clientY = YOf(ev), button = ButtonOf(ev) };
+
+    /// JSON.stringify / JSON.parse for the desktop's untyped state currency.
+    public static string JsonStringify(object? value) => System.Text.Json.JsonSerializer.Serialize(value ?? new Dictionary<string, object?>());
+    public static object? JsonParse(string text)
+    {
+        try { return JsonToObject(System.Text.Json.JsonDocument.Parse(text).RootElement); }
+        catch { return new Dictionary<string, object?>(); }
+    }
+
+    /// The web-shaped fetch(url, {method,headers,body}) -> RoseKit.Fetch(url, method, body).
+    public static System.Threading.Tasks.Task<Dictionary<string, object?>> Fetch(string url, object? options = null)
+    {
+        var method = "GET";
+        string? body = null;
+        if (options is Dictionary<string, object?> o)
+        {
+            if (o.TryGetValue("method", out var m) && m != null) method = RoseTheme.Str(m);
+            if (o.TryGetValue("body", out var b) && b != null) body = RoseTheme.Str(b);
+        }
+        return Fetch(url, method, body);
+    }
+
+    /// A synthetic input event: the field's text rides where e.target.value reads.
+    public static dynamic RoseEvent(dynamic value) => new { target = new { value } };
+    /// The text a named on:input handler reads off its event parameter.
+    public static dynamic EventValue(object? e) => ((dynamic)e!).target.value;
 
     // A middleware wall answers the data channel as it answers a document: a 302
     // to the sign-in page, or a bare 401/403. HttpClient follows a redirect on
@@ -2532,6 +2931,37 @@ ${contentBlock}${nativeKit(native)}
             var first = values.FirstOrDefault();
             if (!string.IsNullOrEmpty(first)) SessionCookie = first;
         }
+    }
+
+    /// <summary>The web's fetch, in the kit's currency: a map with ok and
+    /// status plus the decoded JSON body, so a page reads .ok and .json() the
+    /// way it does off a Response. A missing server is ok=false, never a crash.</summary>
+    public static async System.Threading.Tasks.Task<Dictionary<string, object?>> Fetch(string url, string method = "GET", string? body = null)
+    {
+        var target = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : ApiBase + url;
+        var outMap = new Dictionary<string, object?> { { "ok", false }, { "status", 0 } };
+        try
+        {
+            using var request = new HttpRequestMessage(new HttpMethod(method), target);
+            if (SessionCookie.Length > 0) request.Headers.Add("Cookie", SessionCookie);
+            if (body != null) request.Content = new StringContent(body, System.Text.Encoding.UTF8, body.TrimStart().StartsWith("{") || body.TrimStart().StartsWith("[") ? "application/json" : "application/x-www-form-urlencoded");
+            using var response = await Http.SendAsync(request).ConfigureAwait(false);
+            CaptureCookie(response);
+            var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            outMap["ok"] = (int)response.StatusCode >= 200 && (int)response.StatusCode < 300;
+            outMap["status"] = (int)response.StatusCode;
+            try
+            {
+                var map = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object?>>(text);
+                if (map != null) foreach (var kv in map) outMap[kv.Key] = kv.Value;
+            }
+            catch (Exception) { outMap["body"] = text; }
+        }
+        catch (Exception)
+        {
+            // A missing server is a data-less screen, not a crash.
+        }
+        return outMap;
     }
 
     /// <summary>The JSON half of a render: the state the page's $data produced.</summary>
@@ -2620,6 +3050,227 @@ ${contentBlock}${nativeKit(native)}
 `;
 }
 
+
+interface WindowsConfig {
+  material: 'mica' | 'mica-alt' | 'acrylic' | 'none';
+  titlebar: 'immersive' | 'system';
+  minWidth: number;
+  minHeight: number;
+  width: number;
+  height: number;
+  sidebarMaterial: 'mica-alt' | 'mica' | 'acrylic' | 'none';
+  popupMaterial: 'acrylic' | 'mica' | 'none';
+  theme: 'system' | 'light' | 'dark';
+}
+
+function readWindowsConfig(projectRoot: string): WindowsConfig {
+  const fallback: WindowsConfig = {
+    material: 'mica', titlebar: 'immersive', minWidth: 1024, minHeight: 640,
+    width: 1440, height: 900, sidebarMaterial: 'mica-alt', popupMaterial: 'acrylic', theme: 'system',
+  };
+  const file = path.join(projectRoot, 'windows.config.json');
+  if (!fs.existsSync(file)) return fallback;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    return {
+      material: String(raw.material ?? fallback.material) as WindowsConfig['material'],
+      titlebar: String(raw.titlebar ?? fallback.titlebar) as WindowsConfig['titlebar'],
+      minWidth: Number(raw.minWidth ?? fallback.minWidth), minHeight: Number(raw.minHeight ?? fallback.minHeight),
+      width: Number(raw.width ?? fallback.width), height: Number(raw.height ?? fallback.height),
+      sidebarMaterial: String(raw.sidebarMaterial ?? fallback.sidebarMaterial) as WindowsConfig['sidebarMaterial'],
+      popupMaterial: String(raw.popupMaterial ?? fallback.popupMaterial) as WindowsConfig['popupMaterial'],
+      theme: String(raw.theme ?? fallback.theme) as WindowsConfig['theme'],
+    };
+  } catch { return fallback; }
+}
+
+
+/** One generated WPF Window class per src/windows/*.rose route. The content is
+ *  the same rosezm component emitter used by the page, so ToolWindow and modal
+ *  dialogs are real native windows with real .rose content, not overlays. */
+
+/** Window-content components may call pure helpers imported from src/lib.
+ *  Their generated C# members take RoseApp, so route bare call sites through
+ *  the active app instance. */
+function finishGeneratedWindowCSharp(cs: string): string {
+  cs = finishGeneratedCSharp(cs);
+  for (const name of ['quickActions', 'studyCategories', 'modules', 'ribbonTabs', 'rowsSeed', 'tabsSeed', 'ribbonSeed', 'outlineSeed', 'statsSeed', 'relatedSeed', 'backlinksSeed', 'categoriesSeed', 'messagesSeed']) {
+    cs = cs.replace(new RegExp(`(?<!app\\.)\\b${name}\\(\\s*\\)`, 'g'), `${name}(app)`);
+  }
+  return cs;
+}
+
+function renderWindowHosts(views: Array<{ name: string; cls: string }>): string {
+  const branches = views.map((v) => `            case "${v.name}": ${v.cls}View.Build(app, "${v.cls}Window", body); break;`).join('\n');
+  return `namespace ${NS}.Windows;
+
+using System.Windows;
+using System.Windows.Controls;
+${views.length ? `using ${NS}.Components;\n` : ''}
+public static class RoseToolWindows
+{
+    public static Window Create(string route, RoseApp app, string title, string kind, double width, double height)
+    {
+        var host = new Window
+        {
+            Title = title,
+            Width = width > 0 ? width : 520,
+            Height = height > 0 ? height : 560,
+            MinWidth = 320,
+            MinHeight = 240,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ShowInTaskbar = kind != "tool",
+            ResizeMode = ResizeMode.CanResize,
+            Background = System.Windows.Media.Brushes.Transparent,
+        };
+        var body = new Grid();
+        host.Content = body;
+        switch (route)
+        {
+${branches || '            default: break;'}
+        }
+        host.Owner = Application.Current?.MainWindow;
+        host.SourceInitialized += (_, _) => WindowsMaterial.Apply(host, "acrylic");
+        WindowsMaterial.FadeIn(body, 180);
+        return host;
+    }
+}
+`;
+}
+
+function renderWindowsManifest(): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>`;
+}
+
+function renderWindowsMaterial(): string {
+  return String.raw`namespace ${NS};
+
+using System;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
+
+/// <summary>Official Windows system backdrops, not a CSS simulation.
+/// Mica/Mica Alt use DWM_SYSTEMBACKDROP_TYPE (Windows 11 22H2+); Acrylic uses
+/// SetWindowCompositionAttribute (Windows 10 22H2+ / Windows 11). DWM calls are
+/// no-ops on unsupported hosts, so the same binary keeps a solid system brush.</summary>
+public static class WindowsMaterial
+{
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    private const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    private const int DWMSBT_MAINWINDOW = 2;  // Mica
+    private const int DWMSBT_TABBEDWINDOW = 3; // Mica Alt
+    private const int DWMSBT_TRANSIENTWINDOW = 4; // Acrylic
+    private const int ACCENT_ENABLE_ACRYLICBLURBEHIND = 4;
+
+    [DllImport("dwmapi.dll", SetLastError = true)]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct AccentPolicy { public int AccentState; public int AccentFlags; public uint GradientColor; public int AnimationId; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowCompositionAttributeData { public int Attribute; public IntPtr Data; public int SizeOfData; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+    public static bool IsWindows11 => Environment.OSVersion.Version >= new Version(10, 0, 22000);
+
+    /// <summary>Apply a system backdrop to a real HWND. 'mica-alt' is the
+    /// tabbed-window variant; 'acrylic' is the transient-window variant.</summary>
+    public static void Apply(Window window, string material)
+    {
+        if (window == null) return;
+        var hwnd = new WindowInteropHelper(window).EnsureHandle();
+        window.Background = Brushes.Transparent;
+        if (IsDark()) window.Foreground = Brushes.White;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref System.Runtime.CompilerServices.Unsafe.AsRef(IsDark() ? 1 : 0), sizeof(int));
+        var round = 2; // DWMWCP_ROUND: Windows 11 system corner, never hand-clipped.
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref round, sizeof(int));
+        if (!IsWindows11) { ApplyAcrylic(window, material == "acrylic" ? 0xCC202020u : 0xAA202020u); return; }
+        int kind = material == "mica-alt" ? DWMSBT_TABBEDWINDOW
+            : material == "acrylic" ? DWMSBT_TRANSIENTWINDOW
+            : material == "mica" ? DWMSBT_MAINWINDOW : 0;
+        if (kind != 0) DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ref kind, sizeof(int));
+        if (material == "acrylic") ApplyAcrylic(window, 0xCC202020u);
+    }
+
+    public static void ApplyAcrylic(Window window, uint tint)
+    {
+        var hwnd = new WindowInteropHelper(window).EnsureHandle();
+        var policy = new AccentPolicy { AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND, GradientColor = tint };
+        var size = Marshal.SizeOf<AccentPolicy>();
+        var ptr = Marshal.AllocHGlobal(size);
+        try {
+            Marshal.StructureToPtr(policy, ptr, false);
+            var data = new WindowCompositionAttributeData { Attribute = 19, Data = ptr, SizeOfData = size };
+            SetWindowCompositionAttribute(hwnd, ref data);
+        } finally { Marshal.FreeHGlobal(ptr); }
+    }
+
+    /// <summary>System AppsUseLightTheme, with a theme override available to
+    /// rosezm.config.js consumers. Everything painted in XAML uses dynamic
+    /// resources so a theme change repaints without rebuilding the tree.</summary>
+    /// <summary>Swap the DynamicResource palette when Windows changes theme.
+    /// System accent colour follows UISettings.GetColorValue(Accent).</summary>
+    public static void RefreshThemeResources()
+    {
+        var app = Application.Current;
+        if (app == null) return;
+        bool dark = IsDark();
+        void Put(string key, object value) { app.Resources[key] = value; }
+        Put("TextLight", dark ? Color.FromRgb(0xF3,0xF3,0xF3) : Color.FromRgb(0x1A,0x1A,0x1A));
+        Put("MutedLight", dark ? Color.FromRgb(0xB0,0xB0,0xB0) : Color.FromRgb(0x61,0x61,0x61));
+        Put("CanvasLight", dark ? Colors.Black : Colors.White);
+        Put("CardLight", dark ? Color.FromRgb(0x25,0x25,0x25) : Color.FromRgb(0xF8,0xF8,0xF8));
+        Put("StrokeLight", dark ? Color.FromArgb(0x28,0xFF,0xFF,0xFF) : Color.FromArgb(0x1F,0,0,0));
+        Put("HoverLight", dark ? Color.FromArgb(0x19,0xFF,0xFF,0xFF) : Color.FromArgb(0x14,0,0,0));
+        Put("PressedLight", dark ? Color.FromArgb(0x2C,0xFF,0xFF,0xFF) : Color.FromArgb(0x24,0,0,0));
+        Put("SelectedLight", dark ? Color.FromArgb(0x3A,0x5E,0xEA,0xD4) : Color.FromArgb(0x26,0x0F,0x76,0x6E));
+        Put("BrandLight", dark ? Color.FromRgb(0x5E,0xEA,0xD4) : Color.FromRgb(0x0F,0x76,0x6E));
+        Put("OnBrandBrush", dark ? Color.FromRgb(0x08,0x20,0x1E) : Colors.White);
+    }
+
+    /// <summary>Windows standard decelerate easing for 150-200ms state changes.</summary>
+    public static void FadeIn(FrameworkElement element, double milliseconds = 180)
+    {
+        element.Opacity = 0;
+        element.RenderTransform = new ScaleTransform(0.98, 0.98);
+        element.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+        var ease = new System.Windows.Media.Animation.CubicEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut };
+        var duration = TimeSpan.FromMilliseconds(milliseconds);
+        var fade = new System.Windows.Media.Animation.DoubleAnimation(0, 1, duration) { EasingFunction = ease };
+        var scale = new System.Windows.Media.Animation.DoubleAnimation(0.98, 1, duration) { EasingFunction = ease };
+        element.BeginAnimation(UIElement.OpacityProperty, fade);
+        ((ScaleTransform)element.RenderTransform).BeginAnimation(ScaleTransform.ScaleXProperty, scale);
+        ((ScaleTransform)element.RenderTransform).BeginAnimation(ScaleTransform.ScaleYProperty, scale);
+    }
+
+    public static bool IsDark()
+    {
+        var mode = Environment.GetEnvironmentVariable("ROSEZM_THEME") ?? "system";
+        if (mode == "dark") return true;
+        if (mode == "light") return false;
+        try {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("AppsUseLightTheme") is int light && light == 0;
+        } catch { return false; }
+    }
+}`;
+}
+
 function renderCsproj(app: AppIdentity): string {
   return `<Project Sdk="Microsoft.NET.Sdk">
 
@@ -2643,6 +3294,7 @@ function renderCsproj(app: AppIdentity): string {
     <PublishSingleFile Condition="'\$(Configuration)' == 'Release'">true</PublishSingleFile>
     <SelfContained Condition="'\$(Configuration)' == 'Release'">false</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -2657,8 +3309,64 @@ function renderAppXaml(): string {
   return `<Application x:Class="${NS}.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:system="clr-namespace:System;assembly=mscorlib"
              StartupUri="MainWindow.xaml">
-    <Application.Resources />
+    <!-- Dynamic system resources. WindowsMaterial refreshes these when the
+         system AppsUseLightTheme changes; no colour is a hard-coded view value. -->
+    <Application.Resources>
+        <FontFamily x:Key="AppFont">Segoe UI Variable, Segoe UI</FontFamily>
+        <system:Double x:Key="TitleFontSize">14</system:Double>
+        <system:Double x:Key="BodyFontSize">13</system:Double>
+        <system:Double x:Key="CaptionFontSize">12</system:Double>
+        <system:Double x:Key="PanelRadius">8</system:Double>
+        <system:Double x:Key="ControlRadius">4</system:Double>
+        <system:Double x:Key="DialogRadius">12</system:Double>
+        <system:Double x:Key="GridUnit">8</system:Double>
+        <Duration x:Key="StateDuration">0:0:0.16</Duration>
+        <Duration x:Key="PanelDuration">0:0:0.2</Duration>
+        <!-- Windows 11 style: thin overlay scrollbar, wider on hover, no heavy chrome. -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Width" Value="6" />
+            <Setter Property="Background" Value="Transparent" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Width" Value="12" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="FrameworkElement">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+        </Style>
+        <Color x:Key="BrandLight">#FF0F766E</Color>
+        <Color x:Key="BrandDark">#FF5EEAD4</Color>
+        <Color x:Key="TextLight">#FF1A1A1A</Color>
+        <Color x:Key="TextDark">#FFF3F3F3</Color>
+        <Color x:Key="MutedLight">#FF616161</Color>
+        <Color x:Key="MutedDark">#FFB0B0B0</Color>
+        <Color x:Key="CanvasLight">#FFFFFFFF</Color>
+        <Color x:Key="CanvasDark">#FF000000</Color>
+        <Color x:Key="CardLight">#FFF8F8F8</Color>
+        <Color x:Key="CardDark">#FF252525</Color>
+        <Color x:Key="StrokeLight">#1F000000</Color>
+        <Color x:Key="StrokeDark">#28FFFFFF</Color>
+        <Color x:Key="HoverLight">#14000000</Color>
+        <Color x:Key="HoverDark">#19FFFFFF</Color>
+        <Color x:Key="PressedLight">#24000000</Color>
+        <Color x:Key="PressedDark">#2CFFFFFF</Color>
+        <Color x:Key="SelectedLight">#260F766E</Color>
+        <Color x:Key="SelectedDark">#3A5EEAD4</Color>
+        <SolidColorBrush x:Key="TextBrush" Color="{DynamicResource TextLight}" />
+        <SolidColorBrush x:Key="MutedBrush" Color="{DynamicResource MutedLight}" />
+        <SolidColorBrush x:Key="CanvasBrush" Color="{DynamicResource CanvasLight}" />
+        <SolidColorBrush x:Key="CardBrush" Color="{DynamicResource CardLight}" />
+        <SolidColorBrush x:Key="StrokeBrush" Color="{DynamicResource StrokeLight}" />
+        <SolidColorBrush x:Key="HoverBrush" Color="{DynamicResource HoverLight}" />
+        <SolidColorBrush x:Key="PressedBrush" Color="{DynamicResource PressedLight}" />
+        <SolidColorBrush x:Key="SelectedBrush" Color="{DynamicResource SelectedLight}" />
+        <SolidColorBrush x:Key="BrandBrush" Color="{DynamicResource BrandLight}" />
+        <SolidColorBrush x:Key="OnBrandBrush" Color="#FFFFFFFF" />
+    </Application.Resources>
 </Application>
 `;
 }
@@ -2667,36 +3375,65 @@ function renderAppXamlCs(): string {
   return `namespace ${NS};
 
 using System.Windows;
+using Microsoft.Win32;
 
 public partial class App : Application
 {
+    protected override void OnStartup(System.Windows.StartupEventArgs e)
+    {
+        WindowsMaterial.RefreshThemeResources();
+        SystemEvents.UserPreferenceChanged += (_, _) => Dispatcher.Invoke(WindowsMaterial.RefreshThemeResources);
+        base.OnStartup(e);
+    }
 }
 `;
 }
 
-function renderMainXaml(app: AppIdentity): string {
-  const appName = app.name;
+function renderMainXaml(app: AppIdentity, win: WindowsConfig): string {
+  const appName = xmlEscape(app.name);
   return `<Window x:Class="${NS}.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="${appName}" Height="800" Width="1100">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <ContentControl x:Name="Host" Margin="16" />
-    </ScrollViewer>
+        Title="${appName}" Height="${win.height}" Width="${win.width}"
+        MinHeight="${win.minHeight}" MinWidth="${win.minWidth}"
+        Background="Transparent" WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResize" SnapsToDevicePixels="True"
+        UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="40" CornerRadius="12" GlassFrameThickness="0"
+                      ResizeBorderThickness="8" UseAeroCaptionButtons="True" />
+    </WindowChrome.WindowChrome>
+    <Grid x:Name="Root">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border x:Name="TitleBar" Grid.Row="0" Background="Transparent" />
+        <ContentControl x:Name="Host" Grid.Row="1" />
+    </Grid>
 </Window>
 `;
 }
 
-function renderMainXamlCs(): string {
+function renderMainXamlCs(win: WindowsConfig): string {
   return `namespace ${NS};
 
 using System.Windows;
+using System.Windows.Input;
 
 public partial class MainWindow : Window
 {
     public MainWindow()
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => WindowsMaterial.Apply(this, "${win.material}");
+        TitleBar.MouseLeftButtonDown += (_, _) => DragMove();
+        TitleBar.MouseLeftButtonDown += (_, e) => { if (e.ClickCount == 2) WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; };
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.System && e.SystemKey == Key.F4) e.Handled = true;
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.W) e.Handled = true;
+        };
         new RoseApp(Host).Show();
     }
 }
@@ -2737,6 +3474,7 @@ using static ${NS}.RoseKit;
 /// <summary>The window host, the shared state and the route table.</summary>
 public sealed class RoseApp
 {
+    public static RoseApp? Current { get; private set; }
     private static readonly string[] PersistKeys = {${persistKeys.map((k) => JSON.stringify(k)).join(', ')}};
     private static readonly string[] RouteNames = {${routeNames}};
     private static readonly string[] RoutePatterns = {${routePatterns}};
@@ -2750,11 +3488,20 @@ public sealed class RoseApp
     public Dictionary<string, string> Params { get; } = new();
     public string Route { get; private set; } = "/";
     private readonly Stack<string> history = new();
+    private readonly System.Collections.Generic.Dictionary<string, System.Action> disposeHooks = new();
+    /// <summary>True while a page's Build() runs. An effect writes state at the
+    /// head of that pass, and a rebuild started from inside it would recurse.</summary>
+    private bool building;
 
     public RoseApp(ContentControl host)
     {
+        Current = this;
         this.host = host;
         this.host.Background = Brushes.White;
+        // The window's Closed event is this target's disposal moment: the
+        // cleanups a page's effects returned run there, once the window goes.
+        var window = System.Windows.Window.GetWindow(host) ?? System.Windows.Application.Current?.MainWindow;
+        if (window != null) window.Closed += (_, _) => Dispose();
         // A $persist field starts from the on-disk store when it has been
         // written before - that is what makes it survive a restart.
         foreach (var pair in Store) if (Persisted.Contains(pair.Key)) State[pair.Key] = pair.Value;
@@ -2769,6 +3516,21 @@ public sealed class RoseApp
     {
         State[key] = value;
         if (Persisted.Contains(key)) { Store[key] = value; SaveStore(); }
+    }
+
+    /// <summary>A page registers the cleanup its effect returned. The key is
+    /// per effect, so a re-render replaces the registration instead of
+    /// stacking a copy of it every build pass.</summary>
+    public void OnDispose(string key, System.Action hook) => disposeHooks[key] = hook;
+
+    /// <summary>The window's Closed event: run and clear every registered
+    /// cleanup, the way a web route's disposal does.</summary>
+    public void Dispose()
+    {
+        if (disposeHooks.Count == 0) return;
+        var hooks = new System.Collections.Generic.List<System.Action>(disposeHooks.Values);
+        disposeHooks.Clear();
+        foreach (var hook in hooks) hook();
     }
 
     private static System.Collections.Generic.Dictionary<string, object?> LoadStore()
@@ -2871,6 +3633,9 @@ public sealed class RoseApp
 
     private void Render(bool followWall)
     {
+        // A render asked for from inside a page build is the build it is already
+        // in: running it again would build the page on top of itself forever.
+        if (building) return;
         var panel = new StackPanel { Orientation = Orientation.Vertical };
         var route = Route ?? "/";
 
@@ -2887,14 +3652,19 @@ ${paramSeeds.length ? paramSeeds : '            // (no dynamic routes)'}
         // the page has no server data: go where it points.
         if (FollowWall(route, followWall)) return;
 
-${branches.join('\n')}
-        if (history.Count > 0)
+        building = true;
+        try
         {
-            var back = new Button { Content = "← Back" };
-            back.Click += (_, _) => Back();
-            panel.Children.Add(back);
+${branches.join('\n')}
+            if (history.Count > 0)
+            {
+                var back = new Button { Content = "← Back" };
+                back.Click += (_, _) => Back();
+                panel.Children.Add(back);
+            }
+            IndexPage.Build(this, panel);
         }
-        IndexPage.Build(this, panel);
+        finally { building = false; }
 
         host.Content = panel;
     }
@@ -2922,15 +3692,45 @@ interface NetCtx {
   warnings: string[];
   file: string;
   stateNames: Set<string>;
-  /** R191: `$derived` name -> its source expression, re-evaluated per read. */
+  /** `$derived` name -> its source expression, re-evaluated per read. */
   derivedExprs?: Map<string, string>;
   stateTypes: Map<string, string>;
   mapBinds: Set<string>;
-  components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage }>;
+  components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage; lc?: ComponentLc | null }>;
+  /** Innermost-open {#each} row counters, outermost first. A component call
+   *  site appends them to its instance id, so each row is its own keyed
+   *  instance; `used` flips when a call site actually read the counter. */
+  rowIndices?: Array<{ name: string; used: { hit: boolean } }>;
+  /** {#each} item variable -> the $state root its items expression names, when
+   *  the source is a plain state read. A row-field two-way binding writes back
+   *  through it. */
+  eachRoots?: Map<string, string>;
+  /** A counting marker the <ol> emitter installs around its children: an <li>
+   *  inside reads and increments it, so its marker is "1. ", "2. ", ... */
+  olCounter?: { n: number };
+  /** The "N. " string an <ol>-installed counter handed this <li>. */
+  olMarker?: string;
+  /** The bullet (or the ordered number) this <li> prefixes its text with. */
+  liMarker?: string;
+  /** The `::marker` model this <li> earned - the glyph paints in ITS colour. */
+  liMarkerStyle?: StyleModel | null;
+  /** Per component (lowercased name), in call-site order, whether that call
+   *  site sat inside an {#each}: the page's hoisted mount moment skips those -
+   *  the call site mounts and disposes them per row instead. */
+  compSiteEach?: Map<string, boolean[]>;
   /** The page's own top-level functions and how many parameters each declares:
    *  every emitted one takes the app first, so a call site has to match. */
   fnNames?: Set<string>;
   fnArity?: Map<string, number>;
+  /** Every top-level function the page declares, exported or not: a {#await}
+   *  head may call one. */
+  pageFns?: Set<string>;
+  /** The subset declared `async function` - emitted as async Task members, so
+   *  a {#await} head on one is awaited for real. */
+  asyncFns?: Set<string>;
+  /** The async functions whose body the target cannot express: a head on one
+   *  degrades into the catch branch instead of resolving a stub's null. */
+  asyncFnsDead?: Set<string>;
   /** Zero-argument arrow consts (const docs = () => EXPR): inlined at the call
    *  site, because there is no method the emitter would otherwise produce. */
   arrowFns?: Map<string, string>;
@@ -2959,14 +3759,22 @@ interface NetCtx {
   forms: FormInfo[];
   /** The enclosing form's submit handler code, while emitting its children. */
   formSubmit: string | null;
-  /** R124: `{#defer}` flags - each starts false and its hold flips it true. */
+  /** `{#defer}` flags - each starts false and its hold flips it true. */
   deferred: Array<{ name: string; hold: number }>;
-  /** `{#await}` slots already opened, so each gets its own local names. */
-  awaits: Array<{ value: string; err: string; failed: string; expr: string }>;
+  /** `{#await}` slots already opened, so each gets its own local names. An
+   *  async head also carries the static flip state and its runner's name. */
+  awaits: Array<{ value: string; err: string; failed: string; expr: string; done?: string; kicked?: string; runner?: string }>;
   /** A module const inlined into a template expression. */
   scriptConsts: Map<string, string> | undefined;
   /** The component props this file may reference as identifiers. */
   componentProps: Set<string>;
+  /** Call sites of each component (by lowercased name) emitted so far, in
+   *  document order - the per-instance id is `${CompName}${n}`, n 1-based. */
+  compCalls?: Map<string, number>;
+  /** Speller for an app-state key at kit-helper call sites: a page passes the
+   *  bare name, a component with own $state passes the per-instance keyed
+   *  form (`instanceId + ":name"`), because two instances must not share. */
+  stateKey?: (name: string) => string;
   /** The page's first exported action, run by a submit button with no handler. */
   pageAction: string | null;
 }
@@ -2975,9 +3783,54 @@ function emit(line: string, ctx: NetCtx): void {
   ctx.lines.push('        '.repeat(ctx.depth) + line);
 }
 
+/** The components this page's tree instantiates, in declaration order: the
+ *  pages whose mount moment carries a component's lifecycle. Nested component
+ *  usage does not reach here - this target renders a component's own template
+ *  without a component registry, so only direct page-level tags count. */
+function usedComponents(
+  nodes: IrNode[],
+  components: Array<{ name: string; cls: string; lc: ComponentLc | null }>,
+): Array<{ name: string; cls: string; lc: ComponentLc | null }> {
+  const tags = new Set<string>();
+  const walk = (list: IrNode[]): void => {
+    for (const n of list) {
+      if (n.kind === 'element') {
+        tags.add(n.tag.toLowerCase());
+        walk(n.children);
+      } else if (n.kind === 'if') {
+        for (const b of n.branches) walk(b.children);
+      } else if (n.kind === 'each' || n.kind === 'block') {
+        walk(n.children);
+        if (n.fallback) walk(n.fallback);
+      } else if (n.kind === 'await') {
+        walk(n.pending);
+        walk(n.then);
+        walk(n.catch);
+      }
+    }
+  };
+  walk(nodes);
+  return components.filter((c) => tags.has(c.name.toLowerCase()));
+}
+
+/** Whether a component call site sits anywhere inside these nodes - a nested
+ *  {#if}, {#each} or slot content included. The enclosing {#each} spends its
+ *  row counter only then, so a component-free loop emits byte-identical C#. */
+function treeHasComponentCall(nodes: IrNode[], names: Set<string>): boolean {
+  const walk = (list: IrNode[]): boolean =>
+    list.some((n) => {
+      if (n.kind === 'element') return names.has(n.tag.toLowerCase()) || walk(n.children);
+      if (n.kind === 'if') return n.branches.some((b) => walk(b.children));
+      if (n.kind === 'each' || n.kind === 'block') return walk(n.children) || (n.fallback ? walk(n.fallback) : false);
+      if (n.kind === 'await') return walk(n.pending) || walk(n.then) || walk(n.catch);
+      return false;
+    });
+  return walk(nodes);
+}
+
 function renderPage(
   page: { route: string; cls: string; nodes: IrNode[]; script: string; params: string[] },
-  components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage }>,
+  components: Array<{ name: string; cls: string; script: string | null; nodes: IrNode[]; slots: SlotUsage; lc: ComponentLc | null }>,
   styles: NetStyles,
   warnings: string[],
   content: Record<string, Array<Record<string, unknown>>> | null,
@@ -2995,8 +3848,12 @@ function renderPage(
   // A `var posts = ...list('posts')` is not a literal, so moduleBinds skips it;
   // the exporter knows what it expands to and emits it as a typed call.
   const contentBinds = content && serverGlobals.length ? contentBindNames(page.script ?? '') : [];
+  // The page-local holders the mount/cleanup bodies write (`let timer = null`):
+  // they become one writable field per page instead of a read-only bind, so the
+  // mount moment can store and the disposal moment read the same handle.
+  const lcFields = lifecyclePageFields(pageScript, new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data]));
   const binds = [
-    ...moduleBinds(pageScript),
+    ...moduleBinds(pageScript).filter((b) => !lcFields.includes(b.name)),
     ...contentBinds.map((name) => {
       const decl = new RegExp(`(?:const|let|var)\\s+${name}\\s*(?::[^=;\\n]*)?=`).exec(page.script ?? '');
       const init = decl ? page.script!.slice(decl.index + decl[0].length).split('\n')[0].trim().replace(/;\s*$/, '') : 'null';
@@ -3019,6 +3876,9 @@ function renderPage(
     file: page.cls,
     fnNames: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
     fnArity: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => [m[1], m[2].trim() ? m[2].split(',').length : 0] as [string, number])),
+    pageFns: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
+    asyncFns: new Set([...(page.script ?? '').matchAll(/^[ \t]*(?:export\s+)?async\s+function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
+    asyncFnsDead: new Set<string>(),
     arrowFns: new Map([...(page.script ?? '').matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*\)\s*=>\s*([^;\n]+);?/gm)].map((m) => [m[1], m[2].trim()] as [string, string])),
     stateNames,
     derivedExprs: new Map(facts.derived.map((d) => [d.name, d.expr])),
@@ -3026,6 +3886,8 @@ function renderPage(
     deferred: [],
     scriptConsts: scriptConstsFor(page.script, stateNames),
     componentProps: new Set(),
+    compCalls: new Map<string, number>(),
+    compSiteEach: new Map<string, boolean[]>(),
     forms: collectForms(page.nodes),
     formSubmit: null,
     stateTypes,
@@ -3043,6 +3905,13 @@ function renderPage(
     counter: { n: 0, c: 0 },
     pageAction,
   };
+  // An async function whose body the target cannot express still becomes a
+  // stub, but a {#await} head on one must not resolve that stub's null into
+  // the then branch - the block degrades into the catch instead.
+  for (const fn of ctx.asyncFns!) {
+    const body = asyncFnBody(page.script ?? '', fn);
+    if (body && asyncBodyRefusal(body, ctx.asyncFns!)) ctx.asyncFnsDead!.add(fn);
+  }
   noteWpf(rootModel, '<body>', ctx);
   emit(`var pageRoot = RoseTheme.Card(parent, ${csStyle(rootModel)});`, ctx);
   emitNodes(page.nodes, ctx);
@@ -3057,10 +3926,10 @@ function renderPage(
   const initialState = [
     ...facts.state.map((s) => `        state.TryAdd("${s.name}", ${csLiteral(initialOf(page.script, s.name).trim().replace(/^\(([\s\S]*)\)$/, '$1'))});`),
     ...facts.data.map((d) => `        state.TryAdd("${d}", null);`),
-    // R124: a `{#defer}` flag is state, so it seeds like any other key.
+    // A `{#defer}` flag is state, so it seeds like any other key.
     ...ctx.deferred.map((d) => `        state.TryAdd("${d.name}", false);`),
   ].join('\n');
-  // R124: the hold is a one-shot DispatcherTimer. It is armed under an `armed`
+  // The hold is a one-shot DispatcherTimer. It is armed under an `armed`
   // key rather than unconditionally, because Build() runs again on every render
   // - a fresh timer per render would re-render, arming the next: a storm at the
   // hold interval, forever.
@@ -3072,8 +3941,75 @@ function renderPage(
             __deferTimer${d.name}.Start();
         }`).join('\n');
   const derived = facts.derived.map((d) => `        state["${d.name}"] = ${csExpr(d.expr, { ...ctx, lines: [], depth: 1 })};`).join('\n');
-  const actions = translateHandlers(page.script, facts, page, known, stateTypes, warnings);
+  const effectNames: string[] = [];
+  const disposeNames: string[] = [];
+  const mountNames: string[] = [];
+  const cleanupNames: string[] = [];
+  const actions = translateHandlers(page.script, facts, page, known, stateTypes, warnings, effectNames, disposeNames, mountNames, cleanupNames, lcFields);
+  // Build() is the recompute pass, so an effect runs at the head of it: the
+  // tree below renders the values the effect just wrote. The cleanup it
+  // returned registers for the window's Closed event - the disposal moment.
+  const effectCalls = effectNames.length ? '\n' + effectNames.map((n) => `        ${n}(app);`).join('\n') : '';
+  const disposeWiring = disposeNames.length ? '\n' + disposeNames.map((n, i) => `        app.OnDispose(app.Route + "#${i}", () => ${n}(app));`).join('\n') : '';
+  // Components inline into the parent's tree: their mount bodies join this
+  // page's one-shot mount moment (armed once per page class, the same flag the
+  // page's own mounts use), and their cleanups ride this page's dispose drain
+  // under a key naming the instance, so a re-render replaces instead of stacks.
+  // A component with own $state runs once per instance id - its mount body
+  // reads the keyed state - while a stateless one keeps the single type call.
+  // Call sites inside an {#each} are the exception: their mounts run per row at
+  // the call site, keyed by the runtime instance id, so the hoisted wiring
+  // skips them.
+  const compUsers = usedComponents(page.nodes, components);
+  const compMounts = compUsers
+    .flatMap((c) => {
+      if (!c.lc) return [];
+      if (!c.lc.keyed) return c.lc.mounts.map((m) => `            ${c.cls}View.${m}(app);`);
+      const total = ctx.compCalls?.get(c.name.toLowerCase()) ?? 0;
+      const inLoop = ctx.compSiteEach?.get(c.name.toLowerCase()) ?? [];
+      return Array.from({ length: total }, (_, k) => (inLoop[k] ? [] : c.lc!.mounts.map((m) => `            ${c.cls}View.${m}(app, "${c.cls}${k + 1}");`))).flat();
+    });
+  const compCleanups = compUsers
+    .flatMap((c) => {
+      if (!c.lc) return [];
+      if (!c.lc.keyed) return c.lc.cleanups.map((m, i) => `        app.OnDispose(app.Route + "#lcc${c.cls}${i}", () => ${c.cls}View.${m}(app));`);
+      const total = ctx.compCalls?.get(c.name.toLowerCase()) ?? 0;
+      const inLoop = ctx.compSiteEach?.get(c.name.toLowerCase()) ?? [];
+      return Array.from({ length: total }, (_, k) => (inLoop[k] ? [] : c.lc!.cleanups.map((m, i) => `        app.OnDispose(app.Route + "#lcc${c.cls}${i}${c.cls}${k + 1}", () => ${c.cls}View.${m}(app, "${c.cls}${k + 1}"));`))).flat();
+    });
+  const mountWiring = (mountNames.length || compMounts.length)
+    ? '\n        if (!__mounted)\n        {\n            __mounted = true;\n'
+      + [...mountNames.map((n) => `            ${n}(app);`), ...compMounts].join('\n') + '\n        }'
+    : '';
+  const cleanupWiring = (cleanupNames.length || compCleanups.length)
+    ? '\n' + [...cleanupNames.map((n, i) => `        app.OnDispose(app.Route + "#lc${i}", () => ${n}(app));`), ...compCleanups].join('\n')
+    : '';
+  const lcFieldDecls = [
+    ...lcFields.map((f) => `    private static object? ${f};`),
+    ...((mountNames.length || compMounts.length) ? ['    private static bool __mounted;'] : []),
+  ].join('\n');
   const routeSeed = page.params.map((p) => `        if (app.Param("${p}").Length > 0 && !state.ContainsKey("${p}")) state["${p}"] = app.Param("${p}");`).join('\n');
+  const awaitMembers = ctx.awaits.filter((a) => a.runner).map((a) => `
+    private static object? ${a.value};
+    private static string? ${a.err};
+    private static bool ${a.failed};
+    private static bool ${a.done};
+    private static bool ${a.kicked};
+
+    private static async System.Threading.Tasks.Task ${a.runner}(RoseApp app)
+    {
+        try
+        {
+            ${a.value} = await (${a.expr});
+        }
+        catch (Exception __awaitEx)
+        {
+            ${a.err} = __awaitEx.Message;
+            ${a.failed} = true;
+        }
+        ${a.done} = true;
+        app.Render();
+    }`).join('\n');
   return `namespace ${NS}.Pages;
 
 using System.Windows;
@@ -3082,12 +4018,13 @@ using System.Windows.Media;
 using ${NS};
 // The kit's static helpers (roseThrow, RoseCount) and the page's components are
 // called bare by the generated bodies.
-using static ${NS}.RoseKit;
-using ${NS}.Components;
+using static ${NS}.RoseKit;${components.length ? `
+using ${NS}.Components;` : ''}
 
 public static class ${page.cls}Page
 {
-${bindFields}
+${bindFields}${lcFieldDecls ? '\n' + lcFieldDecls : ''}
+${awaitMembers}
 
     public static Panel Build(RoseApp app, Panel parent)
     {
@@ -3095,7 +4032,7 @@ ${bindFields}
 ${routeSeed}
 ${initialState}
 ${derived}
-${deferTimers}
+${deferTimers}${effectCalls}${mountWiring}${disposeWiring}${cleanupWiring}
 
 ${layout}
         return pageRoot;
@@ -3106,7 +4043,67 @@ ${actions}
 `;
 }
 
+/** The `new Promise((r) => setTimeout(r, ms))` delay idiom, spelled C#'s way:
+ *  it is the one Promise construct the target can express (Task.Delay). */
+const NET_DELAY_RE = /new\s+Promise\s*\(\s*(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|([A-Za-z_$][\w$]*)\s*)\s*=>\s*(?:\{\s*)?setTimeout\s*\(\s*(?:\1|\2)\s*,\s*([^()]+?)\s*\)\s*;?\s*(?:\}\s*)?\)/g;
+
+/** The body of the page's own `async function <name>`, read off the raw script. */
+function asyncFnBody(script: string, name: string): string | null {
+  const m = new RegExp(`(?:^|\\n)[ \\t]*(?:export\\s+)?async\\s+function\\s+${escapeRe(name)}\\s*\\(([^)]*)\\)\\s*\\{`).exec(script);
+  if (!m) return null;
+  const open = m.index + m[0].length - 1;
+  let depth = 0;
+  for (let i = open; i < script.length; i++) {
+    const ch = script[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const q = ch;
+      i++;
+      while (i < script.length && script[i] !== q) { if (script[i] === '\\') i++; i++; }
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return script.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/**
+ * Why an async function's body cannot run on this target, or null if it can.
+ * The same refusals the statement translator applies to handlers, plus the
+ * await rule: an await must land on the delay idiom or on the page's own async
+ * functions - the only calls that produce something C# can await.
+ */
+function asyncBodyRefusal(body: string, asyncFns: Set<string>): string | null {
+  const stripped = body.replace(NET_DELAY_RE, ' __roseDelay__ ');
+  if (/=>/.test(stripped)) return 'a JS arrow the target cannot spell';
+  if (/\bnew\s+Promise\b/.test(stripped)) return 'a Promise constructor the target has no spelling for';
+  if (/\bFormData\s*\(|\bdocument\.|\bwindow\./.test(stripped)) return 'a web-only construct (DOM/FormData)';
+  if (/\bnew\s+[A-Z]/.test(stripped)) return 'a JS object the target has no spelling for';
+  for (const m of stripped.matchAll(/\bawait\b([\s\S]*?)(?=;|$)/g)) {
+    const operand = m[1].trim();
+    if (!operand || operand === '__roseDelay__') continue;
+    const call = /^([A-Za-z_$][\w$]*)\s*\(/.exec(operand);
+    // `fetch` is the kit's own Task now, so it is awaitable like a sibling.
+    if (!call || (!asyncFns.has(call[1]) && call[1] !== 'fetch')) return `an await on ${operand.slice(0, 30)} - only the page's own async functions and setTimeout delays are expressible`;
+  }
+  return null;
+}
+
+/** A head of the plain shape `callee(args)` with nothing trailing the call. */
+function matchPlainCall(expr: string): { callee: string; args: string } | null {
+  const m = /^([A-Za-z_$][\w$]*)\s*\(/.exec(expr);
+  if (!m) return null;
+  const open = m[0].length - 1;
+  const close = matchParen(expr, open);
+  if (close < 0 || expr.slice(close + 1).trim() !== '') return null;
+  return { callee: m[1], args: expr.slice(open + 1, close) };
+}
+
 function csType(init: string): string {
+
   const t = init.trim();
   if (/^-?\d+$/.test(t)) return 'long';
   if (/^-?\d*\.\d+$/.test(t)) return 'double';
@@ -3120,17 +4117,17 @@ function csType(init: string): string {
 function csLiteral(init: string): string {
   if (!init.trim()) return 'null';
   let out = init.trim();
-  // R179: a collection chain in a state initializer is translated before any of
+  // A collection chain in a state initializer is translated before any of
   // the scalar passes, while the state getter is still a call the IR can read.
   if (/\.(map|filter|reduce|find|some|concat)\s*\(/.test(out)) {
     const t = translateExpr(out, NET_EXPR, new Set());
     if (t !== null) out = t;
   }
-  // R176: a state initializer is an arbitrary JS expression on a code path of
+  // A state initializer is an arbitrary JS expression on a code path of
   // its own, so "n === 2" would otherwise survive verbatim into C#, where it is
   // not an operator. C# has ?? natively, so only the comparisons need work.
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
-  // R187: `$query().k` is the launch parameter, spelled per target. This runs
+  // `$query().k` is the launch parameter, spelled per target. This runs
   // before the member-read rewrite below, which would otherwise turn
   // `app.Param` into a dictionary subscript. Blanking `$query()` here (as this
   // pass used to) made `let q = $state($query().q ?? '')` compile to
@@ -3142,6 +4139,11 @@ function csLiteral(init: string): string {
   out = out.replace(/\bnull\b/g, 'null').replace(/\bundefined\b/g, 'null');
   out = out.replace(/\btrue\b/g, 'true').replace(/\bfalse\b/g, 'false');
   out = out.replace(/'((?:[^'\\\\]|\\\\.)*)'/g, '"$1"');
+  // The scalar spells the handler body gets: a $state initializer goes through
+  // this path too, and parseFloat/Number reaching C# raw is a compile error.
+  out = csScalarCalls(out);
+  out = out.replace(/\bString\s*\(/g, 'RoseTheme.Str(');
+  out = out.replace(/\bString\s*\(/g, 'RoseTheme.Str(');
   out = rewriteMemberReads(out, (obj, key) => `RoseTheme.Get(${obj}, "${key}")`);
   if (/^\{/.test(out)) return csMapLiteral(out);
   if (/^\[/.test(out)) {
@@ -3216,7 +4218,27 @@ function emitNodes(nodes: IrNode[], ctx: NetCtx): void {
     // carried down from the nearest container: the Label is painted with the
     // effective colour, size, weight and transform instead of the WPF default.
     const text = onlyWhitespace ? '' : capText(csText(run, ctx), ctx.inherited.textTransform);
-    if (text) emit(`RoseTheme.Label(${ctx.parent}, ${text}, ${csStyle(ctx.inherited)});`, ctx);
+    // A list marker prefixes the run the way a browser's <li> paints one.
+    if (text) {
+      // A styled marker (::marker colour) rides WPF's own inline runs: the
+      // glyph paints in ITS colour, the text beside it in the label's.
+      const mkColor = ctx.liMarkerStyle?.color;
+      // The ::marker content replacement: the author's string IS the glyph.
+      const glyph = ctx.liMarkerStyle?.markerContent ?? ctx.liMarker;
+      if (ctx.liMarker && mkColor) {
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`var block = new System.Windows.Controls.TextBlock();`, ctx);
+        emit(`block.Inlines.Add(new System.Windows.Documents.Run(${JSON.stringify(glyph)}) { Foreground = new SolidColorBrush(FromHex(${JSON.stringify(mkColor)})) });`, ctx);
+        emit(`block.Inlines.Add(new System.Windows.Documents.Run(${text}));`, ctx);
+        emit(`RoseTheme.ApplyText(block, ${csStyle(ctx.inherited)});`, ctx);
+        emit(`${ctx.parent}.Children.Add(block);`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+      } else {
+        emit(`RoseTheme.Label(${ctx.parent}, ${ctx.liMarker ? JSON.stringify(ctx.liMarker) + ' + ' : ''}${text}, ${csStyle(ctx.inherited)});`, ctx);
+      }
+    }
     run.length = 0;
   };
   for (const node of nodes) {
@@ -3308,6 +4330,77 @@ function collapseNullTests(code: string): string {
   return out;
 }
 
+/** A state read the condition pass already coerced (Bool/Int/Str/Truth/Count). */
+const CS_TRUTH_COERCIONS = ['RoseTheme.Truth(', 'RoseTheme.Bool(', 'RoseTheme.Int(', 'RoseTheme.Num(', 'RoseTheme.Str(', 'RoseKit.Count('];
+/** Operators that consume a read as a VALUE (comparison, arithmetic, member) - those positions are not truthiness tests. */
+const CS_TRUTH_VALUE_OPS = ['==', '!=', '<=', '>=', '??', '?.', '<', '>', '.', '+', '-', '*', '/', '%', ',', '[', '='];
+
+/** An if/while condition over an untyped state read holds object?, which C#
+ *  refuses as a bool - wrap each bare read in the kit's Truth helper. */
+function csTruthConditions(code: string): string {
+  let out = '';
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < code.length && code[j] !== '"') { if (code[j] === '\\') j++; j++; }
+      out += code.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    const read = /^app\.V\("([^"]+)"\)(\s*\?(?![?.]))/.exec(code.slice(i));
+    if (read) {
+      // A read that IS the whole ternary condition holds object?, which C#
+      // refuses as a bool - same wrap as the if/while head below. `?` is not
+      // in CS_TRUTH_VALUE_OPS (a value position never precedes it), so this
+      // branch is the only guard needed.
+      const before = out.replace(/\s+$/, '');
+      if (!CS_TRUTH_COERCIONS.some((c) => before.endsWith(c)) && !before.endsWith('.')) {
+        out += `RoseTheme.Truth(${read[0].slice(0, read[0].length - read[2].length)})`;
+        i += read[0].length - read[2].length - 1;
+        continue;
+      }
+    }
+    const head = /^(if|while)\s*\(/.exec(code.slice(i));
+    if (head && (i === 0 || !/[\w$]/.test(code[i - 1]))) {
+      const open = i + head[0].length - 1;
+      const close = matchParen(code, open);
+      if (close > open) {
+        out += code.slice(i, open + 1) + csWrapTruth(code.slice(open + 1, close)) + ')';
+        i = close;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Wrap every uncoerced `app.V("k")` of one condition in RoseTheme.Truth(...). */
+function csWrapTruth(cond: string): string {
+  let out = '';
+  for (let i = 0; i < cond.length; i++) {
+    const ch = cond[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < cond.length && cond[j] !== '"') { if (cond[j] === '\\') j++; j++; }
+      out += cond.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    const read = /^app\.V\("([^"]+)"\)/.exec(cond.slice(i));
+    if (!read) { out += ch; continue; }
+    const before = out.replace(/\s+$/, '');
+    const after = cond.slice(i + read[0].length).replace(/^\s+/, '');
+    const skip = CS_TRUTH_COERCIONS.some((c) => before.endsWith(c))
+      || CS_TRUTH_VALUE_OPS.some((op) => after.startsWith(op))
+      || after.startsWith(']');
+    out += skip ? read[0] : `RoseTheme.Truth(${read[0]})`;
+    i += read[0].length - 1;
+  }
+  return out;
+}
+
 function csText(nodes: IrNode[], ctx: NetCtx): string {
   const parts: string[] = [];
   for (const n of nodes) {
@@ -3317,6 +4410,14 @@ function csText(nodes: IrNode[], ctx: NetCtx): string {
       // A typed string read already IS `RoseTheme.Str(...)`; wrapping it again
       // would produce Str(Str(x)) - harmless at run time, but a lie about the
       // shape of the expression and noise in every generated page.
+      parts.push(isStrCall(value) ? value : `RoseTheme.Str(${value})`);
+    }
+    // Trusted markup ({@html}) inside a text tag rides the same string: the
+    // WPF TextBlock has no markup reader here, but a plain TextBlock ignores
+    // tags in text - better than the whole expression vanishing. The
+    // HtmlLabel path remains the rich route.
+    else if (n.kind === 'html') {
+      const value = csExpr(n.code, ctx);
       parts.push(isStrCall(value) ? value : `RoseTheme.Str(${value})`);
     }
   }
@@ -3338,7 +4439,7 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
       return;
     }
     case 'const': {
-      // R294: a `{@const x = expr}` is a binding for the rest of the block. It
+      // A `{@const x = expr}` is a binding for the rest of the block. It
       // used to be dropped with no warning, so every later read of `x` reached
       // the generated page as an identifier C# never declares (CS0103) and the
       // exported project did not compile. The initializer is the very same
@@ -3387,73 +4488,171 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
         emittedBinding = `${binding}_${++ctx.constSeq.n}`;
         scopedConsts.set(binding, emittedBinding);
       }
+      // A row counter a component call inside the loop appends to its instance
+      // id, so per-row instances keep separate state keys. The children emit
+      // into a buffer first, and the counter lines splice in only when the
+      // scan below found a component call site - a loop without one emits
+      // byte-identical output, down to the generated panel numbers.
+      const itemsSrc = node.items.trim();
+      const eachRoot = /^[A-Za-z_$][\w$]*$/.test(itemsSrc) || /^\w+\(\)$/.test(itemsSrc) ? itemsSrc.replace(/\(\)$/, '') : '';
+      const rowScoped: NetCtx = {
+        ...ctx,
+        mapBinds: new Set([...ctx.mapBinds, binding]),
+        constNames: scopedConsts,
+        lines: [],
+        depth: ctx.depth + 1,
+        eachRoots: new Map([...ctx.eachRoots ?? [], [binding, eachRoot]]),
+      };
+      const compNames = new Set(ctx.components.map((c) => c.name.toLowerCase()));
+      let rowEntry: { name: string; used: { hit: boolean } } | null = null;
+      if (treeHasComponentCall(node.children, compNames)) {
+        const row = `__row${++ctx.counter.n}`;
+        rowEntry = { name: row, used: { hit: false } };
+        rowScoped.rowIndices = [...(ctx.rowIndices ?? []), rowEntry];
+      }
+      emitNodes(node.children, rowScoped);
+      if (rowEntry?.used.hit) emit(`int ${rowEntry.name} = -1;`, ctx);
       emit(`foreach (var ${emittedBinding} in ${eachSource}) {`, ctx);
       ctx.depth++;
-      const scoped: NetCtx = { ...ctx, mapBinds: new Set([...ctx.mapBinds, binding]), constNames: scopedConsts };
-      emitNodes(node.children, scoped);
+      if (rowEntry?.used.hit) emit(`++${rowEntry.name};`, ctx);
+      ctx.lines.push(...rowScoped.lines);
       ctx.depth--;
       emit('}', ctx);
       return;
     }
     case 'await': {
-      // The desktop target evaluates the promise synchronously inside the
-      // page build: the then branch renders on resolve, the catch on reject.
       const id = ctx.awaits.length;
       const value = `__await${id}Value`;
       const err = `__await${id}Err`;
       const failed = `__await${id}Failed`;
-      const expr = csExpr(csRoseify(substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts ?? new Map())), ctx);
-      if (!awaitHeadIsLiteral(node.expr)) ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the then branch renders only for Promise.resolve/reject literals`);
-      // R234: WPF resolves the head synchronously while the page is built, so a
-      // pending branch could never render. It is not emitted - emitting it would
-      // be unreachable code - and the author is told instead.
-      if (node.pending.length) ctx.warnings.push(`${ctx.file}: the {#await} pending branch is dropped - WPF resolves the head while the page builds, so it can never render`);
-      ctx.awaits.push({ value, err, failed, expr });
+      const raw = substituteParams(normalizeAwaitExpr(node.expr), ctx.scriptConsts ?? new Map());
       const thenMap = new Map<string, string>();
       if (node.thenName) thenMap.set(node.thenName, value);
       const catchMap = new Map<string, string>();
       if (node.catchName) catchMap.set(node.catchName, err);
-      emit(`object? ${value} = null;`, ctx);
-      emit(`string? ${err} = null;`, ctx);
-      emit(`bool ${failed} = false;`, ctx);
-      emit('try', ctx);
-      ctx.depth++;
-      emit('{', ctx);
-      ctx.depth++;
-      emit(`${value} = ${expr};`, ctx);
-      ctx.depth--;
-      emit('}', ctx);
-      ctx.depth--;
-      emit('catch (Exception e)', ctx);
-      ctx.depth++;
-      emit('{', ctx);
-      ctx.depth++;
-      emit(`${err} = e.Message;`, ctx);
-      emit(`${failed} = true;`, ctx);
-      ctx.depth--;
-      emit('}', ctx);
-      ctx.depth--;
-      emit(`if (${failed})`, ctx);
-      ctx.depth++;
-      emit('{', ctx);
-      ctx.depth++;
-      emitNodes(substituteIdents(rewriteCatchMessage(node.catch, node.catchName ?? ''), catchMap), ctx);
-      ctx.depth--;
-      emit('}', ctx);
-      ctx.depth--;
-      emit('else', ctx);
-      ctx.depth++;
-      emit('{', ctx);
-      ctx.depth++;
-      emitNodes(substituteIdents(node.then, thenMap), ctx);
-      ctx.depth--;
-      emit('}', ctx);
-      ctx.depth--;
+      const thenNodes = substituteIdents(node.then, thenMap);
+      const catchNodes = substituteIdents(rewriteCatchMessage(node.catch, node.catchName ?? ''), catchMap);
+      const spellCall = (call: { callee: string; args: string }): string => {
+        const args = call.args.trim() ? splitTopLevel(call.args).map((a) => csExpr(csRoseify(a.trim()), ctx)).join(', ') : '';
+        return `${call.callee === 'build' ? 'build_' : call.callee}(${ctx.app}${args ? `, ${args}` : ''})`;
+      };
+      // Classify the head AS EVALUATED: normalizeAwaitExpr spells the rejects
+      // roseThrow(...) (balanced, unlike the flat literal check), and a
+      // roseThrow throws inside the sync try below - so it is a literal here.
+      const syncHead = awaitHeadIsLiteral(normalizeAwaitExpr(node.expr).replace(/\broseThrow\s*\(/g, '('));
+      const call = syncHead ? null : matchPlainCall(raw);
+      if (call && ctx.pageFns?.has(call.callee) && ctx.asyncFns?.has(call.callee)) {
+        if (ctx.asyncFnsDead?.has(call.callee)) {
+          ctx.warnings.push(`${ctx.file}: the {#await} head ${call.callee}() is a promise this target cannot await (its body uses something C# cannot express) - the block renders the catch branch`);
+          ctx.awaits.push({ value, err, failed, expr: 'null' });
+          emit(`string? ${err} = "the await head ${call.callee}() is a promise this target cannot await";`, ctx);
+          emitNodes(catchNodes, ctx);
+          return;
+        }
+        // A real async member: the runner awaits it off the build pass, flips
+        // the settle state and re-renders, so the branches render the resolved
+        // value or the error - and the pending branch renders until then.
+        const done = `__await${id}Done`;
+        const kicked = `__await${id}Kicked`;
+        const runner = `__runAwait${id}`;
+        const head = spellCall(call);
+        ctx.awaits.push({ value, err, failed, expr: head, done, kicked, runner });
+        emit(`if (!${done})`, ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`if (!${kicked})`, ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`${kicked} = true;`, ctx);
+        emit(`${runner}(${ctx.app});`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emitNodes(node.pending, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emit(`else if (${failed})`, ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emitNodes(catchNodes, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emit('else', ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emitNodes(thenNodes, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        return;
+      }
+      if (syncHead || (call && ctx.pageFns?.has(call.callee))) {
+        // The desktop target evaluates the promise synchronously inside the
+        // page build: a literal head IS its value, and a synchronous page
+        // function returns one. The then branch renders on resolve, the catch
+        // on reject.
+        const expr = call ? spellCall(call) : csExpr(csRoseify(raw), ctx);
+        // WPF resolves the head synchronously while the page is built, so a
+        // pending branch could never render. It is not emitted - emitting it would
+        // be unreachable code - and the author is told instead.
+        if (node.pending.length) ctx.warnings.push(`${ctx.file}: the {#await} pending branch is dropped - WPF resolves the head while the page builds, so it can never render`);
+        ctx.awaits.push({ value, err, failed, expr });
+        emit(`object? ${value} = null;`, ctx);
+        emit(`string? ${err} = null;`, ctx);
+        emit(`bool ${failed} = false;`, ctx);
+        emit('try', ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`${value} = ${expr};`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emit('catch (Exception e)', ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`${err} = e.Message;`, ctx);
+        emit(`${failed} = true;`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emit(`if (${failed})`, ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emitNodes(catchNodes, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        emit('else', ctx);
+        ctx.depth++;
+        emit('{', ctx);
+        ctx.depth++;
+        emitNodes(thenNodes, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        ctx.depth--;
+        return;
+      }
+      // Nothing this target can run: a promise object would land in the then
+      // branch as a silent null. Render the catch branch with a real error.
+      // The id is still reserved, so later blocks keep distinct local names.
+      ctx.warnings.push(`${ctx.file}: the {#await} head is a promise this target cannot await - the block renders the catch branch`);
+      ctx.awaits.push({ value, err, failed, expr: 'null' });
+      emit(`string? ${err} = "the await head is a promise this target cannot await";`, ctx);
+      emitNodes(catchNodes, ctx);
       return;
     }
     case 'block':
       if (node.name === 'defer') {
-        // R124: the web streams a placeholder; a desktop build has no stream,
+        // The web streams a placeholder; a desktop build has no stream,
         // so the block flips in on a one-shot timer armed in Build().
         const hold = Number(/hold\s*=\s*(\d+)/.exec(String(node.head ?? ''))?.[1] ?? '0');
         const flag = `__defer${ctx.deferred.length}`;
@@ -3493,9 +4692,24 @@ function emitNode(node: IrNode, ctx: NetCtx): void {
       return;
     case 'slot':
       return;
-    case 'element':
+    case 'element': {
+      // An ordered list installs its counter around its <li> children: every
+      // item's marker numbers itself (1. 2. 3.), the way a browser paints one.
+      if (node.tag.toLowerCase() === 'ol') {
+        const counter = { n: 0 };
+        for (const child of node.children) {
+          if (child.kind === 'element' && child.tag.toLowerCase() === 'li') {
+            counter.n += 1;
+            emitElement(child, { ...ctx, olMarker: `${counter.n}. ` });
+          } else {
+            emitNode(child, ctx);
+          }
+        }
+        return;
+      }
       emitElement(node, ctx);
       return;
+    }
   }
 }
 
@@ -3527,10 +4741,14 @@ function dotnetInlineRuns(children: IrNode[], ctx: NetCtx, base: StyleModel): st
     if (binding.dynamicClassExprs.length || binding.dynamicStyle.length) return null;
     const subject: StyleSubject = { tag: c.tag.toLowerCase(), classes: binding.staticClasses };
     const own = mergeModels(cascadeFor(ctx.styles.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH }).model, binding.inlineStyle);
+    // A literal <sub>/<sup> tag is vertical-align: sub/super for its contents
+    // - the run carries the shift so WPF renders Typography.Variants.
+    const tagShift = c.tag.toLowerCase() === 'sub' ? 'sub' : c.tag.toLowerCase() === 'sup' ? 'super' : null;
+    const ownWithShift = tagShift ? mergeModels(own, { verticalAlign: tagShift }) : own;
     ctx.ancestors.push(subject);
     let inner: string[] | null;
     try {
-      inner = dotnetInlineRuns(c.children, ctx, mergeModels(base, own));
+      inner = dotnetInlineRuns(c.children, ctx, mergeModels(base, ownWithShift));
     } finally {
       ctx.ancestors.pop();
     }
@@ -3538,6 +4756,59 @@ function dotnetInlineRuns(children: IrNode[], ctx: NetCtx, base: StyleModel): st
     runs.push(...inner);
   }
   return runs;
+}
+
+
+/** A non-button element's on:* handlers become real WPF event subscriptions.
+ *  The IR keeps the `|window` modifier in the attribute name; this helper
+ *  emits one lambda per event and spells the event object's fields through the
+ *  RoseKit helpers. It returns true when at least one handler was wired. */
+function attachElementEvents(node: Extract<IrNode, { kind: 'element' }>, target: string, ctx: NetCtx): boolean {
+  const EVENTS: Record<string, { hook: string; args: string; dbl?: boolean }> = {
+    click: { hook: 'MouseLeftButtonUp', args: '(_, ev)' },
+    dblclick: { hook: 'MouseLeftButtonUp', args: '(_, ev)', dbl: true },
+    mousedown: { hook: 'PreviewMouseLeftButtonDown', args: '(_, ev)' },
+    mouseup: { hook: 'PreviewMouseLeftButtonUp', args: '(_, ev)' },
+    mousemove: { hook: 'PreviewMouseMove', args: '(_, ev)' },
+    mouseenter: { hook: 'MouseEnter', args: '(_, ev)' },
+    mouseleave: { hook: 'MouseLeave', args: '(_, ev)' },
+    keydown: { hook: 'PreviewKeyDown', args: '(_, ev)' },
+    keyup: { hook: 'PreviewKeyUp', args: '(_, ev)' },
+  };
+  let wired = false;
+  for (const attr of node.attrs) {
+    if (!attr.name.startsWith('on:') || attr.value.kind !== 'expr') continue;
+    const [rawName, ...mods] = attr.name.slice(3).split('|');
+    const spec = EVENTS[rawName];
+    if (!spec) { ctx.warnings.push(`dotnet: ${ctx.file}: on:${rawName} on <${node.tag}> is not supported - dropped`); continue; }
+    const onWindow = mods.includes('window');
+    let code = attr.value.code.trim()
+      .replace(/\(\s*([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$<>|\[\]]*\s*\)\s*=>/g, '($1) =>')
+      .replace(/\b([A-Za-z_$][\w$]*)(\s*:\s*[A-Za-z_$][\w$<>|\[\]]*\s*)\s*=>/g, '$1 =>');
+    let body = '';
+    if (/^[A-Za-z_$][\w$]*$/.test(code)) {
+      body = `${code}(${ctx.app}${(ctx.fnArity?.get(code) ?? 0) > 0 ? ', RoseKit.RoseUiEvent(ev)' : ''});`;
+    } else {
+      const ir = normalizeInlineHandler(code, netHandlerDialect(ctx), ctx.stateNames);
+      if (ir.reason || !ir.stmts.length) {
+        ctx.warnings.push(`dotnet: ${ctx.file}: an inline on:${rawName} handler is not translated (${ir.reason ?? 'web-only construct'}); emitted inert`);
+        continue;
+      }
+      body = ir.stmts.map((s) => (/;\s*$/.test(s) ? s : s + ';')).join(' ');
+    }
+    if (!/\bapp\.Render\s*\(/.test(body) && !/\brefresh\s*\(/.test(body)) body += ` ${ctx.app}.Render();`;
+    const owner = onWindow ? 'System.Windows.Application.Current?.MainWindow' : target;
+    if (onWindow) {
+      const win = `__roseWin${++ctx.counter.c}`;
+      emit(`var ${win} = ${owner};`, ctx);
+      emit(`if (${win} != null) ${win}.${spec.hook} += ${spec.args} => { ${body} };`, ctx);
+    } else {
+      if ((spec as { dbl?: boolean }).dbl) emit(`${target}.${spec.hook} += ${spec.args} => { if (ev.ClickCount == 2) { ${body} } };`, ctx);
+      else emit(`${target}.${spec.hook} += ${spec.args} => { ${body} };`, ctx);
+    }
+    wired = true;
+  }
+  return wired;
 }
 
 function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): void {
@@ -3569,6 +4840,20 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   const resolved = cascadeFor(ctx.styles.sheet, subject, ctx.ancestors, { viewport: REFERENCE_WIDTH });
   const own = mergeModels(resolved.model, binding.inlineStyle);
   if (own.display === 'none') return;
+  // A list item's marker: the <ol>-handed counter wins; otherwise the model's
+  // listStyle picks the bullet, `none` draws nothing. The prefix rides the
+  // scoped ctx the child text flush reads.
+  const liCtx = tag === 'li'
+    ? (() => {
+        let marker = '';
+        if (ctx.olMarker) marker = ctx.olMarker;
+        else {
+          const m = listMarkerOf({ tag, classes: binding.staticClasses, ancestors: [...ctx.ancestors].reverse() }, own);
+          if (m) marker = m.marker;
+        }
+        return marker ? { ...ctx, liMarker: marker, liMarkerStyle: resolved.markerModel } : ctx;
+      })()
+    : ctx;
   // Typography is inherited through the tree; a widget paints it, a container
   // passes it on (see `inherited` below).
   const model = mergeModels(ctx.inherited, own);
@@ -3582,13 +4867,14 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     return out ? `, ${out}` : '';
   };
   const hover = resolved.hover ? csStyle(resolved.hover) : null;
-  // R253: the :focus half, resolved next to hover. The base half is the
+  // The :focus half, resolved next to hover. The base half is the
   // element's own merged model - what Lost repaints.
   const focus = resolved.focus ? csStyle(resolved.focus) : null;
-  // R264: the :active half - the pressed state, the same two-half shape.
+  // The :active half - the pressed state, the same two-half shape.
   const active = resolved.active ? csStyle(resolved.active) : null;
   const dynamic = binding.dynamicClassExprs.length > 0 || binding.dynamicStyle.length > 0;
-  const needVar = dynamic || hover !== null || focus !== null || active !== null;
+  const hasElementEvent = node.attrs.some((a) => a.name.startsWith('on:'));
+  const needVar = dynamic || hover !== null || focus !== null || active !== null || hasElementEvent;
   // The runtime half: a state-driven class is resolved against this owner's
   // table, then the state-driven properties are set one by one - the values a
   // static emitter cannot know.
@@ -3598,8 +4884,19 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       // the conditional operator, so an unparenthesised join folds the separator
       // into the previous arm and fails to compile. Plain lookups stay bare.
       const names = binding.dynamicClassExprs
-        .map((e) => csExpr(e, ctx))
-        .map((s) => (s.includes('?') ? `(${s})` : s))
+        .map((e) => {
+          const value = csExpr(e, ctx);
+          // Conditional class expressions (e.g. `x ? "on" : ""`) must stay
+          // parenthesised for `+ " " +`; anything else is an object? value and
+          // ApplyClass needs a string, so spell it through RoseTheme.Str.
+          if (value.includes('?') && value.includes(':')) return `(${value})`;
+          // csExpr already wraps a bare state read as RoseTheme.Str(app.V(...))
+          // (C# cannot pass object? as a string). Wrapping it a SECOND time
+          // produces RoseTheme.Str(RoseTheme.Str(...)) and breaks the strict
+          // bound-class contract; leave already-string expressions alone.
+          if (/^(?:RoseTheme\.Str|RoseTheme\.List)\(/.test(value) || /^"(?:[^"\\]|\\.)*"$/.test(value)) return value;
+          return `RoseTheme.Str(${value})`;
+        })
         .join(' + " " + ');
       emit(`RoseTheme.ApplyClass(${target}, "${ctx.scope}", ${names});`, ctx);
     }
@@ -3607,10 +4904,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       emit(`RoseTheme.Inline(${target}, ${JSON.stringify(d.prop)}, ${csExpr(d.code, ctx)});`, ctx);
     }
     if (hover) emit(`RoseTheme.Hover(${target}, ${hover});`, ctx);
-    // R253: the focus pair, next to the hover half. The base is the element's
+    // The focus pair, next to the hover half. The base is the element's
     // own merged style - an empty literal when the element ships unstyled.
     if (focus) emit(`RoseTheme.Focus(${target}, ${isEmptyModel(own) ? 'new RoseStyle()' : styleOf(own)}, ${focus});`, ctx);
-    // R264: the active pair - the same base half the focus call repaints.
+    // The active pair - the same base half the focus call repaints.
     if (active) emit(`RoseTheme.Active(${target}, ${isEmptyModel(own) ? 'new RoseStyle()' : styleOf(own)}, ${active});`, ctx);
   };
   const comp = ctx.components.find((c) => c.name.toLowerCase() === tag);
@@ -3629,7 +4926,11 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         continue;
       }
       const attr = given.find((a) => a.name === p.name);
-      args.push(attr ? csAttr(attr, ctx) : csLiteral(p.init));
+      if (attr) { args.push(csAttr(attr, ctx)); continue; }
+      // A callback prop's default is an inert JS arrow; emit a real C#
+      // Action<object?> instead of copying TypeScript syntax into the page.
+      const isCallback = /(?:^on|On)[A-Z_]/.test(p.name);
+      args.push(isCallback ? '(object? __unused) => { }' : csLiteral(p.init));
     }
     // Slots (the web contract): each slot's content is an action the component
     // invokes with the panel to fill; a named slot also receives the scoped
@@ -3648,18 +4949,54 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       emitNodes(substituteSlotProps(passed, s.props, (p) => `props["${p}"]`), sub);
       slotArgs.push(`(props, __slot) => {\n${sub.lines.join('\n')}\n${'        '.repeat(ctx.depth)}}`);
     }
-    const call = `${comp.cls}View.Build(${ctx.app}, ${ctx.parent}${args.length ? ', ' + args.join(', ') : ''}${slotArgs.length ? ', ' + slotArgs.join(', ') : ''})`;
+    // The instance id: call sites of one component count up in document order,
+    // so the component's own $state keys under `<CompName><n>:<name>` stay
+    // per-instance (two Counters keep two likes). Inside an {#each} the row
+    // counters append, so each row is its own instance with its own state.
+    const seq = (ctx.compCalls?.get(comp.name.toLowerCase()) ?? 0) + 1;
+    if (ctx.compCalls) ctx.compCalls.set(comp.name.toLowerCase(), seq);
+    const rows = (ctx.rowIndices ?? []).map((r) => { r.used.hit = true; return r.name; });
+    if (ctx.compSiteEach) {
+      const sites = ctx.compSiteEach.get(comp.name.toLowerCase()) ?? [];
+      sites.push(rows.length > 0);
+      ctx.compSiteEach.set(comp.name.toLowerCase(), sites);
+    }
+    const instId = rows.length
+      ? `"${comp.cls}${seq}-" + ${rows.join(' + "-" + ')}`
+      : `"${comp.cls}${seq}"`;
+    const call = `${comp.cls}View.Build(${ctx.app}, ${instId}, ${ctx.parent}${args.length ? ', ' + args.join(', ') : ''}${slotArgs.length ? ', ' + slotArgs.join(', ') : ''})`;
     if (!needVar) {
       emit(`${call};`, ctx);
-      return;
+    } else {
+      // A call-site class lands on the component's own root, so a page may style
+      // an instance without the component knowing it.
+      const target = `comp${++ctx.counter.c}`;
+      emit(`var ${target} = ${call};`, ctx);
+      const ownStyle = styleOf(own);
+      if (ownStyle) emit(`RoseTheme.Apply(${target}, ${ownStyle});`, ctx);
+      attach(target);
     }
-    // A call-site class lands on the component's own root, so a page may style
-    // an instance without the component knowing it.
-    const target = `comp${++ctx.counter.c}`;
-    emit(`var ${target} = ${call};`, ctx);
-    const ownStyle = styleOf(own);
-    if (ownStyle) emit(`RoseTheme.Apply(${target}, ${ownStyle});`, ctx);
-    attach(target);
+    // A keyed component inside an {#each} mounts per row right here: the page's
+    // hoisted one-shot mount moment carries static ids only, so this guard keys
+    // by the runtime instance id and each row mounts (and registers its
+    // cleanups) exactly once. The row id snapshot keeps the dispose closures
+    // from reading the counter after the loop moved on.
+    if (rows.length && comp.lc?.keyed) {
+      if (comp.lc.mounts.length) {
+        emit(`if (${ctx.app}.State.TryAdd("#mount:" + ${instId}, true)) {`, ctx);
+        ctx.depth++;
+        for (const m of comp.lc.mounts) emit(`${comp.cls}View.${m}(${ctx.app}, ${instId});`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+      }
+      if (comp.lc.cleanups.length) {
+        const snap = `__rowId${++ctx.counter.n}`;
+        emit(`var ${snap} = ${instId};`, ctx);
+        for (const [i, m] of comp.lc.cleanups.entries()) {
+          emit(`${ctx.app}.OnDispose(${ctx.app}.Route + "#lcc${comp.cls}${i}${comp.cls}${seq}-" + ${snap}, () => ${comp.cls}View.${m}(${ctx.app}, ${snap}));`, ctx);
+        }
+      }
+    }
     return;
   }
   if (TEXT_TAGS.has(tag) && !needVar && node.children.some((c) => c.kind === 'element' && DOTNET_INLINE.has(c.tag.toLowerCase()))) {
@@ -3674,6 +5011,13 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   if (TEXT_TAGS.has(tag) && !node.children.some((c) => c.kind === 'element')) {
     const text = capText(csText(node.children, ctx) || '""', model.textTransform);
     const style = withStyle(model);
+    // Trusted markup inside a text tag renders as MARKUP: WPF's TextBlock
+    // cannot read tags in plain text, so the HtmlLabel parser turns the whole
+    // paragraph into Inlines - the same route a bare {@html} takes.
+    if (node.children.some((c) => c.kind === 'html')) {
+      emit(`RoseTheme.HtmlLabel(${ctx.parent}, ${text}${style});`, ctx);
+      return;
+    }
     if (!needVar) {
       emit(`RoseTheme.Label(${ctx.parent}, ${text}${style});`, ctx);
       return;
@@ -3681,6 +5025,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const target = `text${++ctx.counter.c}`;
     emit(`var ${target} = RoseTheme.Label(${ctx.parent}, ${text}${style});`, ctx);
     attach(target);
+    attachElementEvents(node, target, ctx);
     return;
   }
   if (tag === 'progress') {
@@ -3699,7 +5044,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
-    // R433: the element's own attributes ride into the player; the box half stays
+    // The element's own attributes ride into the player; the box half stays
     // the stylesheet's.
     const opts = `${has('autoplay') ? ', autoplay: true' : ''}${has('loop') ? ', loop: true' : ''}${has('muted') ? ', muted: true' : ''}`;
     const target = `vid${++ctx.counter.c}`;
@@ -3713,7 +5058,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const has = (n: string): boolean => node.attrs.some((a) => a.name === n);
-    // R437: the element's own attributes ride into the audio row.
+    // The element's own attributes ride into the audio row.
     const opts = `${has('autoplay') ? ', autoplay: true' : ''}${has('loop') ? ', loop: true' : ''}${has('muted') ? ', muted: true' : ''}`;
     emit(`RoseTheme.Audio(${ctx.parent}, ${JSON.stringify(url)}${opts});`, ctx);
     return;
@@ -3722,16 +5067,18 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const src = node.attrs.find((a) => a.name === 'src');
     const url = src && src.value.kind === 'text' ? src.value.text : '';
     const asset = assetMap.get(url);
-    // R418: object-fit becomes the WPF Stretch; absent keeps Uniform.
+    // Object-fit becomes the WPF Stretch; absent keeps Uniform.
     const stretch = own.objectFit === 'cover' ? ', Stretch.UniformToFill'
       : own.objectFit === 'fill' ? ', Stretch.Fill'
       : own.objectFit === 'none' ? ', Stretch.None' : '';
     // An image has no text, so only its own box rules apply.
     const style = withStyle(own);
     if (asset) {
-      if (!needVar && !style) { emit(`RoseTheme.Image(${ctx.parent}, "${asset}"${stretch});`, ctx); return; }
+      // vertical-align on a replaced element rides the helper's alignment.
+      const vArg = own.verticalAlign ? `, ${JSON.stringify(own.verticalAlign)}` : '';
+      if (!needVar && !style) { emit(`RoseTheme.Image(${ctx.parent}, "${asset}"${stretch}${vArg});`, ctx); return; }
       const target = `img${++ctx.counter.c}`;
-      emit(`var ${target} = RoseTheme.Image(${ctx.parent}, "${asset}"${stretch});`, ctx);
+      emit(`var ${target} = RoseTheme.Image(${ctx.parent}, "${asset}"${stretch}${vArg});`, ctx);
       if (style) emit(`RoseTheme.Apply(${target}, ${style.slice(2)});`, ctx);
       attach(target);
       return;
@@ -3746,9 +5093,9 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       return;
     }
     if (url) {
-      // R417: a remote (or site-relative) image is downloaded by BitmapImage.
+      // A remote (or site-relative) image is downloaded by BitmapImage.
       const target = `img${++ctx.counter.c}`;
-      emit(`var ${target} = RoseTheme.RemoteImage(${ctx.parent}, ${JSON.stringify(url)}${stretch});`, ctx);
+      emit(`var ${target} = RoseTheme.RemoteImage(${ctx.parent}, ${JSON.stringify(url)}${stretch}${own.verticalAlign ? ', ' + JSON.stringify(own.verticalAlign) : ''});`, ctx);
       if (style) emit(`RoseTheme.Apply(${target}, ${style.slice(2)});`, ctx);
       attach(target);
       return;
@@ -3818,7 +5165,35 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         emit(`var ${c} = ${call};`, ctx);
         attach(c);
       } else {
-        raw('new CheckBox()');
+        // A member-path binding whose root is an {#each} row variable: the
+        // write finds the row BY VALUE (the loop variable IS the element) and
+        // replaces the owning list with a copy that carries the new field.
+        const rowPath = bindChecked && bindChecked.value.kind === 'expr' ? bindChecked.value.code.trim() : '';
+        const rowRoot = rowPath.includes('.') ? rowPath.split('.')[0] : '';
+        const rowRest = rowPath.includes('.') ? rowPath.split('.').slice(1) : [];
+        const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+        if (rowState) {
+          const fieldKey = JSON.stringify(rowRest[rowRest.length - 1]);
+          emit(`RoseTheme.CheckBox(${ctx.parent}, "", RoseTheme.Truth(RoseTheme.Get(${rowRoot}, ${fieldKey})), on => {`, ctx);
+          ctx.depth++;
+          emit(`var rows = RoseTheme.AsList(${ctx.app}.V("${rowState}"));`, ctx);
+          emit('var next = new List<object?>();', ctx);
+          emit('foreach (var r in rows) {', ctx);
+          ctx.depth++;
+          emit(`if (string.Equals(RoseTheme.Str(r), RoseTheme.Str(${rowRoot}), System.StringComparison.Ordinal)) {`, ctx);
+          ctx.depth++;
+          emit(`next.Add(RoseTheme.DeepPut(RoseTheme.Map(r), new[] { ${rowRest.map((p) => JSON.stringify(p)).join(', ')} }, on));`, ctx);
+          ctx.depth--;
+          emit('} else next.Add(r);', ctx);
+          ctx.depth--;
+          emit('}', ctx);
+          emit(`${ctx.app}.Set("${rowState}", next);`, ctx);
+          emit(`${ctx.app}.Render();`, ctx);
+          ctx.depth--;
+          emit(`}${styleSuffix});`, ctx);
+        } else {
+          raw('new CheckBox()');
+        }
       }
       return;
     }
@@ -3842,15 +5217,15 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
     const inputEnable = disabledInput ? (disabledInput.value.kind === 'expr' ? csExpr(disabledInput.value.code, ctx) : 'true') : '';
     const maxAttr = node.attrs.find((a) => a.name === 'maxlength');
     const inputMax = maxAttr && maxAttr.value.kind === 'text' && /^\d+$/.test(maxAttr.value.text.trim()) ? maxAttr.value.text.trim() : '';
-    // R430: a readonly field keeps its text selectable but refuses edits.
+    // A readonly field keeps its text selectable but refuses edits.
     const readOnly = node.attrs.some((a) => a.name === 'readonly');
-    // R439: a <textarea> is multiline; rows is its minimum visible line count.
+    // A <textarea> is multiline; rows is its minimum visible line count.
     const isArea = tag === 'textarea';
     const rowsAttr = node.attrs.find((a) => a.name === 'rows');
     const rows = rowsAttr && rowsAttr.value.kind === 'text' && /^\d+$/.test(rowsAttr.value.text.trim()) ? rowsAttr.value.text.trim() : '4';
     const areaArgs = isArea ? `, multiline: true, minLines: ${rows}` : '';
-    const areaInit = isArea ? ', AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinLines = ' + rows : '';
-    // R441: autofocus is the browser's focus-on-mount.
+    const areaInit = isArea ? ', AcceptsReturn = true, TextWrapping = System.Windows.TextWrapping.Wrap, MinLines = ' + rows : '';
+    // Autofocus is the browser's focus-on-mount.
     const autoFocus = node.attrs.some((a) => a.name === 'autofocus');
     const autoArg = autoFocus ? ', autofocus: true' : '';
     if (type === 'range') {
@@ -3859,10 +5234,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       const maxAttr = node.attrs.find((a) => a.name === 'max');
       const num = (a: typeof minAttr, d: string): string => (a && a.value.kind === 'text' ? a.value.text : d);
       const key = stateOf(bindValue) || propName;
-      emit(`RoseTheme.Slider(${ctx.parent}, ${ctx.app}, "${key}", ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
+      emit(`RoseTheme.Slider(${ctx.parent}, ${ctx.app}, ${ctx.stateKey ? ctx.stateKey(key) : `"${key}"`}, ${num(minAttr, '0')}, ${num(maxAttr, '100')});`, ctx);
       return;
     }
-    // R446: a date input is the WPF calendar, not a text box that accepts
+    // A date input is the WPF calendar, not a text box that accepts
     // "next tuesday"; the state keeps the ISO day the web input writes.
     if (type === 'date') {
       const key = bound || propName;
@@ -3887,7 +5262,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
         emit('}', ctx);
         return;
       }
-      emit(`RoseTheme.DateField(${ctx.parent}, ${ctx.app}, "${key}"${style ? `, ${style}` : ', null'}, ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
+      emit(`RoseTheme.DateField(${ctx.parent}, ${ctx.app}, ${ctx.stateKey ? ctx.stateKey(key) : `"${key}"`}${style ? `, ${style}` : ', null'}, ${literal(minAttr)}, ${literal(maxAttr)});`, ctx);
       return;
     }
     const isPassword = type.trim().toLowerCase() === 'password';
@@ -3914,9 +5289,104 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       const field = nameAttr && nameAttr.value.kind === 'text' ? nameAttr.value.text.trim() : '';
       // A bind:value state is the field's key too (no name attribute needed).
       const key = field ? formFieldKey(ctx.forms, field) : (bound || null);
+      // `on:input={onInput}` - a bare name naming a page function - is called
+      // with a synthetic event: the kit's RoseEvent stub carries target.value.
+      const rawChange = node.attrs.find((a) => (a.name === 'on:input' || a.name === 'on:change') && a.value.kind === 'expr');
+      const namedFn = rawChange && rawChange.value.kind === 'expr' && /^[A-Za-z_$][\w$]*$/.test(rawChange.value.code.trim()) && !isPassword
+        ? rawChange.value.code.trim()
+        : '';
+      if (namedFn && (ctx.fnNames?.has(namedFn) ?? false)) {
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`var box = new TextBox { Text = ${key ? `RoseTheme.Str(${ctx.app}.V("${key}"))` : '""'}, MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''}${areaInit} };`, ctx);
+        if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
+        // The extracted member already re-renders, so the lambda only calls it.
+        const fn = (ctx.fnArity?.get(namedFn) ?? 0) > 0 ? `${namedFn}(${ctx.app}, RoseKit.RoseEvent(box.Text))` : `${namedFn}(${ctx.app})`;
+        // A bound field fires the bind write before the handler, the order the
+        // browser uses for a bound input with its own on:input.
+        if (bound) emit(`box.TextChanged += (_, _) => { ${ctx.app}.Set("${key}", box.Text); ${fn}; };`, ctx);
+        else emit(`box.TextChanged += (_, _) => ${fn};`, ctx);
+        if (autoFocus) emit('box.Loaded += (_, _) => box.Focus();', ctx);
+        emit(`${ctx.parent}.Children.Add(box);`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        return;
+      }
+      // A raw `on:input` arrow is the field's change callback: the browser's
+      // own spelling for a field. `e.target.value` is the incoming
+      // text; the statements translate like any handler body.
+      if (rawChange && rawChange.value.kind === 'expr' && !namedFn && !isPassword) {
+        const head = /^(?:async\s+)?(?:\((?:[^()]*)\)|[A-Za-z_$][\w$]*)\s*=>\s*/.exec(rawChange.value.code.trim());
+        if (head) {
+          const bodyRaw = rawChange.value.code.trim().slice(head[0].length);
+          // TS casts and non-null assertions are stripped before the rewrite;
+          // a stripped cast leaves `(e.target).value`, so the parens unwrap
+          // first and `(e.target as HTMLInputElement).value` still reads the
+          // incoming text.
+          const body = stripTsTypes(bodyRaw)
+            .replace(/\(\s*e\.target\s*\)\.value\b/g, 'e.target.value')
+            .replace(/\(\s*e\.currentTarget\s*\)\.value\b/g, 'e.currentTarget.value')
+            .replace(/\be\.target\.value\b/g, 'box.Text')
+            .replace(/\be\.currentTarget\.value\b/g, 'box.Text')
+            .trim().replace(/;$/, '');
+          const translated = translateBody(body, ctx.file, [...ctx.stateNames], ctx.mapBinds, ctx.stateTypes, ctx.warnings);
+          const stmts = translated.split('\n').map((l) => l.trim()).filter(Boolean);
+          emit('{', ctx);
+          ctx.depth++;
+          emit(`var box = new TextBox { Text = ${key ? `RoseTheme.Str(${ctx.app}.V("${key}"))` : '""'}, MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''}${areaInit} };`, ctx);
+          if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
+          emit('box.TextChanged += (_, _) => {', ctx);
+          // The bind write lands before the handler's own statements - the
+          // same order the browser fires them in.
+          if (bound) emit(`${ctx.app}.Set("${key}", box.Text);`, ctx);
+          for (const s of stmts) emit(s.endsWith(';') ? s : `${s};`, ctx);
+          emit('};', ctx);
+          if (autoFocus) emit('box.Loaded += (_, _) => box.Focus();', ctx);
+          emit(`${ctx.parent}.Children.Add(box);`, ctx);
+          ctx.depth--;
+          emit('}', ctx);
+          return;
+        }
+      }
+      // A member-path binding whose root is an {#each} row variable: the
+      // value reads the row field and the write swaps the row BY VALUE inside
+      // a copied list - the same contract the checkbox row bind follows.
+      const rowPath = bindValue && bindValue.value.kind === 'expr' && !bound && !propName && bindValue.value.code.includes('.')
+        ? bindValue.value.code.trim() : '';
+      const rowRoot = rowPath ? rowPath.split('.')[0] : '';
+      const rowRest = rowPath ? rowPath.split('.').slice(1) : [];
+      const rowState = rowRoot && rowRest.length ? ctx.eachRoots?.get(rowRoot) : undefined;
+      if (rowState && !isPassword) {
+        const fieldKey = JSON.stringify(rowRest[rowRest.length - 1]);
+        emit('{', ctx);
+        ctx.depth++;
+        emit(`var box = new TextBox { Text = RoseTheme.Str(RoseTheme.Get(${rowRoot}, ${fieldKey})), MinWidth = 220${inputEnable ? `, IsEnabled = ${inputEnable}` : ''}${inputMax ? `, MaxLength = ${inputMax}` : ''}${readOnly ? ', IsReadOnly = true' : ''}${areaInit} };`, ctx);
+        if (style) emit(`RoseTheme.Apply(box, ${style});`, ctx);
+        emit('box.TextChanged += (_, _) => {', ctx);
+        ctx.depth++;
+        emit(`var rows = RoseTheme.AsList(${ctx.app}.V("${rowState}"));`, ctx);
+        emit('var next = new List<object?>();', ctx);
+        emit('foreach (var r in rows) {', ctx);
+        ctx.depth++;
+        emit(`if (string.Equals(RoseTheme.Str(r), RoseTheme.Str(${rowRoot}), System.StringComparison.Ordinal)) {`, ctx);
+        ctx.depth++;
+        emit(`next.Add(RoseTheme.DeepPut(RoseTheme.Map(r), new[] { ${rowRest.map((p) => JSON.stringify(p)).join(', ')} }, box.Text));`, ctx);
+        ctx.depth--;
+        emit('} else next.Add(r);', ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        emit(`${ctx.app}.Set("${rowState}", next);`, ctx);
+        ctx.depth--;
+        emit('};', ctx);
+        if (autoFocus) emit('box.Loaded += (_, _) => box.Focus();', ctx);
+        emit(`${ctx.parent}.Children.Add(box);`, ctx);
+        ctx.depth--;
+        emit('}', ctx);
+        return;
+      }
       const call = isPassword
-        ? `RoseTheme.Password(${ctx.parent}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`
-        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? `"${key}"` : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''}${readOnly ? ', readOnly: true' : ''}${areaArgs}${autoArg})`;
+        ? `RoseTheme.Password(${ctx.parent}, ${ctx.app}, ${key ? (ctx.stateKey ? ctx.stateKey(key) : `"${key}"`) : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''})`
+        : `RoseTheme.TextField(${ctx.parent}, ${hint}, ${ctx.app}, ${key ? (ctx.stateKey ? ctx.stateKey(key) : `"${key}"`) : '""'}${styleSuffix}${inputEnable ? `, enabled: ${inputEnable}` : ''}${inputMax ? `, maxLength: ${inputMax}` : ''}${readOnly ? ', readOnly: true' : ''}${areaArgs}${autoArg})`;
       if (!needVar) { emit(`${call};`, ctx); return; }
       const c = `input${++ctx.counter.c}`;
       emit(`var ${c} = ${call};`, ctx);
@@ -3960,7 +5430,10 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
       }
     }
     const label = capText(csText(node.children, ctx) || '""', model.textTransform);
-    const call = `RoseTheme.Button(${ctx.parent}, ${label}, (_, _) => { ${body} }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
+    // The handler call hands the event to functions that declare a parameter,
+    // so the lambda has to name it too - `(_, _)` would leave `ev` undefined.
+    const lambdaArgs = /\bev\b/.test(body) ? '(_, ev)' : '(_, _)';
+    const call = `RoseTheme.Button(${ctx.parent}, ${label}, ${lambdaArgs} => { ${body} }${extra}${btnEnable ? `, enabled: ${btnEnable}` : ''})`;
     if (!needVar) { emit(`${call};`, ctx); return; }
     const b = `btn${++ctx.counter.c}`;
     emit(`var ${b} = ${call};`, ctx);
@@ -4009,7 +5482,7 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   }
   if (tag === 'hr') { emit(`RoseTheme.Separator(${ctx.parent});`, ctx); return; }
   if (tag === 'br') { emit(`RoseTheme.Spacer(${ctx.parent}, 8);`, ctx); return; }
-  // R450: a <details>/<summary> is WPF's own Expander - the browser collapses it,
+  // A <details>/<summary> is WPF's own Expander - the browser collapses it,
   // and a native build used to show every panel permanently open.
   if (tag === 'details') {
     const summary = node.children.find((c): c is Extract<IrNode, { kind: 'element' }> => c.kind === 'element' && c.tag.toLowerCase() === 'summary');
@@ -4051,11 +5524,16 @@ function emitElement(node: Extract<IrNode, { kind: 'element' }>, ctx: NetCtx): v
   const name = `panel${++ctx.counter.n}`;
   const style = styleOf(own, { direction: flexDirection(own, tag) });
   emit(`var ${name} = RoseTheme.Card(${ctx.parent}${style ? ', ' + style : ''});`, ctx);
+  const aria = node.attrs.find((a) => a.name === 'aria-label' || a.name === 'title');
+  if (aria) emit(`System.Windows.Automation.AutomationProperties.SetName(${name}, RoseTheme.Str(${csAttr(aria, ctx)}));`, ctx);
+  const role = node.attrs.find((a) => a.name === 'role');
+  if (role) emit(`System.Windows.Automation.AutomationProperties.SetHelpText(${name}, RoseTheme.Str(${csAttr(role, ctx)}));`, ctx);
   if (own.overflow === 'scroll') emit(`RoseTheme.Scrolled(${ctx.parent}, ${name});`, ctx);
   if (needVar) attach(name);
+  attachElementEvents(node, name, ctx);
   ctx.depth++;
   let scoped: NetCtx = {
-    ...ctx,
+    ...liCtx,
     parent: name,
     ancestors: [...ctx.ancestors, subject],
     inherited: mergeModels(ctx.inherited, textCarry(own)),
@@ -4134,17 +5612,26 @@ function csRead(name: string, type: string | undefined, app: string): string {
 function csScalarCalls(code: string): string {
   return rewriteToFixedCalls(
     code
+      .replace(/\bJSON\.stringify\s*\(/g, 'RoseKit.JsonStringify(')
+      .replace(/\bJSON\.parse\s*\(/g, 'RoseKit.JsonParse(')
       .replace(/\bMath\.round\s*\(/g, '(int)Math.Round(')
-      .replace(/\bMath\.floor\s*\(/g, '(int)Math.Floor(')
+      .replace(/\bMath\.floor\s*\(/g, 'RoseTheme.Floor(')
+      .replace(/\bMath\.pow\s*\(/g, 'Math.Pow(')
+      .replace(/\bMath\.sqrt\s*\(/g, 'Math.Sqrt(')
       .replace(/\bMath\.ceil\s*\(/g, '(int)Math.Ceiling(')
       .replace(/\bMath\.abs\s*\(/g, 'Math.Abs(')
       .replace(/\bMath\.max\s*\(/g, 'Math.Max(')
-      .replace(/\bMath\.min\s*\(/g, 'Math.Min('),
+      .replace(/\bMath\.min\s*\(/g, 'Math.Min(')
+      // The lookbehind keeps the kit's own spellings (RoseKit.Number, emitted
+      // by the reduce arm) from being wrapped a second time.
+      .replace(/(?<!RoseKit\.)\bNumber\s*\(/g, 'RoseKit.Number(')
+      .replace(/(?<!RoseKit\.)\bparseInt\s*\(/g, 'RoseKit.Number(')
+      .replace(/(?<!RoseKit\.)\bparseFloat\s*\(/g, 'RoseKit.Number('),
     (recv, d) => `RoseTheme.Fixed(${recv}, ${d})`,
   );
 }
 
-/** R482: a renamed function's call sites follow the rename. */
+/** A renamed function's call sites follow the rename. */
 function csRenameCalls(code: string, renamed: Map<string, string>): string {
   if (!renamed.size) return code;
   let out = code;
@@ -4191,11 +5678,13 @@ function csSafeName(name: string): string {
 
 function csStateFields(out: string): string {
   let o = out.replace(/app\.V\("([^"]+)"\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
-    (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
+    (_m, name: string, key: string) => (/^(?:Count|Length)$/.test(key) ? `RoseKit.Count(app.V("${name}"))` : `RoseTheme.Get(app.V("${name}"), "${key}")`));
   o = o.replace(/RoseTheme\.(?:Str|List)\(app\.V\("([^"]+)"\)\)\.([A-Za-z_$][\w$]*)(?!\s*[\w(])/g,
     (_m, name: string, key: string) => `RoseTheme.Get(app.V("${name}"), "${key}")`);
   // JS .length / a list read used as a count is the kit's Count, not a member.
   o = o.replace(/app\.V\("([^"]+)"\)\.(?:length|Length|Count)\b/g, (_m, name: string) => `RoseKit.Count(app.V("${name}"))`);
+  // An {#await} binding is a static object? field: its .length is the same count.
+  o = o.replace(/(__await\d+Value)\.(?:length|Length|Count)\b/g, (_m, field: string) => `RoseKit.Count(${field})`);
   o = o.replace(/'((?:[^'\\]|\\.)*)'/g, '"$1"');
   // A state read is object?: C# refuses arithmetic, comparison and ! on one
   // without the kit's conversion - the same coercion the Java target needs.
@@ -4217,8 +5706,13 @@ function csStateFields(out: string): string {
     return `RoseTheme.List(${items.join(', ')})`;
   });
   o = o.replace(/RoseTheme\.Get\(([^()]*)\)(\s*[-+*/%]\s*)(?![=])/g, (_m, inner: string, op: string) => `RoseTheme.Int(RoseTheme.Get(${inner}))${op}`);
+  // The right operand of the same arithmetic: `x + map.y` coerces too.
+  o = o.replace(/([-+*/%]\s*)RoseTheme\.Get\(([^()]*)\)(?!\s*[-+*/%=])/g, (_m, op: string, inner: string) => `${op}RoseTheme.Int(RoseTheme.Get(${inner}))`);
   o = o.replace(/RoseTheme\.Get\(([^,()]+), "([^"]+)"\)\s*\+=\s*([^;\n]+)/g,
     (_m, container: string, key: string, by: string) => `RoseTheme.Bump(${container}, "${key}", ${by.trim()})`);
+  // The plain store write: an assignment to the Get() call cannot compile.
+  o = o.replace(/RoseTheme\.Get\(([^,()]+), "([^"]+)"\)\s*=(?!=)\s*([^;\n]+);/g,
+    (_m, container: string, key: string, value: string) => `RoseTheme.Put(${container}, "${key}", ${value.trim()});`);
   o = o.replace(/\b([A-Za-z_$][\w$]*)\[(\d+)\]/g, (_m, name: string, at: string) => `RoseTheme.Index(${name}, ${at})`);
   o = o.replace(/!RoseTheme\.Str\(((?:[^()]|\([^()]*\))*)\)(\.Trim\(\))?/g, (_m, inner, trim) => `string.IsNullOrEmpty(RoseTheme.Str(${inner})${trim ?? ""})`);
   o = o.replace(/!([A-Za-z_$][\w$]*)\(app\)/g, (_m, fn: string) => `!RoseTheme.Truth(${fn}(app))`);
@@ -4238,16 +5732,44 @@ function csStateFields(out: string): string {
   return o;
 }
 
+/** The JS string-method family, one dispatch shared by the expression path
+ *  and the handler-body path (which never had it). */
+function csStringMethod(recv: string, method: string, args: string[], boolPos: boolean): string | null {
+  // The receiver is a dynamic value, not necessarily a C# string: a state
+  // read is object? and a truthiness helper returns bool. Str() coerces
+  // either, so `.Trim()` always has a string receiver. map/filter/reduce
+  // stay refused: the mapper pass and the collection-chain pass own them.
+  if (method === 'map' || method === 'filter' || method === 'reduce') return null;
+  const text = recv.includes('RoseTheme.Str(') ? recv : `RoseTheme.Str(${recv})`;
+  const want = (fallback: string) => `RoseTheme.Str(${args[0] ?? fallback})`;
+  const call = method === 'trim' ? `${text}.Trim()`
+    : method === 'trimStart' ? `${text}.TrimStart()`
+    : method === 'trimEnd' ? `${text}.TrimEnd()`
+    : method === 'toLowerCase' ? `${text}.ToLower()`
+    : method === 'toUpperCase' ? `${text}.ToUpper()`
+    : method === 'startsWith' ? `${text}.StartsWith(${want('""')})`
+    : method === 'endsWith' ? `${text}.EndsWith(${want('""')})`
+    : method === 'charAt' ? `RoseTheme.CharAt(${recv}, ${args[0] ?? '0'})`
+    : method === 'at' ? `RoseTheme.At(${recv}, ${args[0] ?? '0'})`
+    : method === 'repeat' ? `RoseTheme.Repeat(${recv}, ${args[0] ?? '0'})`
+    : `RoseTheme.Contains(${recv}, ${want('""')})`;
+  if (!boolPos) return call;
+  return method === 'startsWith' || method === 'endsWith' || method === 'includes'
+    ? call
+    : `!System.String.IsNullOrEmpty(${call})`;
+}
+
 function csExprInner(code: string, ctx: NetCtx): string {
   // A content read can also appear inline in a template (`{@html ...get(...)}`),
   // not just as a module const - the rewrite has to reach both.
   let out = rewriteContentReads(code.trim(), 'RoseKit.RoseContentList', 'RoseKit.RoseContentGet', '""');
   // JS Math.* / toFixed have C# spellings; one pass serves templates and bodies.
   out = csScalarCalls(out);
-  // R276: the four R273 constructs translate BEFORE the $-name rewrite and the
+  out = out.replace(/\bString\s*\(/g, 'RoseTheme.Str(');
+  // The four constructs translate BEFORE the $-name rewrite and the
   // state-getter unwrap - a template literal's interpolation would be mangled
   // and would never fire. The state read rides the dialect's own read.
-  // R291: the string + search family joined the same gate - `.join`, `.split`,
+  // The string + search family joined the same gate - `.join`, `.split`,
   // `.indexOf`, `.startsWith`, `.endsWith`, `.toUpperCase`, `.toLowerCase` and
   // `.every` are JS method names C# spells differently (or not at all), so a
   // template read of one is a CS1061 without this. The gate must include `join`
@@ -4258,7 +5780,7 @@ function csExprInner(code: string, ctx: NetCtx): string {
     const translated = translateExpr(out, { ...NET_EXPR, read: (n) => (ctx.stateNames.has(n) ? `app.V("${n}")` : n) }, new Set());
     if (translated !== null) return translated;
   }
-  // R191: a `$derived` read is its own expression, re-evaluated on every read.
+  // A `$derived` read is its own expression, re-evaluated on every read.
   // This runs before the state-read rewrite below, which would otherwise turn
   // `doubled()` into a read of the value snapshotted once in build().
   if (ctx.derivedExprs?.size) {
@@ -4273,6 +5795,7 @@ function csExprInner(code: string, ctx: NetCtx): string {
   out = out.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
   out = out.replace(/\$actionPending\s*\(\s*\)/g, 'false');
   out = out.replace(/\$actionError\s*\([^)]*\)(?:\s*\.\s*[A-Za-z_$][\w$]*)?/g, 'null');
+  // Component props and state are object?: a dotted read is a dictionary Get.
   // `$query()` is the launch parameters: the app's Param() lookup.
   out = out.replace(/\$query\s*\(\s*\)\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m, key: string) => `${ctx.app}.Param("${key}")`);
   out = out.replace(/\$query\s*\(\s*\)/g, `${ctx.app}.Param("")`);
@@ -4282,7 +5805,7 @@ function csExprInner(code: string, ctx: NetCtx): string {
   // rewrite so it sees the bare name: afterwards the condition is a call, and a
   // call result is not something the rewrite should second-guess.
   out = rewriteTernaryTruth(out, (operand) => `${operand} != null`, (name) => ctx.stateNames.has(name));
-  // R200: a component's `export let` prop is a PARAMETER of Build(), not a key
+  // A component's `export let` prop is a PARAMETER of Build(), not a key
   // of the app's state dictionary - `app.V("tone")` compiles, runs and reads the
   // CALLER's page state (or nothing), so the component renders an empty value.
   // Only a real $state/$derived/$data read is a dictionary read.
@@ -4290,7 +5813,7 @@ function csExprInner(code: string, ctx: NetCtx): string {
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (whole, name: string) =>
     (isMapRead(name) ? csRead(name, ctx.stateTypes.get(name), ctx.app) : whole));
   out = ctx.mapBinds.size ? rewriteMemberReads(out, (obj, key) => `RoseTheme.Get(${obj}, "${key}")`) : out;
-  // R200: the template writes a read bare - `{count}`, `class={tone}`,
+  // The template writes a read bare - `{count}`, `class={tone}`,
   // `{#each rows as row}` - and the WEB build is what callifies those. The IR
   // hands this emitter the source spelling, so a bare name reaches the generated
   // file as an identifier C# never declares (CS0103): the exported project does
@@ -4299,31 +5822,16 @@ function csExprInner(code: string, ctx: NetCtx): string {
   // `{name() || 'x'}` is JS truthiness; C# has no truthy String either.
   out = rewriteOrFallback(out, (operand) => `!string.IsNullOrEmpty(RoseTheme.Str(${operand}))`, () => true);
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
-  // R202: `string.Join` wants a typed IEnumerable, and the state dictionary
+  // `string.Join` wants a typed IEnumerable, and the state dictionary
   // hands back object? - so the JS list join goes through the theme helper that
   // flattens whatever the field actually holds. Left as `x.join(",")` it is a
   // CS1061 on a page that looked perfectly portable.
   out = rewriteJoinCalls(out, (list, sep) => `RoseTheme.Join(${list}, ${sep})`);
-  // R204: the JS string-method family. C# has the same ideas under PascalCase
+  // The JS string-method family. C# has the same ideas under PascalCase
   // names, and the receiver of a state read is an `object?` that has none of
   // them - `app.V("q").trim()` is two compile errors in one expression. The
   // wrapper is the kit's own stringifier, which every other read already uses.
-  out = rewriteStringMethods(out, (recv, method, args, boolPos) => {
-    const text = `RoseTheme.Str(${recv})`;
-    const want = (fallback: string) => `RoseTheme.Str(${args[0] ?? fallback})`;
-    const call = method === 'trim' ? `${text}.Trim()`
-      : method === 'trimStart' ? `${text}.TrimStart()`
-      : method === 'trimEnd' ? `${text}.TrimEnd()`
-      : method === 'toLowerCase' ? `${text}.ToLower()`
-      : method === 'toUpperCase' ? `${text}.ToUpper()`
-      : method === 'startsWith' ? `${text}.StartsWith(${want('""')})`
-      : method === 'endsWith' ? `${text}.EndsWith(${want('""')})`
-      : `RoseTheme.Contains(${recv}, ${want('""')})`;
-    if (!boolPos) return call;
-    return method === 'startsWith' || method === 'endsWith' || method === 'includes'
-      ? call
-      : `!System.String.IsNullOrEmpty(${call})`;
-  });
+  out = rewriteStringMethods(out, csStringMethod);
   return collapseNullTests(out);
 }
 
@@ -4342,6 +5850,7 @@ function scanState(script: string): StateFacts {
     facts.derived.push({ name: m[1], expr: sliceBalanced(script, (m.index ?? 0) + m[0].length - 1) });
   }
   for (const m of script.matchAll(/\b(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*\$data\b(?:<[^>]*>)?\s*\(/g)) facts.data.push(m[1]);
+  for (const n of implicitStateNames(script)) facts.state.push({ name: n, init: 'null' });
   return facts;
 }
 
@@ -4355,7 +5864,16 @@ function initialOf(script: string, name: string): string {
 
 function moduleBinds(script: string): Array<{ name: string; init: string }> {
   const out: Array<{ name: string; init: string }> = [];
-  for (const m of script.matchAll(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^\n;]+)/gm)) {
+  // Only module-scope declarations are binds: function-local `let out = []`
+  // must stay a C# local, not become a page field (dupes break the build).
+  const lines = script.split('\n');
+  let scope = 0;
+  const moduleLines = lines.map((line) => {
+    const top = scope === 0 ? line : '';
+    for (const ch of line) { if (ch === '{') scope++; else if (ch === '}') scope--; }
+    return top;
+  }).join('\n');
+  for (const m of moduleLines.matchAll(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;\n]*)?=\s*([^\n;]+)/gm)) {
     const init = m[2].trim();
     if (/^\$(?:state|derived|data|kv|persist)\b/.test(init)) continue;
     if (['params', 'csr', 'headers', 'prefetch', 'revalidate', 'buffer', 'bundle', 'hotVary', 'prerender', 'csp'].includes(m[1])) continue;
@@ -4402,7 +5920,7 @@ function escapeRe(s: string): string {
 }
 
 /**
- * R292 (P0): handler CONTROL FLOW was copied verbatim from JS into C#.
+ * (P0): handler CONTROL FLOW was copied verbatim from JS into C#.
  *
  * A handler body is a fourth code path after the template, the state
  * initializer and the expression IR - and it had no statement-level
@@ -4443,7 +5961,7 @@ function rewriteCatch(src: string): string {
 }
 
 /**
- * R292: every `switch` section needs a terminator in C#, including `default`.
+ * Every `switch` section needs a terminator in C#, including `default`.
  *
  * JS lets the final section fall out of the block; C# answers CS0163 ("Control
  * cannot fall through from one case label to another") on the section BEFORE it
@@ -4523,7 +6041,7 @@ function terminateSwitchSections(body: string): string {
 }
 
 /**
- * R292: a JS array literal is not a C# expression - `[1, 2, 3]` is a CS1003.
+ * A JS array literal is not a C# expression - `[1, 2, 3]` is a CS1003.
  *
  * The expression IR spells an array literal as the kit's `List(...)` for the
  * template path, but a handler BODY never goes through that IR, so an array
@@ -4549,12 +6067,15 @@ function rewriteArrayLiterals(src: string): string {
     }
     if (c === '[') {
       const before = out.replace(/\s+$/, '');
-      const isIndex = /[\w$)\]'"]$/.test(before);
+      const keyword = /\b(?:return|throw|yield|case|typeof|void|delete|await|in|of)\s*$/i.test(before);
+      const isIndex = !keyword && /[\w$)\]'"]$/.test(before);
       const isPattern = /\b(?:const|let|var)\s*$/.test(before);
       const close = matchBracket(src, i);
       if (!isIndex && !isPattern && close > i) {
         const inner = rewriteArrayLiterals(src.slice(i + 1, close));
-        out += `RoseTheme.List(${inner.trim()})`;
+        // Preserve newlines as whitespace: stripping them can join two
+        // statements when the source put each array item on its own line.
+        out += `RoseTheme.List(${inner.trim().replace(/\s*\n\s*/g, ' ')})`;
         i = close + 1;
         continue;
       }
@@ -4616,6 +6137,23 @@ function netHandlerDialect(ctx: NetCtx): HandlerDialect {
     set: (name, expr) => `app.Set("${name}", ${expr})`,
     action: (name) => `${name}(${ctx.app})`,
     refresh: () => 'app.Render()',
+    event: (body, params) => {
+      let out = body;
+      for (const p of params) {
+        const spell = (member: string, helper: string) => {
+          out = out.replace(new RegExp(`\\b${p}\\s*\\.\\s*${member}\\b`, 'g'), `${helper}(ev)`);
+        };
+        spell('key', 'RoseKit.KeyOf');
+        spell('ctrlKey', 'RoseKit.CtrlOf');
+        spell('shiftKey', 'RoseKit.ShiftOf');
+        spell('altKey', 'RoseKit.AltOf');
+        spell('clientX', 'RoseKit.XOf');
+        spell('clientY', 'RoseKit.YOf');
+        spell('button', 'RoseKit.ButtonOf');
+        out = out.replace(new RegExp(`\\b${p}\\b`, 'g'), 'RoseKit.RoseUiEvent(ev)');
+      }
+      return out;
+    },
     refuses: (body, params) => {
       const event = refusesEventUse(body, params);
       if (event) return event;
@@ -4623,6 +6161,45 @@ function netHandlerDialect(ctx: NetCtx): HandlerDialect {
       return null;
     },
   };
+}
+
+/**
+ * `globalThis.x` has no C# spelling: the kit's Globals bag is the honest
+ * global, so the counter idiom (`g.__n || 0`), the write and the plain read
+ * all become kit calls. Effect cleanups carry exactly these shapes.
+ */
+function rewriteGlobals(src: string): string {
+  let out = src.replace(/\(\s*globalThis\s*\)/g, 'globalThis');
+  // The numeric-fallback read folds first, so the `||` never reaches C#.
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*\|\|\s*(-?\d+(?:\.\d+)?)/g,
+    (_m: string, key: string) => `RoseKit.GlobalNum("${key}")`);
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*([+\-*/])=\s*([^;\n]+?);?/g,
+    (_m: string, key: string, op: string, by: string) => `RoseKit.PutGlobal("${key}", RoseKit.GlobalNum("${key}") ${op} ${by.trim()})`);
+  for (;;) {
+    const m = /\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)/.exec(out);
+    if (!m) break;
+    const valueStart = m.index + m[0].length;
+    const semi = statementEnd(out, valueStart);
+    if (semi < 0) break;
+    out = out.slice(0, m.index) + `RoseKit.PutGlobal("${m[1]}", ${out.slice(valueStart, semi).trim()});` + out.slice(semi + 1);
+  }
+  out = out.replace(/\bglobalThis\s*\.\s*([A-Za-z_$][\w$]*)/g, (_m: string, key: string) => `RoseKit.Global("${key}")`);
+  return out;
+}
+
+/** The `;` closing the statement that starts at `from`, top-level only, or -1. */
+function statementEnd(src: string, from: number): number {
+  let depth = 0;
+  let quote = '';
+  for (let i = from; i < src.length; i++) {
+    const c = src[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { if (depth === 0) return -1; depth--; }
+    else if (c === ';' && depth === 0) return i;
+  }
+  return -1;
 }
 
 function rewriteSetState(src: string): string {
@@ -4641,15 +6218,311 @@ function rewriteSetState(src: string): string {
   }
 }
 
-function translateHandlers(script: string, facts: StateFacts, page: { route: string; cls: string }, known: Set<string>, stateTypes: Map<string, string>, warnings: string[]): string {
-  if (!script.trim()) return '';
+/** The arguments of every `onMount` (or `onCleanup`) call, in source order. */
+function lifecycleArgs(script: string, hook: string): string[] {
+  const out: string[] = [];
+  for (const m of script.matchAll(new RegExp('\\b' + hook + '\\s*\\(', 'g'))) {
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(script, open);
+    if (close < 0) continue;
+    out.push(script.slice(open + 1, close).trim());
+  }
+  return out;
+}
+
+/** The statement list of an inline mount/cleanup callback, or null when the
+ *  argument is not a zero-argument arrow or function literal. */
+function lifecycleBodyOf(arg: string): string | null {
+  const src = arg.replace(/^\s*async\s+/, '').trim();
+  const block = /^\(\s*\)\s*=>\s*\{([\s\S]*)\}$/.exec(src) || /^function\s*(?:[A-Za-z_$][\w$]*)?\s*\(\s*\)\s*\{([\s\S]*)\}$/.exec(src);
+  if (block) return block[1].trim();
+  const expr = /^\(\s*\)\s*=>\s*([\s\S]+)$/.exec(src);
+  if (expr) return expr[1].trim().replace(/;$/, '') + ';';
+  return null;
+}
+
+/** The zero-argument callback of a timer call, or null when it is not an
+ *  inline arrow or function literal (a bare function reference has no body). */
+function timerCallbackBody(cb: string): string | null {
+  const src = cb.replace(/^\s*async\s+/, '').trim();
+  const block = /^\(\s*\)\s*=>\s*\{([\s\S]*)\}$/.exec(src) || /^function\s*(?:[A-Za-z_$][\w$]*)?\s*\(\s*\)\s*\{([\s\S]*)\}$/.exec(src);
+  if (block) return block[1].trim();
+  const expr = /^\(\s*\)\s*=>\s*([\s\S]+)$/.exec(src);
+  if (expr) return expr[1].trim().replace(/;$/, '') + ';';
+  return null;
+}
+
+/** `setInterval(fn, ms)` / `setTimeout(fn, ms)` with an inline callback and a
+ *  literal interval become the kit's DispatcherTimer calls (the tick repaints,
+ *  the way the {#defer} timers do). Anything else is left verbatim for the
+ *  refusal list to name instead of emitting broken C#. */
+function rewriteTimerCalls(body: string, spell: (stmts: string) => string | null): string {
+  let out = body;
+  for (const fn of ['setInterval', 'setTimeout'] as const) {
+    let i = 0;
+    for (;;) {
+      const at = out.indexOf(fn, i);
+      if (at < 0) break;
+      if (/[A-Za-z0-9_$.]/.test(out[at - 1] ?? '')) { i = at + fn.length; continue; }
+      let open = at + fn.length;
+      while (open < out.length && /\s/.test(out[open])) open++;
+      if (out[open] !== '(') { i = at + fn.length; continue; }
+      const close = matchParen(out, open);
+      if (close < 0) { i = at + fn.length; continue; }
+      const args = splitTopLevel(out.slice(open + 1, close));
+      // The TS transform spells 1000 as 1e3 - the interval is a number, not a digit run.
+      const ms = args.length === 2 && /^[\d.]+e?\d*$/i.test(args[1].trim()) && Number.isInteger(Number(args[1].trim())) ? String(Number(args[1].trim())) : '';
+      const inner = ms ? timerCallbackBody(args[0].trim()) : null;
+      const spelled = inner === null ? null : spell(inner);
+      if (spelled === null) { i = close + 1; continue; }
+      const call = fn === 'setInterval'
+        ? `RoseKit.RoseInterval(${ms}, delegate\n        {\n${spelled}        })`
+        : `RoseKit.RoseTimeout(${ms}, delegate\n        {\n${spelled}        })`;
+      out = out.slice(0, at) + call + out.slice(close + 1);
+      i = at + call.length;
+    }
+  }
+  return out;
+}
+
+/** The page-local holders a mount or cleanup body writes (`let timer = null`
+ *  at the script's top level): hoisted to one writable field per page, so the
+ *  mount moment can store and the disposal moment read the same handle. */
+function lifecyclePageFields(script: string, stateNames: Set<string>): string[] {
+  const bodies: string[] = [];
+  for (const hook of ['onMount', 'onCleanup']) {
+    for (const arg of lifecycleArgs(script, hook)) {
+      const body = lifecycleBodyOf(arg);
+      if (body !== null) bodies.push(body);
+    }
+  }
+  const assigned = new Set<string>();
+  for (const b of bodies) {
+    // The declaration itself (`let local = 5`) is not an assignment.
+    for (const m of b.matchAll(/(?<!\b(?:let|var|const)\s+)([A-Za-z_$][\w$]*)\s*=(?!=)/g)) assigned.add(m[1]);
+  }
+  // Only a brace-depth-0 declaration is a page local; one an arrow body
+  // declares stays local, and its cleanup read is the scope-split warning.
+  const topLevel = new Set<string>();
+  let depth = 0;
+  let quote = '';
+  let line = false;
+  let block = false;
+  for (let i = 0; i < script.length; i++) {
+    const ch = script[i];
+    const two = script.slice(i, i + 2);
+    // Comments and strings are opaque: an apostrophe in a comment ("the
+    // route's DOM") would otherwise open a phantom quote and swallow the
+    // declarations after it.
+    if (line) { if (ch === '\n') line = false; continue; }
+    if (block) { if (two === '*/') { i++; block = false; } continue; }
+    if (two === '//') { line = true; i++; continue; }
+    if (two === '/*') { block = true; i++; continue; }
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '{' || ch === '(' || ch === '[') { depth++; continue; }
+    if (ch === '}' || ch === ')' || ch === ']') { depth--; continue; }
+    if (depth === 0 && (i === 0 || /[;\n]/.test(script[i - 1]))) {
+      const m = /^\s*(?:let|var)\s+([A-Za-z_$][\w$]*)/.exec(script.slice(i));
+      if (m) topLevel.add(m[1]);
+    }
+  }
+  const out: string[] = [];
+  for (const name of assigned) {
+    if (stateNames.has(name)) continue;
+    if (!topLevel.has(name)) continue;
+    out.push(name);
+  }
+  return out;
+}
+
+/** A raw mount/cleanup body, TS-stripped in isolation: the whole-script
+ *  transform renames locals against sibling scopes, which would break the
+ *  scope-split check; one body alone keeps its names. CJS format, because a
+ *  body with a top-level `return` makes the ESM spelling wrap it in a shim. */
+function lifecycleTsBody(body: string): string {
+  try { return transformSync(body, { loader: 'ts', format: 'cjs', target: 'es2020' }).code; } catch { return body; }
+}
+
+/** Why a mount or cleanup body was dropped, read off what SURVIVES the
+ *  translation - the same refusal logic the async stub path uses. */
+function lcDropReason(translated: string): string {
+  if (/=>/.test(translated)) return 'a JS arrow the target cannot spell';
+  if (/\bset(?:Interval|Timeout)\s*\(/.test(translated)) return 'a timer whose callback is not an inline function or whose interval is not a literal';
+  if (/\bFormData\s*\(|\bdocument\.|\bwindow\.|\bnew\s+[A-Z]/.test(translated)) return 'a web-only construct (DOM/FormData/new)';
+  return 'a construct the target cannot express';
+}
+
+/** A component's translated lifecycle: the mount/dispose methods to emit on
+ *  its View class and the names the parent page's mount moment calls. Null
+ *  when the component declares neither hook (or nothing survived). */
+interface ComponentLc {
+  methods: string;
+  mounts: string[];
+  cleanups: string[];
+  fields: string[];
+  /** True when the component declares own $state or hoisted lifecycle fields:
+   *  the mount/dispose methods take the per-instance id. */
+  keyed: boolean;
+}
+
+/** The component-level onMount/onCleanup, translated with the same machinery
+ *  the page-level wiring uses. The bodies run against the app's state
+ *  dictionary - the component's own $state keys - so a mount body writing a
+ *  counter works; a body reading a prop is dropped with its name, because the
+ *  mount moment has no access to the component's parameters. */
+function componentLifecycle(script: string | null, cls: string, warnings: string[]): ComponentLc | null {
+  if (!script || !/\bon(?:Mount|Cleanup)\s*\(/.test(script)) return null;
+  const facts = scanState(script);
+  const stateNames = new Set([...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name)]);
+  const stateTypes = new Map<string, string>();
+  for (const s of facts.state) stateTypes.set(s.name, csType(initialOf(script, s.name)));
+  for (const d of facts.derived) stateTypes.set(d.name, 'object');
+  const known = new Set(stateNames);
+  const pageFields = lifecyclePageFields(script, stateNames);
+  // Own $state and the hoisted lifecycle fields are per-instance storage, so
+  // the emitted methods carry the id whenever either exists.
+  const keyed = facts.state.length > 0 || pageFields.length > 0;
+  const lcApp = keyed ? 'RoseApp app, string instanceId' : 'RoseApp app';
+  // The names a mount/cleanup body can read only if the View class carries
+  // them: the app's state keys and the hoisted page-local fields. The
+  // component's script functions are emitted as static members now, so a body
+  // may call one - only a script const or a module bind still has no C#
+  // existence on the component's View, and a body that reads one is dropped
+  // with its name instead of emitting an unresolvable C# name.
+  const unseen = new Set<string>();
+  for (const n of scriptConstsFor(script, stateNames).keys()) unseen.add(n);
+  for (const b of moduleBinds(script)) unseen.add(b.name);
+  for (const f of pageFields) unseen.delete(f);
+  const fnCalls = new Set<string>();
+  for (const m of script.matchAll(/^[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)) fnCalls.add(m[1]);
+  const props = [...script.matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  const mounts: string[] = [];
+  const cleanups: string[] = [];
+  const methods: string[] = [];
+  const spell = (rawBody: string, kind: 'onMount' | 'onCleanup'): string | null => {
+    const body = lifecycleTsBody(rawBody);
+    const usedProps = props.filter((p) => new RegExp('\\b' + escapeRe(p) + '\\b').test(body));
+    if (usedProps.length) {
+      warnings.push(`${cls}: an ${kind} body is dropped - it reads the prop ${usedProps.join(', ')}, which the mount moment has no access to`);
+      return null;
+    }
+    let translated = translateBody(body, cls, [...stateNames], known, stateTypes, warnings, false, pageFields)
+      .replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
+    // A call to one of the component's own functions rides the emitted static
+    // member, which takes the app first.
+    for (const fn of fnCalls) {
+      translated = translated.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), fn + '(app)');
+      translated = translated.replace(new RegExp('\\b' + fn + '\\((?!\\)|app\\))', 'g'), fn + '(app, ');
+    }
+    if (translated.includes('handler body not translated') || /=>|\bset(?:Interval|Timeout)\s*\(|\bFormData\s*\(|\bdocument\.|\bwindow\.|\be\.target\b/.test(translated)) {
+      warnings.push(`${cls}: an ${kind} body is dropped - ${lcDropReason(translated)}`);
+      return null;
+    }
+    const leaky = [...unseen].filter((n) => new RegExp('\\b' + escapeRe(n) + '\\b').test(translated));
+    if (leaky.length) {
+      warnings.push(`${cls}: an ${kind} body is dropped - it reads the script-level value ${leaky.join(', ')}, which the component's View class does not carry`);
+      return null;
+    }
+    return keyLcFieldRefs(translated, pageFields);
+  };
+  for (const arg of lifecycleArgs(script, 'onMount')) {
+    const name = `__mount${mounts.length}`;
+    // A bare function reference runs through the member the function pass
+    // emits on this View; any other non-body argument stays refused by name.
+    if (/^[A-Za-z_$][\w$]*$/.test(arg)) {
+      if (fnCalls.has(arg)) {
+        mounts.push(name);
+        methods.push(`    internal static void ${name}(${lcApp})\n    {\n        ${arg}(app);\n    }`);
+        continue;
+      }
+      warnings.push(`${cls}: an onMount argument is not a function body this target can run - it is dropped (${arg})`);
+      continue;
+    }
+    const rawBody = lifecycleBodyOf(arg);
+    if (rawBody === null) {
+      warnings.push(`${cls}: an onMount argument is not a function body this target can run - it is dropped (${arg.slice(0, 40)})`);
+      continue;
+    }
+    const translated = spell(rawBody, 'onMount');
+    if (translated === null) continue;
+    mounts.push(name);
+    methods.push(`    internal static void ${name}(${lcApp})\n    {\n${translated}\n    }`);
+  }
+  const declared = new Set<string>();
+  for (const arg of lifecycleArgs(script, 'onMount')) {
+    const mountBody = lifecycleBodyOf(arg);
+    if (mountBody !== null) for (const n of effectLocals(mountBody)) declared.add(n);
+  }
+  for (const arg of lifecycleArgs(script, 'onCleanup')) {
+    const name = `__lcDispose${cleanups.length}`;
+    if (/^[A-Za-z_$][\w$]*$/.test(arg)) {
+      if (fnCalls.has(arg)) {
+        cleanups.push(name);
+        methods.push(`    internal static void ${name}(${lcApp})\n    {\n        ${arg}(app);\n    }`);
+        continue;
+      }
+      warnings.push(`${cls}: an onCleanup argument is not a function body this target can run - it is dropped (${arg})`);
+      continue;
+    }
+    const rawBody = lifecycleBodyOf(arg);
+    if (rawBody === null) {
+      warnings.push(`${cls}: an onCleanup argument is not a function body this target can run - it is dropped (${arg.slice(0, 40)})`);
+      continue;
+    }
+    const body = lifecycleTsBody(rawBody);
+    const hidden = [...declared].filter((n) => new RegExp('\\b' + escapeRe(n) + '\\b').test(body));
+    if (hidden.length) {
+      warnings.push(`${cls}: an onCleanup body reads a local an onMount body declares (${hidden.join(', ')}) - the two run in different scopes, so it is dropped`);
+      continue;
+    }
+    const translated = spell(rawBody, 'onCleanup');
+    if (translated === null) continue;
+    cleanups.push(name);
+    methods.push(`    internal static void ${name}(${lcApp})\n    {\n${translated}\n    }`);
+  }
+  if (!mounts.length && !cleanups.length) return null;
+  return { methods: methods.join('\n\n'), mounts, cleanups, fields: pageFields, keyed };
+}
+
+/** What the statement pipeline shares between a page's handler pass and a
+ *  component's function pass: the transformed script, the names it declares,
+ *  and the finisher every translated body goes through. */
+interface ScriptFnPrep {
+  code: string;
+  stateNames: string[];
+  callNames: Set<string>;
+  renamed: Map<string, string>;
+  actions: string[];
+  finish: (translated: string, params: string[]) => string;
+}
+
+function prepScriptFns(script: string, file: string, facts: StateFacts, warnings: string[]): ScriptFnPrep {
   let code = script.replace(/^\s*import\s+[^;]*?from\s*['"][^'"]*['"]\s*;?\s*$/gm, '');
+  // A .rose page may import pure business modules from src/lib. Bundle those
+  // local .ts/.js dependencies into the page script at export time; the
+  // desktop target gets their functions instead of dropping the import.
+  const localImports = [...script.matchAll(/^\s*import\s+[^;]*?from\s*['"]([^'"]+\.(?:ts|js))['"]\s*;?\s*$/gm)];
+  if (false && localImports.length) {
+    try {
+      const abs = path.resolve("src/pages", file);
+      const virtual = abs + '.rosezm-inline.ts';
+      const result = buildSync({
+        stdin: { contents: script, resolveDir: path.dirname(abs), loader: 'ts', sourcefile: virtual },
+        bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2020',
+        external: ['node:*'], logLevel: 'silent',
+      });
+      code = result.outputFiles?.[0]?.text ?? code;
+    } catch (err) {
+      warnings.push(`dotnet: ${file}: local .ts imports could not be bundled: ${String(err)}`);
+    }
+  }
   try {
-    // R241: esbuild's first call pays a ~90ms service spawn; skip it when the
+    // Esbuild's first call pays a ~90ms service spawn; skip it when the
     // script is plain JavaScript and there is nothing to strip.
     code = transformSync(code, { loader: 'ts', format: 'esm', target: 'es2020' }).code;
   } catch {
-    warnings.push(`dotnet: ${page.cls}: the script did not parse as TypeScript - handlers are stubs`);
+    warnings.push(`dotnet: ${file}: the script did not parse as TypeScript - handlers are stubs`);
   }
   const stateNames = [...facts.state.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data];
   for (const name of stateNames) {
@@ -4661,7 +6534,6 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     if (close < 0) continue;
     code = code.slice(0, m.index) + code.slice(close + 1).replace(/^;/, '');
   }
-  const methods: string[] = [];
   let actions: string[] = [];
   try { actions = extractExports(script).actions.map((a) => a.name); } catch { /* unparsable script keeps no actions */ }
   // A desktop build has no backend: the exported action runs locally, so its
@@ -4671,31 +6543,22 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
   code = code
     .replace(/^\s*export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm, '')
     .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, '');
-  // R482: the page's own entry point is `Build(...)`; a user function named
+  // The page's own entry point is `Build(...)`; a user function named
   // `build` would be a second overload of it - legal C#, but the call sites
   // pick the wrong one. Rename it.
   const renamed = new Map<string, string>();
-  for (const m of code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
-    const name = m[1];
-    if (name.startsWith('__')) continue;
-    const csName = name === 'build' ? 'build_' : name;
-    if (csName !== name) {
-      renamed.set(name, csName);
-      warnings.push(`${page.cls}: the function "${name}" is renamed to "${csName}" - the page's own entry point is called Build`);
-    }
-    const open = m.index + m[0].length - 1;
-    const close = matchParen(code, open);
-    if (close < 0) continue;
+  const callNames = new Set<string>();
+  for (const m2 of code.matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)) callNames.add(m2[1]);
+  // One statement list, two callers: a function body and a $effect body are the
+  // same kind of code, so they get the same C# spelling.
+  const finish = (translated: string, params: string[]): string => {
     // Handler bodies are statements: they never pass through csExpr, so the
     // state-value coercions run here too (the same lesson the Java target taught).
-    let body = csStateFields(csRenameCalls(translateBody(code.slice(open + 1, close), page.cls, stateNames, known, stateTypes, warnings), renamed));
+    let body = csStateFields(csRenameCalls(translated, renamed));
     // A call INSIDE a body needs the app too: the emitted method takes it first.
     // The rename (build -> build_) happens in csRenameCalls above, so the call
     // has to be matched under BOTH names.
-    const callNames = new Set<string>();
-    for (const m2 of script.matchAll(/^[ \t]*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)) callNames.add(m2[1]);
-    for (const [, to] of renamed) callNames.add(to);
-    for (const fn of callNames) {
+    for (const fn of [...callNames, ...renamed.values()]) {
       body = body.replace(new RegExp('\\b' + fn + '\\(\\)', 'g'), fn + '(app)');
       body = body.replace(new RegExp('\\b' + fn + '\\((?!\\)|app\\))', 'g'), fn + '(app, ');
     }
@@ -4703,18 +6566,295 @@ function translateHandlers(script: string, facts: StateFacts, page: { route: str
     body = body.replace(/\$t\s*\(\s*(['"])([^'"]*)\1[^)]*\)/g, '"$2"');
     // A JS handler's event parameter has no C# counterpart unless the signature
     // carries it - the body read e.key and the parameter had been dropped.
-    const params = m[2].split(',').map((x) => x.trim().split(/[:\s=]/)[0]).filter(Boolean);
     for (const name of params) {
       body = body.replace(new RegExp('\\b' + name + '\\.key\\b', 'g'), `RoseKit.KeyOf(${name})`);
+    }
+    // An event parameter is an `object?`: the text a handler reads off it goes
+    // through the kit's event getter, never a direct member access.
+    for (const name of params) {
+      body = body.replace(new RegExp('\\b' + escapeRe(name) + '\\.(?:currentTarget|target)\\.value\\b', 'g'), `RoseKit.EventValue(${name})`);
     }
     for (const name of params) {
       if (csSafeName(name) !== name) body = body.replace(new RegExp('\\b' + name + '\\b', 'g'), '@' + name);
     }
+    return body;
+  };
+  return { code, stateNames, callNames, renamed, actions, finish };
+}
+
+/** A local assigned from `await <fn>(...)` holds the sibling's returned
+ *  object, which is a Dictionary: C# has no member to read off it, so a field
+ *  read on that local is the kit's Get. Components only - a page's output stays
+ *  as it was. */
+function awaitFieldReads(body: string, enabled: boolean): string {
+  if (!enabled) return body;
+  let out = body;
+  // A destructured await (`const { ok } = await save()`) is not C#: the object
+  // lands in one var and each bound name reads its field off it. The later
+  // member-read pass then spell any `ok.field` chain.
+  let destructureSeq = [...out.matchAll(/__rosezmAwaited(\d+)/g)].reduce((n, m) => Math.max(n, Number(m[1]) + 1), 0);
+  for (const m of [...out.matchAll(/\bconst\s*\{([^}]*)\}\s*=\s*(await\s+[A-Za-z_$][\w$]*\s*\([^)]*\))/g)]) {
+    const names = m[1].split(',').map((x) => x.trim()).filter(Boolean);
+    if (!names.length) continue;
+    const tmp = `__rosezmAwaited${destructureSeq++}`;
+    const reads = names.map((n) => `var ${n} = RoseTheme.Get(${tmp}, "${n}");`).join(' ');
+    out = out.replace(m[0], `var ${tmp} = ${m[2]}; ${reads}`);
+  }
+  for (const m of [...body.matchAll(/\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+[A-Za-z_$][\w$]*\s*\(/g)]) {
+    const local = m[1];
+    const safe = escapeRe(local);
+    out = out.replace(new RegExp(`\\b${safe}\\.(?:length|Length|Count)\\b`, 'g'), `RoseKit.Count(${local})`);
+    out = out.replace(new RegExp(`\\b${safe}\\.([A-Za-z_$][\\w$]*)(?!\\s*[\\w(])`, 'g'), (_m: string, key: string) => `RoseTheme.Get(${local}, "${key}")`);
+  }
+  return out;
+}
+
+/** The target's member spelling of every top-level script function - one loop
+ *  for a page's class and a component's View alike. `leaky`, when given, names
+ *  the script-level values with no C# existence on a component's View: a body
+ *  that reads one becomes a stub carrying its name, never unresolvable C#. */
+function emitScriptFunctions(prep: ScriptFnPrep, file: string, known: Set<string>, stateTypes: Map<string, string>, warnings: string[], pageFields: string[], actions: string[], leaky?: Set<string>, keyed = false, componentAsync = false): string {
+  const methods: string[] = [];
+  // A keyed component's own $state lives under `instanceId + ":name"`, so every
+  // member takes the id after the app and every call site threads it through.
+  const appDecl = keyed ? 'RoseApp app, string instanceId' : 'RoseApp app';
+  // A sibling's `await fn()` needs fn to return a Task even when its own body
+  // never suspends - the page-level twin of the component flag above.
+  const awaitedFns = new Set([...prep.code.matchAll(/\bawait\s+([A-Za-z_$][\w$]*)\s*\(/g)]
+    .map((mm) => mm[1]).filter((n) => prep.callNames.has(n)));
+  for (const m of prep.code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/gm)) {
+    const name = m[1];
+    if (name.startsWith('__')) continue;
+    const csName = name === 'build' ? 'build_' : name;
+    if (csName !== name) {
+      prep.renamed.set(name, csName);
+      warnings.push(`${file}: the function "${name}" is renamed to "${csName}" - the page's own entry point is called Build`);
+    }
+    const open = m.index + m[0].length - 1;
+    const close = matchParen(prep.code, open);
+    if (close < 0) continue;
+    const params = m[2].split(',').map((x) => x.trim().split(/[:\s=]/)[0]).filter(Boolean);
     const paramDecl = actions.includes(csName) ? '' : params.map((name) => `, object? ${csSafeName(name)}`).join('');
+    const rawBody = prep.code.slice(open + 1, close);
+    const isAsync = /\basync\b/.test(m[0]);
+    const leakyHit = (body: string): string[] => {
+      if (!leaky) return [];
+      return [...leaky].filter((n) => new RegExp('\\b' + escapeRe(n) + '\\b').test(body));
+    };
+    const leakyWarn = (leaked: string[]): void => {
+      warnings.push(`dotnet: ${file}: the function "${name}" is a stub - it reads the script-level value ${leaked.join(', ')}, which the component's View class does not carry`);
+    };
+    // Only a body that really suspends takes the async path: an exported async
+    // action with no await is the desktop's local action, and it must keep the
+    // sync spelling the form channel calls (the guestbook regression). A
+    // component is the exception: a sibling awaits its return value, so its
+    // async functions stay awaitable even when they never suspend. A page
+    // sibling that awaits fn() makes fn awaitable the same way.
+    if (isAsync && (componentAsync || awaitedFns.has(name) || /\bawait\b/.test(rawBody))) {
+      // Translate first, refuse on what SURVIVES: the pipeline spells the
+      // mapper arrow, the ActionError throw and the form reads itself, so
+      // refusing on the raw source would stub handlers it can express.
+      const body = awaitFieldReads(prep.finish(translateBody(rawBody, file, prep.stateNames, known, stateTypes, warnings, true, pageFields), params), componentAsync || [...rawBody.matchAll(/\bawait\s+([A-Za-z_$][\w$]*)\s*\(/g)].some((mm) => prep.callNames.has(mm[1])))
+        // refresh() spells app.Render(), a void call: awaiting it is CS4008.
+        .replace(/await\s+(?:\(\s*)?app\.Render\(\)\s*\)?\s*;/g, 'app.Render();')
+        // useNative spells RoseKit.RoseNative, a synchronous object call.
+        .replace(/await\s+RoseKit\.RoseNative\(/g, 'RoseKit.RoseNative(')
+        .replace(/\breturn\s*;/g, 'return null;');
+      const leaked = leakyHit(body);
+      if (leaked.length) {
+        leakyWarn(leaked);
+        methods.push(`    private static System.Threading.Tasks.Task<dynamic> ${csName}(${appDecl}${paramDecl})\n    {\n        // rosezm: the body reads ${leaked.join(', ')}, which the component's View class does not carry.\n        return System.Threading.Tasks.Task.FromResult<dynamic>(null);\n    }`);
+        continue;
+      }
+      const reason = /=>/.test(body) ? 'a JS arrow the target cannot spell'
+        : /\bPromise\b/.test(body) ? 'a Promise the target has no spelling for'
+        : /\bFormData\s*\(|\bdocument\.|\bwindow\./.test(body) ? 'a web-only construct (DOM/FormData)'
+        : null;
+      if (reason) {
+        warnings.push(`dotnet: ${file}: the async function "${name}" is a stub - its body uses ${reason}`);
+        methods.push(`    private static System.Threading.Tasks.Task<dynamic> ${csName}(${appDecl}${paramDecl})\n    {\n        // rosezm: async body not translated (${reason}).\n        return System.Threading.Tasks.Task.FromResult<dynamic>(null);\n    }`);
+        continue;
+      }
+      // A body whose last statement already returns keeps one return, never an unreachable second.
+      const tail = (componentAsync || awaitedFns.has(name)) && /(?:^|\n)\s*return\b[^\n]*;\s*$/.test(body) ? '' : '\n        return null;';
+      methods.push(`    private static async System.Threading.Tasks.Task<dynamic> ${csName}(${appDecl}${paramDecl})\n    {\n${body}${tail}\n    }`);
+      continue;
+    }
+    const body = prep.finish(translateBody(rawBody, file, prep.stateNames, known, stateTypes, warnings, false, pageFields), params);
+    const leaked = leakyHit(body);
+    if (leaked.length) {
+      leakyWarn(leaked);
+      methods.push(`    private static object? ${csName}(${appDecl}${paramDecl})\n    {\n        // rosezm: the body reads ${leaked.join(', ')}, which the component's View class does not carry.\n        return null;\n    }`);
+      continue;
+    }
     const returnsValue = /\breturn\s+[^;\s]/.test(body);
-    methods.push(`    private static object? ${csName}(RoseApp app${paramDecl})\n    {\n${body}${returnsValue ? '' : '\n        app.Render();'}\n        return null;\n    }`);
+    methods.push(`    private static object? ${csName}(${appDecl}${paramDecl})\n    {\n${body}${returnsValue ? '' : '\n        app.Render();'}\n        return null;\n    }`);
   }
   return methods.join('\n\n');
+}
+
+function translateHandlers(script: string, facts: StateFacts, page: { route: string; cls: string }, known: Set<string>, stateTypes: Map<string, string>, warnings: string[], effectNames: string[] = [], disposeNames: string[] = [], mountNames: string[] = [], cleanupNames: string[] = [], pageFields: string[] = []): string {
+  const prep = prepScriptFns(script, page.cls, facts, warnings);
+  const { code, callNames, finish, stateNames } = prep;
+  const methods: string[] = [];
+  const fnMembers = emitScriptFunctions(prep, page.cls, known, stateTypes, warnings, pageFields, prep.actions);
+  if (fnMembers) methods.push(fnMembers);
+  // A $effect body is the same statement list, so it gets the same translation.
+  // Build() calls each effect before it builds the tree, and that pass is the
+  // recompute: the field an effect maintains stays live instead of frozen at
+  // its seed. A write is a plain `app.Set` - Build() is already the render.
+  for (const eff of effectBodies(code)) {
+    if (eff.call && !callNames.has(eff.call)) {
+      warnings.push(`${page.cls}: an effect on "${eff.call}" is skipped - it names no function in this page`);
+      continue;
+    }
+    if (!eff.call && !eff.body) {
+      warnings.push(`${page.cls}: an effect body the exporter could not read is skipped (${eff.arg.slice(0, 40)})`);
+      continue;
+    }
+    // The cleanup an effect returns now runs: the window's Closed event calls
+    // RoseApp.Dispose(), which runs every registered `__disposeN`. `refresh()`
+    // is stripped from the run body - Build() IS the render.
+    const [run, dispose] = eff.body ? cutEffectReturn(eff.body) : ['', ''];
+    const body = eff.call ? `        ${eff.call}(app);` : finish(translateBody(run.replace(/\b(?:await\s+)?refresh\s*\(\s*\)\s*;?/g, ''), page.cls, stateNames, known, stateTypes, warnings, false, pageFields), []);
+    if (/handler body not translated/.test(body)) {
+      warnings.push(`${page.cls}: an effect body the exporter could not translate is skipped (${eff.arg.slice(0, 40)})`);
+      continue;
+    }
+    const name = `__effect${effectNames.length}`;
+    effectNames.push(name);
+    methods.push(`    private static void ${name}(RoseApp app)\n    {\n${body}\n    }`);
+    if (!dispose) continue;
+    const cleanup = cleanupStatements(dispose);
+    if (!cleanup) {
+      warnings.push(`${page.cls}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+      continue;
+    }
+    // A cleanup reading a local the effect body declared would emit a name no
+    // dispose method can see - the scope split is real, so the warning stays.
+    const hidden = effectLocals(run).filter((n) => new RegExp('\\b' + escapeRe(n) + '\\b').test(cleanup));
+    if (hidden.length) {
+      warnings.push(`${page.cls}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+      continue;
+    }
+    const cbody = finish(translateBody(cleanup, page.cls, stateNames, known, stateTypes, warnings, false, pageFields), []);
+    if (/handler body not translated/.test(cbody) || /\b(?:setTimeout|clearTimeout|setInterval|clearInterval|addEventListener|removeEventListener|requestAnimationFrame|globalThis|document|window)\b/.test(cbody)) {
+      warnings.push(`${page.cls}: an effect's returned cleanup has nowhere to run on this platform, so it is dropped (the effect body itself still runs)`);
+      continue;
+    }
+    const disposeName = `__dispose${disposeNames.length}`;
+    disposeNames.push(disposeName);
+    methods.push(`    private static void ${disposeName}(RoseApp app)\n    {\n${cbody}\n    }`);
+  }
+  // onMount: the page's mount moment is its first Build() pass - renderPage
+  // wires every emitted body behind a one-shot flag there. A callback that is
+  // a page function is called through; anything untranslatable is named, never
+  // dropped in silence.
+  // The bodies come off the RAW script, not the transformed one: the
+  // whole-script transform renames locals against sibling scopes, so a
+  // mount-declared local and the cleanup that reads it would stop matching.
+  for (const arg of lifecycleArgs(script, 'onMount')) {
+    const name = `__mount${mountNames.length}`;
+    if (/^[A-Za-z_$][\w$]*$/.test(arg) && callNames.has(arg)) {
+      mountNames.push(name);
+      methods.push(`    private static void ${name}(RoseApp app)\n    {\n${finish(`${arg}();`, [])}\n    }`);
+      continue;
+    }
+    const rawBody = lifecycleBodyOf(arg);
+    if (rawBody === null) {
+      warnings.push(`${page.cls}: an onMount argument is not a function body this target can run - it is dropped (${arg.slice(0, 40)})`);
+      continue;
+    }
+    const body = lifecycleTsBody(rawBody);
+    const translated = finish(translateBody(body, page.cls, stateNames, known, stateTypes, warnings, false, pageFields), []);
+    if (translated.includes('handler body not translated') || /=>|\bset(?:Interval|Timeout)\s*\(|\bFormData\s*\(|\bdocument\.|\bwindow\./.test(translated)) {
+      warnings.push(`${page.cls}: an onMount body is dropped - ${lcDropReason(translated)}`);
+      continue;
+    }
+    mountNames.push(name);
+    methods.push(`    private static void ${name}(RoseApp app)\n    {\n${translated}\n    }`);
+  }
+  // onCleanup: the disposal moment is the window's Closed event, the same
+  // RoseApp.OnDispose registry the $effect cleanups already register with.
+  for (const arg of lifecycleArgs(script, 'onCleanup')) {
+    const name = `__lcDispose${cleanupNames.length}`;
+    if (/^[A-Za-z_$][\w$]*$/.test(arg) && callNames.has(arg)) {
+      cleanupNames.push(name);
+      methods.push(`    private static void ${name}(RoseApp app)\n    {\n${finish(`${arg}();`, [])}\n    }`);
+      continue;
+    }
+    const rawBody = lifecycleBodyOf(arg);
+    if (rawBody === null) {
+      warnings.push(`${page.cls}: an onCleanup argument is not a function body this target can run - it is dropped (${arg.slice(0, 40)})`);
+      continue;
+    }
+    const body = lifecycleTsBody(rawBody);
+    // A cleanup reading a local an onMount body declared would emit a name no
+    // dispose method can see - the scope split is real, so the warning stays.
+    const declared = new Set<string>();
+    for (const mountArg of lifecycleArgs(script, 'onMount')) {
+      const mountBody = lifecycleBodyOf(mountArg);
+      if (mountBody !== null) for (const n of effectLocals(mountBody)) declared.add(n);
+    }
+    const hidden = [...declared].filter((n) => new RegExp('\\b' + escapeRe(n) + '\\b').test(body));
+    if (hidden.length) {
+      warnings.push(`${page.cls}: an onCleanup body reads a local an onMount body declares (${hidden.join(', ')}) - the two run in different scopes, so it is dropped`);
+      continue;
+    }
+    const translated = finish(translateBody(body, page.cls, stateNames, known, stateTypes, warnings, false, pageFields), []);
+    if (translated.includes('handler body not translated') || /=>|\bset(?:Interval|Timeout)\s*\(|\bFormData\s*\(|\bdocument\.|\bwindow\./.test(translated)) {
+      warnings.push(`${page.cls}: an onCleanup body is dropped - ${lcDropReason(translated)}`);
+      continue;
+    }
+    cleanupNames.push(name);
+    methods.push(`    private static void ${name}(RoseApp app)\n    {\n${translated}\n    }`);
+  }
+  return methods.join('\n\n');
+}
+
+/**
+ * The statements of a returned cleanup: the body of the arrow (or anonymous
+ * function) it is spelled as, or the bare expression as one statement. Null
+ * when the cleanup is not an inline function this target can spell.
+ */
+function cleanupStatements(dispose: string): string | null {
+  const block = /^\s*(?:\(\s*\)\s*=>|function\s*(?:[A-Za-z_$][\w$]*\s*)?\(\s*\)\s*(?:=>)?)\s*\{([\s\S]*)\}\s*$/.exec(dispose);
+  if (block) return block[1].trim();
+  const expr = /^\s*\(\s*\)\s*=>\s*([\s\S]+)$/.exec(dispose);
+  if (expr) return expr[1].trim().replace(/;$/, '') + ';';
+  return null;
+}
+
+/** The names an effect body declares: what a returned cleanup may read that a
+ *  separate dispose method would not see. */
+function effectLocals(body: string): string[] {
+  const names = new Set<string>();
+  for (const m of body.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) names.add(m[1]);
+  for (const m of body.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/g)) {
+    names.add(m[1]);
+    for (const p of m[2].split(',')) {
+      const name = p.trim().split(/[:\s=]/)[0];
+      if (name) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+/** Split an effect body at its top-level `return`: [the statements, the cleanup]. */
+function cutEffectReturn(body: string): [string, string] {
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (depth === 0 && body.startsWith('return', i) && !/[\w$]/.test(body[i - 1] ?? '') && !/[\w$]/.test(body[i + 6] ?? '')) {
+      return [body.slice(0, i).replace(/;$/, ''), body.slice(i + 6).replace(/;$/, '').trim()];
+    }
+  }
+  return [body, ''];
 }
 
 const NET_EXPR: ExprDialect = {
@@ -4729,18 +6869,18 @@ const NET_EXPR: ExprDialect = {
     ? `RoseTheme.MapIdx(${l}, delegate(object ${ps[0]}, int ${ps[1]}) { return ${body}; })`
     : `RoseTheme.Map(${l}, delegate(object ${ps[0]}) { return ${body}; })`,
   filter: (l, ps, pred) => `RoseTheme.Filter(${l}, delegate(object ${ps[0]}) { return ${pred}; })`,
-  slice: (l, from, to) => (to === null ? `RoseTheme.SliceObj(${l}, ${from})` : `RoseTheme.SliceObj(${l}, ${from}, ${to})`),
+  slice: (l, from, to) => `RoseKit.SliceObj(${l}, ${from}, ${to ?? 'null'})`,
   find: (l, ps, pred) => `RoseTheme.FindObj(${l}, delegate(object ${ps[0]}) { return ${pred}; })`,
   some: (l, ps, pred) => `RoseTheme.AnyObj(${l}, delegate(object ${ps[0]}) { return ${pred}; })`,
   reduce: (l, ps, body, seed) => seed === null
-    ? `RoseTheme.Reduce(${l}, delegate(object ${ps[0]}, object ${ps[1]}) { return ${body}; })`
-    : `RoseTheme.Reduce(${l}, ${seed}, delegate(object ${ps[0]}, object ${ps[1]}) { return ${body}; })`,
+    ? `RoseKit.Reduce(${l}, delegate(object ${ps[0]}, object ${ps[1]}) { return ${body}; })`
+    : `RoseKit.Reduce(${l}, ${seed}, delegate(object ${ps[0]}, object ${ps[1]}) { return ${body}; })`,
   append: (l, item) => `RoseTheme.Append(${l}, ${item})`,
   concat: (a, b) => `RoseTheme.Concat(${a}, ${b})`,
   arr: (items) => `RoseTheme.List(${items.join(', ')})`,
   not: (e) => `!RoseTheme.Bool(${e})`,
   lit: (v) => v,
-  // R276: the four R273 constructs in C#'s spelling. C# interpolates natively
+  // The four constructs in C#'s spelling. C# interpolates natively
   // ($"...{expr}..."), spells the nullish default as ??, reads an untyped
   // dictionary through the kit, and indexes an untyped list through the kit.
   template: (parts) => '$"' + parts.map((p) => {
@@ -4750,7 +6890,7 @@ const NET_EXPR: ExprDialect = {
   index: (l, i) => `RoseTheme.Index(${l}, ${i})`,
   nullish: (a, b) => `(${a} ?? ${b})`,
   optChain: (o, k) => `RoseTheme.Get(${o}, "${k}")`,
-  // R291: the string + search family. A state read is an `object?`, so the
+  // The string + search family. A state read is an `object?`, so the
   // string members go through the kit's stringifier (the same wrapper the
   // template pass already uses) and the list members through a kit helper -
   // `delegate`, never a lambda, so the target's own arrow refusal stays quiet.
@@ -4765,13 +6905,13 @@ const NET_EXPR: ExprDialect = {
 };
 
 /**
- * R291: the auto-setter form of a string/search write - `setJoined(items().join(','))`.
+ * The auto-setter form of a string/search write - `setJoined(items().join(','))`.
  *
  * `rewriteAutoSetterWrites` (which every target shares) only fires on the
- * map/filter/reduce/find/some/concat family, so the R291 members reached the
+ * map/filter/reduce/find/some/concat family, so the members reached the
  * target's own "web-only arrow/method" refusal and the WHOLE handler was
  * stubbed - the exact shape the family was added for. This is the same pass
- * over the same shape, narrowed to the R291 method names, with the state read
+ * over the same shape, narrowed to the method names, with the state read
  * spelled the way this file already spells it (`app.V("k")`).
  *
  * A construct outside the subset (or a setter that is not a state setter)
@@ -4798,11 +6938,83 @@ function rewriteNetSearchWrites(body: string, isState: (key: string) => boolean)
   return out;
 }
 
-function translateBody(body: string, file: string, stateNames: string[], known: Set<string>, stateTypes: Map<string, string>, warnings: string[]): string {
+function translateBody(body: string, file: string, stateNames: string[], known: Set<string>, stateTypes: Map<string, string>, warnings: string[], keepAwait = false, pageFields: string[] = []): string {
+  // esbuild lowers `x ||= y` to `x || (x = y)`; C# accepts neither side.
+  body = rewriteLoweredLogicalAssign(body, (read, op, rhs) => {
+    const key = /app\.V\("([^"]+)"\)/.exec(read)?.[1] ?? (stateNames.includes(read) ? read : null);
+    if (!key) return null;
+    if (op === '??') return `if (app.V("${key}") == null) { app.Set("${key}", ${rhs}); }`;
+    const test = `RoseTheme.Truth(app.V("${key}"))`;
+    return op === '||' ? `if (!${test}) { app.Set("${key}", ${rhs}); }` : `if (${test}) { app.Set("${key}", ${rhs}); }`;
+  })
+  // A regex literal is a pattern string; the kit owns Regex (global vs first).
+  body = rewriteRegexReplace(body, (recv, pat, repl, global) => {
+    const p = pat.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return global ? `RoseTheme.RoseReReplace(${recv}, "${p}", ${repl})` : `RoseTheme.RoseReReplaceFirst(${recv}, "${p}", ${repl})`;
+  })
+  body = rewriteStringMethods(body, csStringMethod);;;
+  // esbuild keeps `x?.['k']` intact, but the member/subscript passes each own one
+  // side of it - the optional-chain index is spelled here, once, instead.
+  body = rewriteOptionalIndex(body, (recv, key) => `RoseTheme.Get(${recv}, "${key}")`);
+  body = rewriteObjectAssign(body, (a, b) => `RoseTheme.Assign(${csObjArg(a)}, ${csObjArg(b)})`);
+  body = rewriteSetDedupe(body, (l) => `RoseTheme.Distinct(${l})`);
+  body = rewriteInCheck(body, (key, obj) => `RoseTheme.ContainsKey(${obj}, "${key}")`);
   // No JS construct may leak into the emitted file: a state write with a
   // spread becomes the kit's append/prepend, `throw new Error` the kit's
   // roseThrow, and a form read the same state read every handler uses.
-  let body2 = rewriteThrowNew(rewriteFormReads(body));
+  let body2 = rewriteGlobals(rewriteThrowNew(rewriteFormReads(body)));
+  // The mapper-set pass owns `$setState('k', (p) => ...p.map(...))`: it runs
+  // before the collection-chain pass, which owns the standalone chains.
+  body2 = rewriteMapperSets(body2, (key, param, expr) => {
+    const out = translateExpr(expr, NET_EXPR, new Set([param]));
+    if (out === null) return null;
+    const value = `RoseTheme.List(app.V("${key}"))`;
+    return `app.Set("${key}", ${out})`.replace(new RegExp(`\\b${param}\\b`, 'g'), value);
+  });
+  // The standalone collection chains (map/filter/reduce NOT inside a
+  // $setState mapper): the same kit spellings the dialect arms use.
+  // A local arrow becomes a Func variable: the declaration spells a cast
+  // anonymous delegate (a lambda carries `=>` and `new Func` trips the
+  // web-only refusal below), the call sites rewrite to `.Invoke`.
+  // A C# keyword name gains a `_` suffix (the call sites follow).
+  body2 = rewriteLocalArrow(body2, (name, params, b) => {
+    const kw = /^(?:as|base|bool|break|byte|case|catch|char|checked|class|const|continue|decimal|default|delegate|do|double|else|enum|event|explicit|extern|false|finally|fixed|float|for|foreach|goto|if|implicit|in|int|interface|internal|is|lock|long|namespace|new|null|object|operator|out|override|params|private|protected|public|readonly|ref|sbyte|sealed|short|sizeof|stackalloc|static|string|struct|switch|this|throw|true|try|typeof|uint|ulong|unchecked|unsafe|ushort|using|virtual|void|volatile|while|var)$/;
+    const safe = kw.test(name) ? `${name}_` : name;
+    const { names, body: bb } = spellArrowParams(params, b, kw, (x) => `RoseTheme.Num(${x})`, (x) => `RoseTheme.Str(${x})`);
+    const fnType = names.length === 1
+      ? 'Func<object?, object?>'
+      : 'Func<object?, object?, object?>';
+    return [`var ${safe} = (${fnType}) delegate(${names.map((n) => `object? ${n}`).join(', ')}) { return ${bb}; };`, safe];
+  });
+  for (const arrowName of [...body2.matchAll(/var\s+([A-Za-z_$][\w$]*)\s*=\s*\(Func</g)].map((mm) => mm[1])) {
+    body2 = body2.replace(new RegExp(`\\b${arrowName}\\s*\\((?!\\))`, 'g'), `${arrowName}.Invoke(`);
+  }
+  body2 = rewriteCollectionChain(body2, (method, recv, args) => {
+    const mapBody = (arrow: { params: string[]; body: string }): string =>
+      arrow.body.replace(new RegExp(`\\b${arrow.params[0]}\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\b(?!\\s*\\()`, 'g'), (_m: string, k: string) => `RoseTheme.Get(${arrow.params[0]}, "${k}")`);
+    if (method === 'map' || method === 'filter') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || !arrow.params.length) return null;
+      const b = mapBody(arrow);
+      return method === 'map' ? `RoseTheme.Map(${recv}, delegate(object ${arrow.params[0]}) { return ${b}; })` : `RoseKit.Filter(${recv}, delegate(object ${arrow.params[0]}) { return ${b}; })`;
+    }
+    if (method === 'reduce') {
+      const arrow = matchArrow(args[0] ?? '');
+      if (!arrow || arrow.params.length !== 2) return null;
+      const seed = args[1]?.trim();
+      let b = arrow.body.trim();
+      const sum = new RegExp(`^${arrow.params[0]}\\s*\\+\\s*${arrow.params[1]}$`).exec(b);
+      if (sum) b = `RoseKit.Number(${arrow.params[0]}) + RoseKit.Number(${arrow.params[1]})`;
+      return seed !== undefined
+        ? `RoseKit.Reduce(${recv}, ${seed}, delegate(object ${arrow.params[0]}, object ${arrow.params[1]}) { return ${b}; })`
+        : `RoseKit.Reduce(${recv}, delegate(object ${arrow.params[0]}, object ${arrow.params[1]}) { return ${b}; })`;
+    }
+        if (method === 'join') return `RoseTheme.Join(${recv}, ${args[0] ?? '","'})`;
+return null;
+  });
+  // In an async body the delay idiom is the one Promise the target spells -
+  // it becomes Task.Delay before the arrow refusal below can stub the function.
+  if (keepAwait) body2 = body2.replace(NET_DELAY_RE, (_m: string, _a: string, _b: string, ms: string) => `System.Threading.Tasks.Task.Delay(${ms.trim()})`);
   body2 = rewritePromiseExprs(body2);
   // useNative('camera', opts) becomes the kit's RoseKit.RoseNative call - one
   // dispatch shared by every page. Done before the refusal list below so the
@@ -4834,9 +7046,25 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
     file,
     warn: (m) => warnings.push(`dotnet: ${m}`),
   }).code.replace(/\bRoseNative\((['"][^'"]*['"]), \{\}\)/g, 'RoseNative($1, RoseTheme.Obj())');
+  // The timer idioms a mount body (or any handler) carries: an inline callback
+  // becomes the kit's DispatcherTimer delegate, clearInterval/clearTimeout its
+  // stop. A callback or interval the target cannot spell stays verbatim - the
+  // refusal below then names it instead of emitting broken C#.
+  body2 = rewriteTimerCalls(body2, (stmts) => {
+    const t = translateBody(stmts, file, stateNames, known, stateTypes, warnings, keepAwait, pageFields);
+    if (/handler body not translated|=>|\bset(?:Interval|Timeout)\s*\(|\bFormData\s*\(|\bdocument\.|\bwindow\./.test(t)) return null;
+    return t + '        app.Render();\n';
+  });
+  body2 = body2.replace(/\bclear(?:Interval|Timeout)\s*\(/g, 'RoseKit.RoseStopTimer(');
+  // A page-local the mount body holds (`let timer = null`) is a C# object?:
+  // JS truthiness in an if needs the null test spelled out.
+  for (const field of pageFields) {
+    body2 = body2.replace(new RegExp('\\bif\\s*\\(\\s*' + escapeRe(field) + '\\s*\\)', 'g'), `if (${field} != null)`);
+    body2 = body2.replace(new RegExp('\\bif\\s*\\(\\s*!' + escapeRe(field) + '\\s*\\)', 'g'), `if (${field} == null)`);
+  }
   // A mapper setter ($setState('k', p => EXPR)) is translated before anything
   // else: the target's own state pass then never sees the JS arrow.
-  // R288: a direct mutation (`items().push(x); setItems(items())`) lowers to
+  // A direct mutation (`items().push(x); setItems(items())`) lowers to
   // the spread/filter write every target can already spell.
   {
     let n = 0;
@@ -4845,13 +7073,8 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
       (name) => (stateNames.includes(name) ? 'set' + name.charAt(0).toUpperCase() + name.slice(1) : null),
       () => String(++n),
     );
-  }  body2 = rewriteMapperSets(body2, (key, param, expr) => {
-    const out = translateExpr(expr, NET_EXPR, new Set([param]));
-    if (out === null) return null;
-    const value = `RoseTheme.List(app.V("${key}"))`;
-    return `app.Set("${key}", ${out})`.replace(new RegExp(`\\b${param}\\b`, 'g'), value);
-  });
-  // R287: the auto-setter form - `setFound(items().find(...))` - the shape real
+  }
+  // The auto-setter form - `setFound(items().find(...))` - the shape real
   // handlers write. Without this the raw arrow reached the refusal below and
   // the whole handler was stubbed.
   body2 = rewriteAutoSetterWrites(
@@ -4865,7 +7088,7 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
       return out === null ? null : `app.Set("${key}", ${out})`;
     },
   );
-  // R291: the same auto-setter form for the string + search family -
+  // The same auto-setter form for the string + search family -
   // `setJoined(items().join(','))`. The shared pass above covers only the
   // map/filter/... family, so without this the whole handler is stubbed.
   body2 = rewriteNetSearchWrites(body2, (key) => stateNames.includes(key));
@@ -4876,13 +7099,13 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
     return out === null ? null : `app.Set("${key}", ${out})`;
   });
 
-  if (/\bFormData\(|\bdocument\.|\bwindow\.|\bnew\s+[A-Z]/.test(body2) || /=>/.test(body2)) {
+  if (/\bFormData\(|\bdocument\.|\bwindow\.|\bnew\s+[A-Z]/.test(body2) || /=>/.test(body2) || /\bset(?:Interval|Timeout)\s*\(/.test(body2)) {
     warnings.push(`dotnet: ${file}: a handler uses a web-only construct (DOM/FormData/new/arrow) - emitted as a stub`);
     return '        // rosezm: handler body not translated (web-only construct).';
   }
   body2 = rewriteSpreadWrites(body2, (kind, key, list, item) =>
     `app.Set("${key}", RoseTheme.${kind === 'append' ? 'Append' : 'Prepend'}(${list}, ${item}))`,
-    // R286: the auto-setter form (setItems([...items(), 'new'])) rides the
+    // The auto-setter form (setItems([...items(), 'new'])) rides the
     // same spelling - it is what real handlers write.
     (setter) => {
       const key = setter.slice(3, 4).toLowerCase() + setter.slice(4);
@@ -4890,18 +7113,34 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
     },
   );
   let out = rewriteSetState(body2.trim());
-  out = out.replace(/\bawait\s+/g, '');
+  // A plain write whose value uses `.slice(...)` (`rows = rows.slice(1)`)
+  // has no C# method: spell the RHS through the expression IR so state
+  // names become app.V reads and the call becomes RoseKit.SliceObj.
+  if (/\.slice\s*\(/.test(out)) {
+    out = out.replace(/\b(app\.Set\("[^"]+",\s*)([^;]+)(\);)/g, (whole: string, head: string, rhs: string, tail: string) => {
+      if (!/\.slice\s*\(/.test(rhs)) return whole;
+      const spelled = translateExpr(rhs.trim(), { ...NET_EXPR, read: (n: string) => (stateNames.includes(n) ? `app.V("${n}")` : n) }, new Set());
+      return spelled === null ? whole : `${head}${spelled}${tail}`;
+    });
+  }
+  // An async member keeps its awaits - they are the target's own await.
+  if (!keepAwait) out = out.replace(/\bawait\s+/g, '');
   out = out.replace(/\$action\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `${name}(app)`);
   out = out.replace(/\brefresh\s*\(\s*\)/g, 'app.Render()');
   out = out.replace(/\bconsole\.(?:log|warn|error)\(/g, 'Console.WriteLine(');
   // String($formRead('x') || '') is the web pattern; the desktop kit reads
   // the same state key directly, so the wrapper and the fallback both go.
-  out = out.replace(/\bString\(\s*\$formRead\s*\(\s*(['"])([^'"]*)\1\s*\)\s*(?:\|\|\s*'[^']*')?\s*\)/g, (_m: string, _q: string, name: string) => `RoseTheme.Str(app.V("${name}"))`);
+  out = out.replace(/\bString\(\s*\$formRead\s*\(\s*(['"])([^'"]*)\1\s*\)\s*(?:\|\|\s*'[^']*')?\s*\)/g, (_m: string, _q: string, name: string, off: number, whole: string) => {
+    // A `.trim()` pass already wrapped this expression in Str(): keep ONE
+    // wrapper, or the generated C# gets Str(Str(...)).Trim().
+    const before = whole.slice(0, off);
+    return /RoseTheme\.Str\($/.test(before) ? `app.V("${name}")` : `RoseTheme.Str(app.V("${name}"))`;
+  });
   out = out.replace(/\$formRead\s*\(\s*(['"])([^'"]*)\1\s*\)/g, (_m, _q: string, name: string) => `RoseTheme.Str(app.V("${name}"))`);
   out = out.replace(/\bString\(/g, 'RoseTheme.Str(');
   out = out.replace(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g, 'var ' + '$1 =');
   out = out.replace(/\bnull\b/g, 'null').replace(/\bundefined\b/g, 'null');
-  // R292 (P0): statement-level CONTROL FLOW. A handler body had no such pass -
+  // (P0): statement-level CONTROL FLOW. A handler body had no such pass -
   // only per-token rewrites - so for..of, an untyped catch and an unterminated
   // `default:` reached the .cs verbatim, tripping no refusal and producing a
   // project that does not compile. Order matters: for..of first (it consumes
@@ -4914,15 +7153,24 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
   // A JS array literal in a handler body is a C# syntax error; the kit spells
   // it. Runs before the `[...]` index/pattern pass below can misread it.
   out = rewriteArrayLiterals(out);
+  // fetch(url, { ... }) has a nested object literal; spell those before the
+  // generic array/object pass so the JSON payload is valid C# too.
+  out = out.replace(/\b(?:RoseTheme\.)?Fetch\(([^,()]+),\s*\{/g, (_m, url) => `Fetch(${url}, {`);
+  out = spellObjectLiterals(out);
   out = out.replace(/'((?:[^'\\\\]|\\\\.)*)'/g, '"$1"');
   out = out.replace(/===/g, '==').replace(/!==/g, '!=');
   out = out.replace(/\.length\b/g, '.Count');
+  out = out.replace(/\b([A-Za-z_$][\w$]*)\.push\(/g, '$1.Add(');
+  // `items().length` becomes `RoseKit.Count(app.V("items"))`: an object? has no
+  // Count member, and the member-read pass below would have spelled a Get.
+  out = out.replace(/\.Count\b/g, '.Count');
+
   // C# spells the string helpers with a capital: the JS source does not.
   out = out.replace(/\.trim\(\)/g, '.Trim()').replace(/\.toLowerCase\(\)/g, '.ToLower()').replace(/\.toUpperCase\(\)/g, '.ToUpper()');
   const names = new Set(stateNames);
   out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\(\s*\)/g, (whole, name: string) =>
     (names.has(name) ? csRead(name, stateTypes.get(name), 'app') : whole));
-  // R200: same as the template - a script function reads state bare (`if (show)`)
+  // Same as the template - a script function reads state bare (`if (show)`)
   // and this path has no local of that name, so the read is the dictionary lookup.
   out = callifyBareReads(out, (name) => names.has(name), (name) => csRead(name, stateTypes.get(name), 'app'), (base, key) => `RoseTheme.Get(${base}, "${key}")`);
   for (const name of names) {
@@ -4931,25 +7179,197 @@ function translateBody(body: string, file: string, stateNames: string[], known: 
   }
   // Math.* and toFixed in a handler body, same spelling as the template path.
   out = csScalarCalls(out);
-  // R189: a handler body is a THIRD code path (after the template and the state
+  out = out.replace(/\bString\s*\(/g, 'RoseTheme.Str(');
+  // The web's fetch is the kit's request: C# has no global fetch at all.
+  out = out.replace(/\bJSON\.stringify\s*\(/g, 'RoseKit.JsonStringify(');
+  out = out.replace(/\bJSON\.parse\s*\(/g, 'RoseKit.JsonParse(');
+  out = out.replace(/\bfetch\s*\(/g, 'RoseTheme.Fetch(');
+  out = out.replace(/\bawait\s+([A-Za-z_$][\w$]*)\.json\s*\(\s*\)/g, '$1');
+  out = out.replace(/\b([A-Za-z_$][\w$]*)\.json\s*\(\s*\)/g, '$1');
+  // fetch('/x', { method: 'POST', body: ... }) -> Fetch('/x', Obj(...))
+  out = out.replace(/\b(RoseTheme\.Fetch)\(([^,()]+),\s*(\{[^{}]*\})\)/g, (_m, fn, url, opts) => `${fn}(${url}, ${csObjArg(opts)})`);
+  out = out.replace(/\b(RoseTheme\.Fetch)\(([^,()]+),\s*(\{[\s\S]*?\})\)\s*;/g, (_m, fn, url, opts) => `${fn}(${url}, ${csObjArg(opts)});`);
+  // The optional chain `?.` is C#'s `.`: the kit's readers answer a value.
+  out = out.replace(/\?\./g, '.');
+  // A handler body is a THIRD code path (after the template and the state
   // initializer), and the member-read rewrite was missing from it - `known` was
   // even discarded (`void known`). `store.likes` reached the file verbatim,
   // which is not valid C#: a module bind is a Dictionary, so the read must be
   // RoseTheme.Get(store, "likes"). Only a BIND is rewritten - anything else
   // (a state read, a local's own field) survives untouched.
-  const bindNames = [...known].filter((n) => !names.has(n));
+  // A local object literal (`var o = { a: 1 }`) is a dictionary on this
+  // target: the literal becomes RoseTheme.Obj, its reads Get and its writes Put.
+  // Object.assign has no C# spelling; the kit merges the two maps. The
+  // arguments' flat object literals spell here, so the obj-local pass below
+  // registers the local from its `RoseTheme.Assign(...)` shape.
+/** A flat `{ k: v }` argument becomes the kit's obj literal. */
+/** Spell flat JS object literals as RoseTheme.Obj dictionaries, including the
+ *  nested fetch/JSON payloads a client needs. Strings and parentheses are
+ *  balanced; this runs before single-quote and member-read rewrites. */
+function spellObjectLiterals(src: string): string {
+  let out = src;
+  for (let pass = 0; pass < 96; pass++) {
+    const opens = [...out].map((c, i) => c === '{' ? i : -1).filter(i => i >= 0);
+    let changed = false;
+    for (const open of opens) {
+      const before = out.slice(0, open).trimEnd();
+      // A destructuring declaration (`const { ok } = await fn()`) is an
+      // assignment target, not an object literal.
+      if (/\b(?:const|let|var)\s*$/.test(before)) continue;
+      if (/\$t\s*\([^()]*,\s*$/.test(before) || /\bt\s*\([^()]*,\s*$/.test(before)) continue;
+      if (/\b(?:function|class|if|for|while|switch|catch|typeof)\b/.test(before.slice(-12))) continue;
+      let depth = 0, quote = '', close = -1;
+      for (let i = open; i < out.length; i++) {
+        const c = out[i];
+        if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+        if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+        if (c === '{') depth++;
+        else if (c === '}' && --depth === 0) { close = i; break; }
+      }
+      if (close < 0) continue;
+      const body = out.slice(open + 1, close).trim();
+      if (/=>|\b(?:return|function|if|for)\b/.test(body)) continue;
+      const parts = []; let depth2 = 0, q = '', start = 0;
+      for (let i = 0; i < body.length; i++) {
+        const c = body[i];
+        if (q) { if (c === '\\') i++; else if (c === q) q = ''; continue; }
+        if (c === '"' || c === "'" || c === '`') q = c;
+        else if ('([{'.includes(c)) depth2++;
+        else if (')]}'.includes(c)) depth2--;
+        else if (c === ',' && depth2 === 0) { parts.push(body.slice(start, i)); start = i + 1; }
+      }
+      parts.push(body.slice(start));
+      const pairs = [];
+      for (const part of parts) {
+        const t = part.trim(); if (!t) continue;
+        const colon = t.indexOf(':');
+        if (colon < 0) {
+          if (/^[A-Za-z_$][\w$]*$/.test(t)) pairs.push(`("${t}", ${t})`);
+          else { pairs.length = 0; break; }
+          continue;
+        }
+        const key = t.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+        if (!/^[A-Za-z_$][\w$-]*$/.test(key)) { pairs.length = 0; break; }
+        pairs.push(`("${key}", ${t.slice(colon + 1).trim()})`);
+      }
+      if (!pairs.length && body !== '') continue;
+      out = out.slice(0, open) + `RoseTheme.Obj(${pairs.join(', ')})` + out.slice(close + 1);
+      changed = true; break;
+    }
+    if (!changed) break;
+  }
+  return out;
+}
+
+function csObjArg(raw: string): string {
+  const t = raw.trim();
+  if (!t.startsWith('{')) return t;
+  let depth = 0, quote = '', close = -1;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+    if (c === '{') depth++; else if (c === '}' && --depth === 0) { close = i; break; }
+  }
+  if (close < 0) return t;
+  const body = t.slice(1, close);
+  const parts = []; let d = 0, q = '', start = 0;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = ''; continue; }
+    if (c === '"' || c === "'" || c === '`') q = c;
+    else if ('([{'.includes(c)) d++;
+    else if (')]}'.includes(c)) d--;
+    else if (c === ',' && d === 0) { parts.push(body.slice(start, i)); start = i + 1; }
+  }
+  parts.push(body.slice(start));
+  const pairs = [];
+  for (const part of parts) {
+    const piece = part.trim(); if (!piece) continue;
+    const colon = piece.indexOf(':'); if (colon < 0) return t;
+    const key = piece.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+    pairs.push(`("${key}", ${csObjArg(piece.slice(colon + 1).trim())})`);
+  }
+  return `RoseTheme.Obj(${pairs.join(', ')})`;
+}
+
+  const objLocals = new Set<string>();
+  for (let guard = 0; guard < 32; guard++) {
+    const m = /\bvar\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\{|RoseTheme\.Assign\(|RoseTheme\.Obj\()/.exec(out);
+    if (!m) break;
+    // A kit-call shape only REGISTERS the local: there is no `{ ... }` to spell.
+    if (!/\{\s*$/.test(m[0])) { objLocals.add(m[1]); continue; }
+    const open = m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < out.length; i++) {
+      if (out[i] === '{') depth++;
+      else if (out[i] === '}' && --depth === 0) { close = i; break; }
+    }
+    if (close < 0) break;
+    const pairs = out.slice(open + 1, close).split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+      const colon = part.indexOf(':');
+      if (colon < 0) return null;
+      const key = part.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+      return `("${key}", ${part.slice(colon + 1).trim()})`;
+    }).filter((x): x is string => !!x);
+    out = out.slice(0, m.index) + `var ${m[1]} = RoseTheme.Obj(${pairs.join(', ')})` + out.slice(close + 1);
+    objLocals.add(m[1]);
+  }
+  if (objLocals.size) {
+    out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)\s*([^;\n]+)/g, (whole, obj: string, key: string, rhs: string) => (objLocals.has(obj) ? `RoseTheme.Put(${obj}, "${key}", ${rhs.trim()})` : whole));
+    out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g, (whole, obj: string, key: string) => (objLocals.has(obj) ? `RoseTheme.Get(${obj}, "${key}")` : whole));
+  }
+  // A handler-local named after a C# keyword (`let out = ''`) is a parse error;
+  // the verbatim prefix makes it an identifier, the same rule csSafeName applies
+  // to declarations.
+  const kwLocals = [...out.matchAll(/\b(?:var|string|int|double|bool|object)\s+([A-Za-z_$][\w$]*)\s*=/g)]
+    .map((m) => m[1]).filter((n) => CS_KEYWORDS.has(n));
+  for (const n of new Set(kwLocals)) out = out.replace(new RegExp(`\\b${n}\\b`, 'g'), `@${n}`);
+  // A state read that is INDEXED or LOOPED needs the kit's list view: an
+  // object? is neither enumerable nor subscriptable. Runs after the state reads
+  // are spelled (`app.V("items")`), so the shapes are the final ones.
+  out = out.replace(/\(*app\.V\("([^"]+)"\)\)*\[/g, (_m, name: string) => `RoseTheme.List(app.V("${name}"))[`);
+  out = out.replace(/foreach\s*\(var\s+([A-Za-z_$][\w$]*)\s+in\s+\(?app\.V\("([^"]+)"\)\)?\)/g, (_m, x: string, name: string) => `foreach (var ${x} in RoseTheme.List(app.V("${name}")))`);
+  out = out.replace(/RoseTheme\.Get\(([A-Za-z_$][\w$]*), \"Count\"\)/g, 'RoseKit.Count($1)');
+  const bindNames = [...known, ...pageFields].filter((n) => !names.has(n));
   if (bindNames.length) out = rewriteMemberReads(out, (obj, key) => (bindNames.includes(obj) ? `RoseTheme.Get(${obj}, "${key}")` : `${obj}.${key}`));
+  // An awaited value is a parsed map: `r.ok` is the kit's own key read, exactly
+  // like a state read's member.
+  const awaitedLocals = [...out.matchAll(/\bvar\s+([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]);
+  if (awaitedLocals.length) {
+    const set = new Set(awaitedLocals);
+    out = out.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\b(?!\s*\()/g, (whole, obj: string, key: string) => (set.has(obj) ? `RoseTheme.Get(${obj}, "${key}")` : whole));
+  }
+  // `.length` on a state read: the member-read pass spelled it a Get, but the
+  // count is the kit's - an object? has no Count member and the Get answers null.
+  out = out.replace(/RoseTheme\.Get\(app\.V\("([^"]+)"\), "Count"\)/g, (_m, name: string) => `RoseKit.Count(app.V("${name}"))`);
+
   // `if (guest)` on a string local is JS truthiness; C# tests emptiness.
   out = rewriteStringTruth(out, (name) => `!string.IsNullOrEmpty(${name})`);
   // `e.key || ''` is JS truthiness; C# has no truthy String either.
   out = rewriteOrFallback(out, (operand) => `!string.IsNullOrEmpty(RoseTheme.Str(${operand}))`, () => true);
   out = collapseNullTests(out);
-  // R292: last, so it sees the already-spelled C# statements when it decides
+  out = csTruthConditions(out);
+  // Last, so it sees the already-spelled C# statements when it decides
   // whether a switch section still needs its terminator.
   out = rewriteSwitchSections(out);
   const statements = out.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!statements.length) return '        // rosezm: an empty handler.';
-  return statements.map((l) => '        ' + l).join('\n');
+  // A JS statement may drop its `;` (the source did, or a rewrite consumed it);
+  // C# never does. Block heads (`... {`) and closers stay as they are.
+  // A `delegate` keyword is always followed by its method body: the `;` that
+  // the JS source had after `setInterval(...)` would ride into the C# as
+  // `delegate;` which is a syntax error.
+  return statements.map((l) => {
+    // A `delegate` keyword is always followed by its method body: the `;` that
+    // the JS source had after `setInterval(...)` would ride into the C# as
+    // `delegate;` which is a syntax error. And the terminator must not re-add
+    // one after the fix (a line ending in `delegate` is not a statement end).
+    const fixed = l.replace(/delegate\s*;/g, 'delegate');
+    const bare = /delegate$/.test(fixed) || /[;{}:]$/.test(fixed);
+    return '        ' + (bare ? fixed : fixed + ';');
+  }).join('\n');
 }
 
 /** The component's declared props and their default literals. */
@@ -4958,25 +7378,93 @@ function componentProps(script: string | null): Array<{ name: string; init: stri
     .map((m) => ({ name: m[1], init: m[2].trim() }));
 }
 
-function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }, styles: NetStyles, warnings: string[]): string {
+/** Rewrites a keyed component's finished C# text to the per-instance forms:
+ *  its own $state accesses read/write `instanceId + ":name"` and its own
+ *  functions receive the id. Runs after every bare-name pass, so the kit's
+ *  coercions (`RoseTheme.Int(app.V("likes"))`, ...) are already spelled and
+ *  only the string inside them changes. */
+function keyComponentState(text: string, ownNames: string[], fnNames: Iterable<string>): string {
+  let out = text;
+  for (const n of ownNames) {
+    out = out.split(`.V("${n}")`).join(`.V(instanceId + ":${n}")`);
+    out = out.split(`.Set("${n}",`).join(`.Set(instanceId + ":${n}",`);
+    out = out.split(`.TryAdd("${n}",`).join(`.TryAdd(instanceId + ":${n}",`);
+  }
+  for (const fn of fnNames) {
+    const safe = escapeRe(fn);
+    out = out.replace(new RegExp('\\b' + safe + '\\(app, ', 'g'), fn + '(app, instanceId, ');
+    out = out.replace(new RegExp('\\b' + safe + '\\(app\\)', 'g'), fn + '(app, instanceId)');
+  }
+  return out;
+}
+
+/** A component's async functions return a Task: a statement-level call
+ *  discards it explicitly, which states the fire-and-forget intent and keeps
+ *  CS4014 quiet (an async call warns even inside a void handler lambda). */
+function discardAsyncCalls(text: string, fns: Set<string>): string {
+  let out = text;
+  for (const fn of fns) {
+    out = out.replace(new RegExp(`(^|;|\\{)([ \\t]*)(${escapeRe(fn)})\\(app([,)])`, 'gm'),
+      (_m: string, lead: string, pad: string, name: string, rest: string) => `${lead}${pad}_ = ${name}(app${rest}`);
+  }
+  return out;
+}
+
+/** Rewrites a component's hoisted lifecycle-field references in finished C#
+ *  text to the per-instance `__lc` store (`timer` ->
+ *  `__lc[instanceId + ":timer"]`). Word-boundary and only outside string
+ *  literals and member accesses (`x.timer` stays). The methods this runs over
+ *  take `instanceId`, which is why a component with fields is keyed even
+ *  without own $state. */
+function keyLcFieldRefs(text: string, fields: string[]): string {
+  if (!fields.length) return text;
+  const re = new RegExp('"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|\\b(?:' + fields.map(escapeRe).join('|') + ')\\b', 'g');
+  return text.replace(re, (m: string, off: number) => {
+    if (m[0] === '"' || m[0] === "'") return m;
+    if (off > 0 && text[off - 1] === '.') return m;
+    return `__lc[instanceId + ":${m}"]`;
+  });
+}
+
+function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage; lc: ComponentLc | null }, styles: NetStyles, warnings: string[], components: Array<{ name: string; cls: string; nodes: IrNode[]; script: string | null; style: string; slots: SlotUsage }> = []): string {
   const props = [...(comp.script ?? '').matchAll(/export\s+let\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  // The component's own $state reads ride the app's dictionary like a page's,
+  // seeded once by Build() - the mount moment reads and writes the same keys.
+  const facts = scanState(comp.script ?? '');
+  const ownState = facts.state;
+  // Own $state is keyed per instance: the call site hands Build an id of the
+  // shape `${CompName}${n}` and every read/write below spells the full key. A
+  // component with hoisted lifecycle fields is keyed too - its mount/cleanup
+  // methods take the id even without own $state.
+  const keyed = ownState.length > 0 || (comp.lc?.fields.length ?? 0) > 0;
+  const ownNames = ownState.map((s) => s.name);
+  const stateKey = keyed
+    ? (name: string) => (ownNames.includes(name) ? `instanceId + ":${name}"` : `"${name}"`)
+    : undefined;
   // A component root is a panel of its own, seeded with the desktop reading
   // size; its own stylesheet was compiled against the shared shell. The part
   // is still inlined into the caller's page, so CSS descendant selectors keep
   // resolving because the ancestors travel with the emit.
   const rootModel = mergeModels(BASE_TEXT, {});
+  // The component's own exported actions (server actions, innovation 18).
+  const compActionNames = (() => { try { return extractExports(comp.script ?? '').actions.map((a) => a.name); } catch { return []; } })();
   const ctx: NetCtx = {
     warnings,
     file: comp.cls,
-    stateNames: new Set(props),
+    stateNames: new Set([...props, ...ownState.map((s) => s.name)]),
     componentProps: new Set(props),
+    fnNames: new Set([...(comp.script ?? '').matchAll(/^[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1])),
+    // A component-owned action's submit button passes no form: the fields
+    // ride the bound state the body reads.
+    fnArity: new Map([...(comp.script ?? '').matchAll(/^[ \t]*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/gm)].map((m) => [m[1], compActionNames.includes(m[1]) ? 0 : (m[2].trim() ? m[2].split(',').length : 0)] as [string, number])),
     awaits: [],
     deferred: [],
     scriptConsts: scriptConstsFor(comp.script, new Set(props)),
-    pageAction: null,
-    stateTypes: new Map(props.map((p) => [p, 'object'])),
+    // The component's own exported action: the submit button calls it.
+    pageAction: compActionNames[0] ?? null,
+    stateTypes: new Map([...props.map((p) => [p, 'object'] as [string, string]), ...ownState.map((s) => [s.name, csType(initialOf(comp.script!, s.name))] as [string, string])]),
     mapBinds: new Set(),
-    components: [],
+    components: components,
     lines: [],
     depth: 2,
     styles,
@@ -4985,12 +7473,24 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
     inherited: textCarry(rootModel),
     noted: new Set(),
     app: 'app',
+    stateKey,
     parent: `panel${comp.cls}`,
     counter: { n: 0, c: 0 },
     forms: collectForms(comp.nodes),
     formSubmit: null,
   };
   emitNodes(comp.nodes, ctx);
+  // The component's script functions: the same member emission a page's class
+  // gets, so a template handler's `bump(app)` resolves on the View. The View
+  // carries no bind field, so a body reading a script const or a module bind
+  // is stubbed with its name instead of emitting an unresolvable identifier.
+  const compNames = [...props, ...ownState.map((s) => s.name), ...facts.derived.map((d) => d.name), ...facts.data];
+  const leaky = new Set<string>();
+  for (const n of scriptConstsFor(comp.script, new Set(compNames)).keys()) leaky.add(n);
+  for (const b of moduleBinds(comp.script ?? '')) leaky.add(b.name);
+  for (const n of compNames) leaky.delete(n);
+  const compPrep = prepScriptFns(comp.script ?? '', comp.cls, facts, warnings);
+  let fnMembers = emitScriptFunctions(compPrep, comp.cls, new Set<string>(), ctx.stateTypes, warnings, comp.lc?.fields ?? [], compActionNames, leaky, keyed, true);
   // Slots: the default slot is an Action<Panel>; a named slot takes the scoped
   // props and the panel to fill.
   const slotParams: string[] = [];
@@ -4999,25 +7499,60 @@ function renderComponent(comp: { name: string; cls: string; nodes: IrNode[]; scr
   // Each two-way prop rides with its own callback, in declaration order.
   const propParams = props.map((p) => (twoWay.includes(p)
     ? `object? ${csSafeName(p)}, Action<object?> ${propChangeHandler(p)}`
-    : `object? ${csSafeName(p)}`));
+    : /(?:^on|On)[A-Z_]/.test(p) ? `Action<object?> ${csSafeName(p)}` : `object? ${csSafeName(p)}`));
 
   if (comp.slots.hasDefault) slotParams.push('Action<Panel> slotDefault');
   for (const s of comp.slots.named) slotParams.push(`Action<IDictionary<string, object?>, Panel> slot${s.name.charAt(0).toUpperCase()}${s.name.slice(1)}`);
   for (const name of props) {
     if (csSafeName(name) !== name) ctx.lines = ctx.lines.map((line) => line.replace(new RegExp('\\b' + name + '\\b', 'g'), csSafeName(name)));
   }
+  // The lifecycle fields live in one per-instance store: seeded once per id
+  // (a re-render must not wipe the handle a mount body stored) and written by
+  // the rewritten mount/cleanup bodies.
+  const lcFields = comp.lc && comp.lc.fields.length
+    ? '    private static readonly System.Collections.Generic.Dictionary<string, object?> __lc = new();'
+    : '';
+  const seeds = [
+    ...ownState.map((s) => `        app.State.TryAdd(instanceId + ":${s.name}", ${csLiteral(initialOf(comp.script!, s.name).trim().replace(/^\(([\s\S]*)\)$/, '$1'))});`),
+    ...((comp.lc?.fields ?? []).map((f) => `        __lc.TryAdd(instanceId + ":${f}", null);`)),
+  ].join('\n');
+  const seedLines = seeds ? seeds + '\n' : '';
+  // The keyed spellings land last: template lines, the script functions and the
+  // lifecycle methods were all emitted against the bare names, so one pass
+  // over the finished C# re-keys them. The emitted member names (build renamed
+  // to build_) are the ones the call sites must thread the id through.
+  if (keyed) {
+    const emittedFns = [...(ctx.fnNames ?? [])].map((n) => (n === 'build' ? 'build_' : n));
+    ctx.lines = ctx.lines.map((l) => keyComponentState(l, ownNames, emittedFns));
+    fnMembers = keyComponentState(fnMembers, ownNames, emittedFns);
+  }
+  // A component function that reads a hoisted lifecycle field reads it through
+  // the same per-instance store; keyed is true whenever fields exist, so the
+  // member carries the id the rewrite needs.
+  if (comp.lc && comp.lc.fields.length) fnMembers = keyLcFieldRefs(fnMembers, comp.lc.fields);
+  let lcMethods = keyed && comp.lc ? keyComponentState(comp.lc.methods, ownNames, [...(ctx.fnNames ?? [])].map((n) => (n === 'build' ? 'build_' : n))) : (comp.lc?.methods ?? '');
+  // The async members now return a Task: every statement-level call to one
+  // discards it, so a mount or a click handler says fire-and-forget on purpose.
+  const asyncFnNames = new Set([...(comp.script ?? '').matchAll(/^[ \t]*(?:export\s+)?async\s+function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]));
+  if (asyncFnNames.size) {
+    ctx.lines = ctx.lines.map((l) => discardAsyncCalls(l, asyncFnNames));
+    fnMembers = discardAsyncCalls(fnMembers, asyncFnNames);
+    lcMethods = discardAsyncCalls(lcMethods, asyncFnNames);
+  }
   return `namespace ${NS}.Components;
 
 using System.Windows.Controls;
+using static ${NS}.RoseKit;
 
 public static class ${comp.cls}View
 {
-    public static Panel Build(RoseApp app, Panel parent${propParams.length ? ', ' + propParams.join(', ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''})
+    public static Panel Build(RoseApp app, string instanceId, Panel parent${propParams.length ? ', ' + propParams.join(', ') : ''}${slotParams.length ? ', ' + slotParams.join(', ') : ''})
     {
-        var panel${comp.cls} = RoseTheme.Card(parent, ${csStyle(rootModel)});
+${seedLines}        var panel${comp.cls} = RoseTheme.Card(parent, ${csStyle(rootModel)});
 ${ctx.lines.join('\n')}
         return panel${comp.cls};
     }
+${lcFields ? lcFields + '\n' : ''}${fnMembers ? fnMembers + '\n' : ''}${lcMethods ? lcMethods : ''}
 }
 `;
 }
