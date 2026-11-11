@@ -1,0 +1,9 @@
+<script>
+  import ActForm from '../components/ActForm.rose';
+  let actGot = $state('none');
+</script>
+<main>
+  <h1>a component's action</h1>
+  <ActForm />
+  <p>actGot: {actGot()}</p>
+</main>

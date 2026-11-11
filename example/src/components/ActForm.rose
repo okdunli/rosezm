@@ -1,0 +1,7 @@
+<script>
+  // A component owns a server action: its host page dispatches it.
+  export async function submit(form: FormData) {
+    return { actGot: 'done-' + String(form.get('name') ?? 'x') };
+  }
+</script>
+<form method="POST" action="submit"><input name="name" placeholder="name" /><button type="submit">send</button></form>

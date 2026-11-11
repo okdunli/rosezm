@@ -1,0 +1,14 @@
+<script>
+  // TWO instances of this must own two
+  // disjoint `$state` scopes - the old build keyed `open` statically, so
+  // clicking one instance's button opened both.
+  export let label = 'panel';
+  let open = $state(false);
+  function toggle() {
+    open = !open;
+  }
+</script>
+
+<section class="panel">
+  <button on:click={toggle}>{label}: {open ? 'open' : 'closed'}</button>
+</section>

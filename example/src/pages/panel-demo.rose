@@ -1,0 +1,7 @@
+<script>
+  import Panel from '../components/Panel.rose';
+</script>
+
+<h1>Panel demo</h1>
+<Panel label="one" />
+<Panel label="two" />

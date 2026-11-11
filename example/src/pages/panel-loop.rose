@@ -1,0 +1,17 @@
+<script>
+  import Panel from '../components/Panel.rose';
+  let rows = $state([
+    { id: 'a', n: 1 },
+    { id: 'b', n: 2 },
+    { id: 'c', n: 3 },
+  ]);
+  function drop() {
+    rows = rows.slice(1);
+  }
+</script>
+
+<h1>Panels in a loop</h1>
+{#each rows() as row (row.id)}
+  <Panel label={row.id} />
+{/each}
+<button on:click={drop}>drop the first</button>
