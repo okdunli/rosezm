@@ -19,6 +19,8 @@ const BY_TARGET: Record<TargetName, string[]> = {
   // The native projects `cap add` generates, plus the signing material a store
   // build writes next to them.
   capacitor: ['android/', 'ios/', '.capacitor/', '*.jks', '*.keystore', 'android/key.properties', 'ios/App/Pods/'],
+  cordova: ['platforms/', 'plugins/', '*.jks', '*.keystore', 'platforms/android/key.properties'],
+  ionic: ['android/', 'ios/', '*.jks', '*.keystore', 'android/key.properties', 'ios/App/Pods/'],
   qq: MINI,
   alipay: MINI,
   baidu: MINI,
@@ -27,14 +29,26 @@ const BY_TARGET: Record<TargetName, string[]> = {
   android: ['.gradle/', 'build/', 'local.properties', 'key.properties', '*.jks', '*.keystore', '.idea/'],
   xcode: ['build/', 'DerivedData/', 'xcuserdata/', '*.xcuserstate'],
   arkts: ['oh_modules/', 'build/', '.hvigor/', 'local.properties', '*.p12', '*.p7b'],
+  // node_modules is kept across re-exports (Electron itself lives there) but
+  // COMMON already ignores it - `npm install` is a local step, not a commit.
   electron: ['release/'],
   wails: ['frontend/node_modules/', 'build/bin/'],
-  tauri: ['/target', '/gen/schemas'],
+  tauri: ['src-tauri/target/', '/target', '/gen/schemas'],
   python: ['__pycache__/', '*.pyc', '.venv/'],
   dotnet: ['bin/', 'obj/', '.vs/', '*.user'],
   java: ['target/', '*.class', '.idea/'],
   cpp: ['build/', 'cmake-build-*/', '*.o'],
   zig: ['.zig-cache/', 'zig-cache/', 'zig-out/'],
+  vue: ['/node_modules', '/dist', '/.vite', '*.tsbuildinfo'],
+  rust: ['/target'],
+  // The shells embed the kernel crate at kernel/ and keep its cargo cache
+  // (kernel/target/) across re-exports — a plain `/target` only matches the
+  // root, so the kernel cache would ride into the first commit (~45MB+).
+  'rust-desktop': ['/target', 'kernel/target/'],
+  'rust-web': ['/target', 'kernel/target/'],
+  'rust-mobile': ['/target', 'kernel/target/'],
+  'rust-native': ['/target', 'kernel/target/'],
+  'rust-core': ['/target'],
 };
 
 /** Merge the target's ignore list into the export's .gitignore. Idempotent, and
