@@ -46,7 +46,7 @@ for (const [entry, outfile, isBin] of entries) {
       logLevel: 'warning',
     });
   } catch (err) {
-    // BUG.md AN: an unbalanced template literal (a stray backtick in a `///`
+    // An unbalanced template literal (a stray backtick in a `///`
     // comment inside a generated-code template) surfaces as "Unexpected end of
     // file" hundreds of lines from the real line. Name every error's file:line
     // so the build fails where the bug is, not where the parser gave up.
@@ -54,7 +54,38 @@ for (const [entry, outfile, isBin] of entries) {
     console.error(`\npack failed at ${entry}:\n${lines.join('\n') || `  ${err?.message ?? err}`}`);
     process.exit(1);
   }
+  // esbuild's minifier silently drops the backslash from `\w`
+  // inside a character class that ALSO contains `$` when it appears in a
+  // `new RegExp(\`...\`)` template literal (`[\w$]` -> `[w$]`). The bundle then
+  // ships a regex that no longer matches identifiers, and every dict-field
+  // rewrite (raw.admin -> raw.get('admin')) silently stops firing. Plain
+  // regex literals are unaffected - only minified template-literal regexes.
+  // Allow the documented escape hatch while pinning it down.
+  {
+    const text = fs.readFileSync(outfile, 'utf8');
+    if (/\[w\$\]/.test(text)) {
+      console.error(
+        `\npack failed: ${outfile} contains [w$] - esbuild minified a [\\w$] class.\n` +
+        `  Fix: in src/export/*.ts, inside new RegExp(\`...\`) template literals,\n` +
+        `  spell \\w explicitly as 0-9A-Za-z_ when the class also contains $.\n` +
+        ` Re-pack after fixing.`);
+      process.exit(1);
+    }
+  }
   const { size } = fs.statSync(outfile);
+  // The CLI entry is the published `bin` - esbuild writes 0644, so a fresh
+  // pack left `node_modules/.bin/rosezm` unrunnable ("permission denied")
+  // until someone noticed and chmod'ed it by hand.
+  if (isBin) fs.chmodSync(outfile, 0o755);
   console.log(`packed ${outfile.padEnd(22)} ${(size / 1024).toFixed(1).padStart(6)} KB  <- ${entry}`);
+}
+// The rust-* emitters emit these hand-written Rust runtime shims by
+// reading them from disk at export time (they are Rust source, not TS, so
+// esbuild cannot bundle them). Ship them beside the CLI bundle or
+// `rosezm export rust-*` fails with ENOENT on a packed install.
+for (const shim of ['rustz-runtime.rs', 'rustz-ops.rs', 'rust-desktop-main.rs', 'rustui-runtime.rs', 'rustz-web.rs', 'dovcore-rules.rs']) {
+  const dest = `${OUT}/${shim}`;
+  fs.copyFileSync(`src/export/${shim}`, dest);
+  console.log(`packed ${dest.padEnd(22)} ${(fs.statSync(dest).size / 1024).toFixed(1).padStart(6)} KB  <- src/export/${shim}`);
 }
 console.log(`\n${entries.length} bundles in ${OUT}/ - the tarball also ships src/ (the runtime source the compiler feeds esbuild), deploy/, and the docs`);
