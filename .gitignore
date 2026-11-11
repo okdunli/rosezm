@@ -39,3 +39,7 @@ cookies.txt
 /.rosezm-dev/
 **/.rosezm-build/
 **/.rosezm-dev/
+
+# local toolchains and benchmark scratch (never published)
+toolchains/
+bench/
