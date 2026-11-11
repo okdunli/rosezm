@@ -13,8 +13,8 @@
  * tree cannot express (markers, comment nodes, deferred boot code) simply does
  * not exist here.
  */
-import { scriptOf } from '../compiler/index.js';
-import { rewriteStateWrites, writableStateNames, derivedWrite } from '../compiler/state-writes.js';
+import { scriptOf, splitScriptBlocks } from '../compiler/index.js';
+import { rewriteStateWrites, rewriteTemplateStateWrites, writableStateNames, derivedWrite } from '../compiler/state-writes.js';
 import { RoseError } from '../compiler/errors.js';
 import { rewriteStoreGets, rewriteStoreUpdates } from './state-ops.js';
 import { resolveBraceBlocks, resolveCommentBlocks } from '../platform-blocks.js';
@@ -169,12 +169,30 @@ export function routeTitle(route: string): string {
   return last.replace(/[-_]+/g, ' ').split(' ').map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w)).join(' ');
 }
 
+/**
+ * State keys a script WRITES with `$setState('k', ...)` but never declares:
+ * the web runtime creates the signal on the first write, so a template read
+ * works; a native target needs a field. Folding these in as null-initialized
+ * state keeps that tolerance on every target. Props are NOT state (a prop
+ * write goes out through its change callback), so they are skipped.
+ */
+export function implicitStateNames(script: string): string[] {
+  const declared = new Set<string>();
+  for (const m of script.matchAll(/\b(?:let|const|var|function)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+  for (const m of script.matchAll(/\bexport\s+let\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+  const out: string[] = [];
+  for (const m of script.matchAll(/\$setState\s*\(\s*(['"])([A-Za-z_$][\w$]*)\1/g)) {
+    if (!declared.has(m[2]) && !out.includes(m[2])) out.push(m[2]);
+  }
+  return out;
+}
+
 export function parseRose(source: string, file = '<template>', platform?: string): ParsedFile {
   const warnings: string[] = [];
   // Comments are removed BEFORE the block split: a comment that mentions
   // `<style>` (or quotes a tag) must not be mistaken for the real block - the
   // web compiler strips comments at the same point for the same reason.
-  // R237: the comment form (`// #ifdef target` ... `// #endif`) works inside the
+  // The comment form (`// #ifdef target` ... `// #endif`) works inside the
   // blocks a template form cannot reach. Whole-file, so it applies to script,
   // style and head alike; `resolvePlatformBlocks` below handles the template.
   const sourceResolved = resolveCommentBlocks(source, platform ?? 'web', warnings);
@@ -186,13 +204,22 @@ export function parseRose(source: string, file = '<template>', platform?: string
     rest = rest.slice(0, m.index) + rest.slice(m.index + m[0].length);
     return m[2];
   };
-  let script = scriptOf(rest) ?? take('script');
+  // The code <script> blocks (bare or `lang="ts"`) merge in document order -
+  // a second block's functions are page code, and used to leak into the node
+  // tree verbatim. Blocks inside a `<head>` (loaders, JSON-LD) stay in the
+  // head; data blocks (`type=`/`src=`) stay in the template.
+  const split = splitScriptBlocks(rest);
+  let script = split.script || null;
+  rest = split.rest;
   // The script block leaves the template text BEFORE head/style extraction: a
   // `<head>` (or `<style>`) merely MENTIONED inside a script comment - the
   // guarded layout's comment names `<head>` - must not be mistaken for the real
   // block, or the head cut lands mid-comment and stray `<script>`/comment text
   // leaks into the node tree (which garbled the guarded page on every target).
-  if (script !== null) rest = rest.replace(/<script(\s[^>]*)?>[\s\S]*?<\/script>/, '');
+  if (script === null) {
+    script = take('script');
+    rest = rest.replace(/<script(\s[^>]*)?>[\s\S]*?<\/script>/, '');
+  }
   // `<head>` FIRST among the remaining blocks: a head block may itself contain
   // <style> (or a <title> that mentions one), and taking the style first would
   // cut the head in half.
@@ -213,7 +240,7 @@ export function parseRose(source: string, file = '<template>', platform?: string
       headText = headText.slice(0, m.index) + headText.slice(m.index + m[0].length);
     }
   }
-  // R200: the mutation sugar - `count++`, `n += 2`, `show = !show` - becomes the
+  // The mutation sugar - `count++`, `n += 2`, `show = !show` - becomes the
   // canonical `$setState` write here, once, before anything is parsed. Every
   // emitter reads `$setState` already (mini-program, Dart, ArkTS, Compose,
   // Swift, C#, C++, Python, Java, Electron), so none of them has to learn that
@@ -232,10 +259,10 @@ export function parseRose(source: string, file = '<template>', platform?: string
   }
   if (writable.size) {
     const isWritable = (name: string): boolean => writable.has(name);
-    rest = rewriteStateWrites(rest, isWritable);
+    rest = rewriteTemplateStateWrites(rest, isWritable);
     script = script === null ? null : rewriteStateWrites(script, isWritable);
   }
-  // R236: conditional compilation in the TEMPLATE, resolved as text. The comment
+  // Conditional compilation in the TEMPLATE, resolved as text. The comment
   // form was already applied to the whole source above.
   rest = resolveBraceBlocks(rest, platform ?? 'web', warnings);
   const parsed = parseTemplate(rest, file, warnings, platform);
@@ -1210,10 +1237,20 @@ export function inputBoundProps(nodes: Node[], propNames: string[]): string[] {
       }
       if (n.tag === 'input' || n.tag === 'textarea' || n.tag === 'select') {
         for (const a of n.attrs) {
-          const bound = a.name === 'value' || a.name.startsWith('bind:');
-          if (!bound || a.value.kind !== 'expr') continue;
+          if (a.value.kind !== 'expr') continue;
           const name = a.value.code.trim();
-          if (props.has(name) && !found.includes(name)) found.push(name);
+          if (!props.has(name) || found.includes(name)) continue;
+          // Two ways an input rides a declared PROP back to the caller:
+          //   - `bind:value={prop}` - the call-site bind, written explicitly;
+          //   - `value={prop}` - the canonical component form. Both inject the
+          //     generated `onXxxChange` change callback into Build() so the input
+          //     edits flow back to the caller (test-export §17, all targets).
+          const bound = a.name.startsWith('bind:');
+          // A static attribute like `placeholder={prop}` is one-way and must
+          // NOT grow a callback - only the writable ones ride back.
+          const rendersProp = (a.name === 'value' || a.name === 'checked') && props.has(name);
+          if (!bound && !rendersProp) continue;
+          found.push(name);
         }
       }
       walk(n.children);

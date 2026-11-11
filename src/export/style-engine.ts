@@ -83,33 +83,37 @@ export interface StyleModel {
   italic?: boolean;
   lineHeight?: number; // unitless multiplier
   letterSpacing?: number; // px
+  /** font-variant-numeric: tabular-nums - digits share one advance width, so
+   *  a column of numbers keeps its alignment. The one font-variant the native
+   *  toolkits can carry. */
+  tabularNums?: boolean;
   textAlign?: 'left' | 'center' | 'right' | 'justify';
   textTransform?: 'uppercase' | 'lowercase' | 'capitalize';
   underline?: boolean;
   strike?: boolean;
-  /** R415: white-space: nowrap keeps one line; text-overflow: ellipsis ends it
+  /** White-space: nowrap keeps one line; text-overflow: ellipsis ends it
    *  with an ellipsis. A target that can truncate maps both to its own API. */
   nowrap?: boolean;
   ellipsis?: boolean;
-  /** R418: object-fit for a replaced element (an image). */
+  /** Object-fit for a replaced element (an image). */
   objectFit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
-  /** R483: how a background picture fills its box. */
+  /** How a background picture fills its box. */
   backgroundSize?: 'cover' | 'contain' | 'auto';
-  /** R483: where the background picture sits in its box. */
+  /** Where the background picture sits in its box. */
   backgroundPosition?: 'center' | 'top' | 'bottom' | 'left' | 'right';
-  /** R483: whether the background picture repeats. */
+  /** Whether the background picture repeats. */
   backgroundRepeat?: 'repeat' | 'no-repeat';
-  /** R488: a CSS transform, decomposed into the three ops a native toolkit has. */
+  /** A CSS transform, decomposed into the three ops a native toolkit has. */
   translateX?: number;
   translateY?: number;
   /** Degrees, clockwise - CSS's own direction. */
   rotate?: number;
   scale?: number;
-  /** R420: the width/height ratio a box keeps as it sizes. */
+  /** The width/height ratio a box keeps as it sizes. */
   aspectRatio?: number;
   /* colour and box */
   background?: Color;
-  /** R473: `background-image: url(...)` - the URL as authored (`/hero.png`). */
+  /** `background-image: url(...)` - the URL as authored (`/hero.png`). */
   backgroundImage?: string;
   gradient?: Gradient;
   padding?: Edge;
@@ -137,18 +141,53 @@ export interface StyleModel {
   maxWidth?: Len;
   minHeight?: Len;
   maxHeight?: Len;
-  /** R227: `hidden` clips; `scroll` means the box is its own scroll container. */
+  /** `hidden` clips; `scroll` means the box is its own scroll container. */
   overflow?: 'hidden' | 'visible' | 'scroll';
   zIndex?: number;
-  /** R224: an element taken out of the flow. `static`/`relative` stay in flow. */
+  /** An element taken out of the flow. `static`/`relative` stay in flow. */
   position?: 'absolute' | 'fixed';
-  /** R224: inset offsets in px. Only meaningful with `position`. */
+  /** Inset offsets in px. Only meaningful with `position`. */
   insetTop?: number;
   insetRight?: number;
   insetBottom?: number;
   insetLeft?: number;
   /** A hint only: no native toolkit can change the OS cursor from a style. */
   cursor?: string;
+  /** `order` - a flex/grid item's position in the flow. */
+  order?: number;
+  /** `text-shadow` - the shadow cast by the glyphs, not the box. */
+  textShadow?: Shadow;
+  /** `vertical-align` - an inline box's baseline alignment. */
+  verticalAlign?: 'baseline' | 'middle' | 'top' | 'bottom' | 'sub' | 'super';
+  /** `vertical-align: 3px / -4px / 10%` - a baseline OFFSET, the length form
+   *  of the property. Positive lifts the box off the baseline, negative sinks
+   *  it; a percentage reads against the line-height. */
+  verticalShift?: { n: number; u: 'px' | '%' };
+  /** `word-break: break-all` - a long word breaks anywhere. */
+  breakWord?: boolean;
+  /** `pointer-events: none` - the box does not take the pointer. */
+  noPointer?: boolean;
+  /** `user-select: none` - the text is not selectable. */
+  noSelect?: boolean;
+  /** `list-style-type` - the marker a list item carries. */
+  listStyle?: 'disc' | 'circle' | 'square' | 'none' | 'decimal';
+  /** `grid-template-columns` - how many tracks the grid lays out. */
+  gridColumns?: number;
+  /** `grid-template-rows` - how many tracks the grid lays out (vertical). */
+  gridRows?: number;
+  /** The filter functions a native toolkit can draw. `blur` is the blur
+   *  radius in px, `brightness` the multiplier (0 = black, 1 = unchanged).
+   *  A filter chain the engine cannot decompose is not modelled - the
+   *  declaration keeps its honest drop. */
+  filterBlur?: number;
+  filterBrightness?: number;
+  /** `border-collapse: collapse` - a table the author wants visually merged.
+   *  No native toolkit has the concept, but the report names it specifically
+   *  (and a target whose table widget can draw inner borders draws them). */
+  borderCollapse?: boolean;
+  /** `::marker` content replacement (CSS Lists 3): the string that replaces
+   *  the bullet/number. Lives on the marker model only. */
+  markerContent?: string;
 }
 
 /** A rule with the selector it came from, ready for the cascade. */
@@ -162,20 +201,23 @@ export interface StyleRule {
   model: StyleModel;
   /** `:hover` half of the rule, resolved separately. */
   hover?: StyleModel;
-  /** R252: the `:focus` half, resolved separately - the input-state variant a
+  /** The `:focus` half, resolved separately - the input-state variant a
    *  focus-capable target can honour (every native input has one). */
   focus?: StyleModel;
-  /** R262: the `:active` half, resolved separately - the pressed-state variant
+  /** The `:active` half, resolved separately - the pressed-state variant
    *  a press-capable target can honour (mouse-down on desktop, touch on mobile). */
   active?: StyleModel;
   specificity: number;
   order: number;
   /** The `@media (min|max)-width` guard, when the rule had one. */
   media?: { min?: number; max?: number };
-  /** R467: the rule came from a `prefers-color-scheme: dark` block - it applies
+  /** The rule came from a `prefers-color-scheme: dark` block - it applies
    *  only to a target that follows the system appearance, and then after the
    *  light rules of the same specificity. */
   dark?: boolean;
+  /** The rule came from a `li::marker { ... }` selector: its model styles the
+   *  marker glyph (colour, font-size) rather than the list item itself. */
+  marker?: boolean;
 }
 
 export interface StyleSheet {
@@ -452,7 +494,7 @@ export function parseColor(raw: string): Color | null {
  * document where they would be unitless keywords); rem/em convert at 16px,
  * which is the only honest static answer for a native target.
  */
-/** R224: an inset (`top`, `left`, ...) as px. Percentages and `auto` cannot be
+/** An inset (`top`, `left`, ...) as px. Percentages and `auto` cannot be
  *  laid out by a native toolkit that does not know the box, so they are skipped. */
 function insetPx(v: string): number | null {
   const l = parseLen(v);
@@ -465,6 +507,29 @@ export function parseLen(raw: string, rem = 16): Len | null {
   if (v === 'auto') return { n: 0, u: 'auto' };
   if (v === '0' || v === '0px') return { n: 0, u: 'px' };
   if (v.startsWith('calc(') && v.endsWith(')')) return calcLen(v.slice(5, -1), rem);
+  // The three CSS sizing functions (CSS Values 4). A native layout has no
+  // expression of its own, so each one is SETTLED against the same 390px
+  // reference phone the rest of the engine measures with:
+  //   - min(a, b) / max(a, b): the smaller / larger of the two;
+  //   - clamp(lo, val, hi): val pinned into [lo, hi].
+  // A percentage operand folds against the reference width, exactly like the
+  // mixed sum in calc() - so `clamp(10px, 50%, 300px)` answers 195px, the
+  // width a 390px phone gives it, instead of dropping the declaration.
+  for (const fn of ['min', 'max', 'clamp'] as const) {
+    if (v.startsWith(fn + '(') && v.endsWith(')')) {
+      const args = splitTopLevel(v.slice(fn.length + 1, -1));
+      if (args.length < 2) return null;
+      const lens = args.map((a) => parseLen(a, rem));
+      if (lens.some((l) => l === null || l.u === 'auto')) return null;
+      const vals = (lens as Len[]).map((l) => (l.u === '%' ? (l.n / 100) * 390 : l.n));
+      const pick = fn === 'min' ? Math.min(...vals) : fn === 'max' ? Math.max(...vals) : null;
+      if (pick !== null) return { n: Math.round(pick * 10) / 10, u: 'px' };
+      // clamp: the middle value, pinned into the [lo, hi] band.
+      const [lo, val, hi] = vals;
+      if (hi < lo) return null;
+      return { n: Math.round(Math.min(Math.max(val, lo), hi) * 10) / 10, u: 'px' };
+    }
+  }
   const m = /^(-?\d*\.?\d+)(px|%|rem|em|vw|vh)?$/.exec(v);
   if (!m) return null;
   const n0 = Number(m[1]);
@@ -477,6 +542,28 @@ export function parseLen(raw: string, rem = 16): Len | null {
     case 'vh': return { n: Math.round(n0 * 8.44 * 10) / 10, u: 'px' };
     default: return { n: n0, u: 'px' };
   }
+}
+
+/**
+ * Split a comma list at the TOP level only: `min(10px, calc(1px + 2px))`
+ * splits into two, and the comma inside the parentheses does not split.
+ */
+function splitTopLevel(src: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of src) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) {
+      out.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
 }
 
 /**
@@ -645,6 +732,12 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       if (l) model.letterSpacing = l.n;
       return true;
     }
+    case 'font-variant-numeric': {
+      // The one variant a native toolkit can carry; any other value stays in
+      // the unknown set and is named in the sheet warning.
+      if (/tabular-nums/i.test(v)) { model.tabularNums = true; return true; }
+      return false;
+    }
     case 'text-align': {
       if (/^left$|^start$/i.test(v)) model.textAlign = 'left';
       else if (/^center$/i.test(v)) model.textAlign = 'center';
@@ -663,7 +756,7 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       return true;
     }
     case 'transform': {
-      // R488: translate/rotate/scale are what every native toolkit can say. A
+      // Translate/rotate/scale are what every native toolkit can say. A
       // matrix()/3d form is left to the warning path: no target has the matrix.
       const ops = /\b(translate|translateX|translateY|rotate|scale)\s*\(([^)]*)\)/gi;
       let found = false;
@@ -691,7 +784,7 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       return true;
     }
     case 'background-size': {
-      // R483: cover/contain/auto are the three values a native toolkit can say.
+      // Cover/contain/auto are the three values a native toolkit can say.
       const size = v.trim().toLowerCase();
       if (size === 'cover' || size === 'contain' || size === 'auto') model.backgroundSize = size;
       return true;
@@ -739,7 +832,7 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
     }
     /* ---- box ---- */
     case 'background-image': {
-      // R473: a hero image is a URL, not a colour - the targets that can draw a
+      // A hero image is a URL, not a colour - the targets that can draw a
       // background picture read this; the rest still get the raw URL in the model.
       const m = /url\(\s*(['"]?)([^'")]+)\1\s*\)/i.exec(v);
       if (m) model.backgroundImage = m[2].trim();
@@ -855,12 +948,14 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
       else if (/^inline$/i.test(v)) model.display = 'inline';
       else if (/^block$/i.test(v)) model.display = 'block';
       else if (/^grid$/i.test(v)) {
-        // A real grid has no single native equivalent. Model it as a wrapping
-        // flex row, which is what the user asked for in spirit, and say so.
+        // A real grid has no single native equivalent. It is modelled as a
+        // wrapping flex row - what the user asked for in spirit - and the
+        // track count (grid-template-columns) rides the model, so a target
+        // with a grid widget builds one instead of the fallback.
         model.display = 'flex';
         model.direction = model.direction ?? 'row';
         model.wrap = true;
-        warnings?.add('grid');
+        return true;
       }
       return true;
     }
@@ -906,14 +1001,14 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
     case 'overflow':
     case 'overflow-x':
     case 'overflow-y': {
-      // R227: auto/scroll is not "clip it" - it is "this box scrolls". Collapsing
+      // Auto/scroll is not "clip it" - it is "this box scrolls". Collapsing
       // the two meant a scrollable list was clipped on every native target.
       if (/auto|scroll/i.test(v)) model.overflow = 'scroll';
       else model.overflow = /hidden/i.test(v) ? 'hidden' : 'visible';
       return true;
     }
     case 'position':
-      // R224: absolute/fixed leave the flow, which every native toolkit can say.
+      // Absolute/fixed leave the flow, which every native toolkit can say.
       // static/relative stay in flow, so nothing carries them.
       if (/^(absolute|fixed)$/i.test(v)) model.position = v.toLowerCase() as 'absolute' | 'fixed';
       return true;
@@ -972,9 +1067,131 @@ export function applyDeclaration(model: StyleModel, prop: string, value: string,
     case 'z-index': { const n = Number(v); if (Number.isFinite(n)) model.zIndex = n; return true; }
     case 'cursor': model.cursor = v; return true;
     case 'visibility': return true;
+    /* ---- the modern properties that used to be dropped ---- */
+    case 'order': {
+      // `order` on a flex/grid item: the position in the flow. Every target
+      // that lays out children in order can honour it.
+      const n = Number(v);
+      if (Number.isFinite(n)) model.order = n;
+      return true;
+    }
+    case 'text-shadow': {
+      // The shadow a glyph casts - the box-shadow of the text, not of the
+      // box. A single shadow is the common case; several compose into the
+      // first one (a native text shadow takes one).
+      const parts = splitValues(v);
+      const first = parts[0] ?? '';
+      const shadow = parseShadow(first);
+      if (shadow) model.textShadow = shadow;
+      return true;
+    }
+    case 'vertical-align': {
+      const val = v.trim().toLowerCase();
+      if (['baseline', 'middle', 'top', 'bottom', 'sub', 'super'].includes(val)) {
+        model.verticalAlign = val as 'baseline' | 'middle' | 'top' | 'bottom' | 'sub' | 'super';
+        return true;
+      }
+      // The length/percent form: a baseline OFFSET, not an alignment keyword.
+      // A percent reads against the element's own line-height, which may be
+      // declared anywhere in the same block - the conversion happens after
+      // the whole rule is parsed (resolvePercentShifts below).
+      const shift = /^(-?[0-9.]+)(px|%)$/.exec(val);
+      if (shift) {
+        model.verticalShift = { n: Number(shift[1]), u: shift[2] as 'px' | '%' };
+      }
+      return true;
+    }
+    case 'word-break': {
+      if (/break-all/i.test(v)) model.breakWord = true;
+      return true;
+    }
+    case 'overflow-wrap':
+    case 'word-wrap': {
+      // `break-word` is the one with an answer; `normal` says nothing.
+      if (/break-word|anywhere/i.test(v)) model.breakWord = true;
+      return true;
+    }
+    case 'pointer-events': {
+      if (/^none$/i.test(v)) model.noPointer = true;
+      return true;
+    }
+    case 'user-select': {
+      if (/^none$/i.test(v)) model.noSelect = true;
+      return true;
+    }
+    case 'list-style':
+    case 'list-style-type': {
+      // `list-style: disc inside` carries the marker type first.
+      const first = splitValues(v)[0]?.trim().toLowerCase() ?? '';
+      const marker = ['disc', 'circle', 'square', 'none', 'decimal'].includes(first) ? first : '';
+      if (marker) model.listStyle = marker as 'disc' | 'circle' | 'square' | 'none' | 'decimal';
+      return true;
+    }
+    case 'grid-template-columns': {
+      const n = trackCountOf(v);
+      if (n !== undefined) model.gridColumns = n;
+      return true;
+    }
+    case 'grid-template-rows': {
+      const n = trackCountOf(v);
+      if (n !== undefined) model.gridRows = n;
+      return true;
+    }
+    case 'filter': {
+      // The functions a native toolkit can draw, ONE per declaration (a chain
+      // composes into the first one it names). Anything else - hue-rotate,
+      // saturate, a chain this decomposition cannot split - keeps its honest
+      // drop, named in the report.
+      const funcs = [...v.matchAll(/([a-z-]+)\(\s*([^)]*?)\s*\)/gi)];
+      for (const [, name, argRaw] of funcs) {
+        const arg = Number(argRaw.replace(/px$/, ''));
+        if (!Number.isFinite(arg)) continue;
+        if (name === 'blur') { model.filterBlur = arg; return true; }
+        if (name === 'brightness') { model.filterBrightness = Math.max(0, arg); return true; }
+      }
+      if (funcs.length) return false; // a real filter chain with no drawable head
+      return true; // `filter: none` - nothing to carry
+    }
+    case 'border-collapse': {
+      if (/^collapse$/i.test(v)) model.borderCollapse = true;
+      return true;
+    }
+    case 'content': {
+      // `::marker` content replacement: a quoted string replaces the bullet.
+      // The stylesheet layer only routes here for marker rules (see
+      // parseStylesheetUncached, which strips it elsewhere and says so).
+      const lit = /^(?:'([^']*)'|"([^"]*)")$/.exec(v.trim());
+      if (lit) model.markerContent = lit[1] ?? lit[2];
+      return true;
+    }
     default:
       return false;
   }
+}
+
+/**
+ * How many tracks a `grid-template-columns` / `grid-template-rows` value lays
+ * out, clamped to the twelve a phone-width row can carry. `repeat(N, ...)`
+ * states the count; an auto-fit/auto-fill track is estimated from its minmax
+ * floor at the reference width - the same width media queries resolve against.
+ * An explicit track list states its own length.
+ */
+function trackCountOf(raw: string): number | undefined {
+  const v = raw.replace(/!important/gi, '').trim();
+  if (!v) return undefined;
+  const repeat = /^repeat\(\s*(\d+|auto-fit|auto-fill)\s*,([\s\S]*)\)$/i.exec(v);
+  if (repeat) {
+    if (/^\d+$/.test(repeat[1])) {
+      const k = Number(repeat[1]);
+      return k >= 1 ? Math.min(12, k) : undefined;
+    }
+    const minmax = /minmax\(\s*([\d.]+)px/i.exec(repeat[2]);
+    const floor = minmax ? Number(minmax[1]) : 120;
+    return Math.max(1, Math.min(12, Math.floor((390 + 12) / (floor + 12))));
+  }
+  // Tracks sit at the top level; a minmax()/calc() carries its own spaces.
+  const parts = v.split(/\s+(?![^(]*\))/).filter((p) => p && !p.startsWith('['));
+  return parts.length ? Math.min(12, parts.length) : undefined;
 }
 
 function setEdge(cur: Edge, index: number, raw: string, done: (e: Edge) => void): void {
@@ -1104,9 +1321,11 @@ function parseCompound(src: string): Compound | null {
 }
 
 /** Parse a selector list into matchable compounds. Returns null for a selector this engine cannot model. */
-function parseSelector(selector: string): { parts: Compound[]; combinators: Array<'descendant' | 'child'> } | null {
+function parseSelector(selector: string): { parts: Compound[]; combinators: Array<'descendant' | 'child'>; marker?: boolean } | null {
   const src = selector.trim();
-  if (!src || src.startsWith('@') || src.includes('::')) return null;
+  // `::marker` is the ONE pseudo-element the engine models (the rule styles
+  // the glyph); every other `::` pseudo stays outside the subset.
+  if (!src || src.startsWith('@') || (src.includes('::') && !/^[\w-]+::marker$/i.test(src))) return null;
   // Split on combinators while keeping them: `a > b c` -> [a, >, b, ' ', c]
   const tokens: Array<{ text: string; comb: 'descendant' | 'child' | null }> = [];
   let cur = '';
@@ -1132,6 +1351,9 @@ function parseSelector(selector: string): { parts: Compound[]; combinators: Arra
   if (!tokens.length) return null;
   const parts: Compound[] = [];
   const combinators: Array<'descendant' | 'child'> = [];
+  // True when the LAST compound carried `::marker` - the rule styles the
+  // marker glyph, not the list item.
+  let isMarker = false;
   for (const t of tokens) {
     // A pseudo-class on the compound: `:hover`, `:focus` and `:active` are the
     // ones the engine models (as variants); anything else is reported on the
@@ -1141,7 +1363,11 @@ function parseSelector(selector: string): { parts: Compound[]; combinators: Arra
     if (pseudoIdx >= 0) {
       const pseudo = t.text.slice(pseudoIdx);
       text = t.text.slice(0, pseudoIdx);
-      if (!/^(?:hover|focus|active)$/i.test(pseudo)) {
+      // `::marker` IS modelled: the body styles the marker glyph (colour,
+      // font-size) rather than the list item - the rule carries the flag.
+      if (/^::?marker$/i.test(pseudo)) {
+        isMarker = true;
+      } else if (!/^(?:hover|focus|active)$/i.test(pseudo)) {
         if (/^:not\(/i.test(pseudo)) return null; // no honest native answer
         // A structural pseudo (`:first-child`) cannot be modelled either: drop
         // it but keep the rest of the compound, and let the caller warn.
@@ -1152,13 +1378,13 @@ function parseSelector(selector: string): { parts: Compound[]; combinators: Arra
     const pseudoOf = (s: string): string => s.slice(pseudoIdx);
     if (pseudoIdx >= 0 && /^(?:hover|focus|active)$/i.test(t.text.slice(pseudoIdx))) {
       comp.unsupported.push(pseudoOf(t.text));
-    } else if (pseudoIdx >= 0 && !/^:not\(/i.test(pseudoOf(t.text))) {
+    } else if (pseudoIdx >= 0 && !/^::?marker$/i.test(pseudoOf(t.text)) && !/^:not\(/i.test(pseudoOf(t.text))) {
       comp.unsupported.push(pseudoOf(t.text).replace(/\(.*$/, ''));
     }
     parts.push(comp);
     if (t.comb && parts.length > 1) combinators.push(t.comb);
   }
-  return { parts, combinators };
+  return { parts, combinators, marker: isMarker };
 }
 
 function specificityOf(parts: Compound[]): number {
@@ -1262,7 +1488,7 @@ function parseStylesheetUncached(css: string): StyleSheet {
         continue;
       }
       const last = parsedSel.parts[parsedSel.parts.length - 1];
-      // R242: a structural pseudo (`:first-child`, `:nth-child(2n)`) names WHICH
+      // A structural pseudo (`:first-child`, `:nth-child(2n)`) names WHICH
       // elements the rule covers. A native tree cannot test it, and applying the
       // body to every match is not a degradation - it is the wrong styling on the
       // wrong elements (`.item:first-child` bolded every `.item`). The rule is
@@ -1273,6 +1499,12 @@ function parseStylesheetUncached(css: string): StyleSheet {
         continue;
       }
       const { model, hover, focus, active } = modelOf(body, last.unsupported.includes(':hover'), last.unsupported.includes(':focus'), last.unsupported.includes(':active'), unknown);
+      // `content` is a ::marker-only declaration: an ordinary rule stating it
+      // is a pseudo-element business the engine does not model - named, not
+      // silently dropped. A marker rule keeps it (the model carries it).
+      if (!parsedSel.marker && /(^|[^\w-])content\s*:/i.test(body)) {
+        warnings.push(`selector "${trimmed}": content applies only inside ::marker here - dropped from the element style`);
+      }
       rules.push({
         selector: trimmed,
         parts: parsedSel.parts,
@@ -1285,6 +1517,7 @@ function parseStylesheetUncached(css: string): StyleSheet {
         order: order++,
         media: guard && (guard.min || guard.max) ? { min: guard.min, max: guard.max } : undefined,
         dark: guard?.dark || undefined,
+        marker: parsedSel.marker || undefined,
       });
     }
   };
@@ -1299,7 +1532,7 @@ function parseStylesheetUncached(css: string): StyleSheet {
     }
     if (sel.startsWith('@')) {
       if (sel.startsWith('@media')) {
-        // R467: the dark half is KEPT and marked, so a target that follows the
+        // The dark half is KEPT and marked, so a target that follows the
         // system appearance can apply it; one that cannot still gets told.
         if (/prefers-color-scheme/i.test(sel)) {
           const dark = /prefers-color-scheme\s*:\s*dark/i.test(sel);
@@ -1354,7 +1587,197 @@ function parseStylesheetUncached(css: string): StyleSheet {
   if (unknown.size) {
     warnings.push(`these declarations have no native answer - dropped: ${[...unknown].sort().join(', ')}`);
   }
+  // A percent vertical-align reads against the element's own line-height,
+  // which may be declared anywhere in the same block - so the conversion
+  // runs after the whole rule is parsed, not at the declaration. A rule
+  // that never declared a line-height keeps the percent (the report names
+  // it: no line-height exists to read against at export time).
+  for (const rule of rules) {
+    const settle = (m: StyleModel): void => {
+      if (m.verticalShift?.u === '%' && m.lineHeight && m.fontSize) {
+        m.verticalShift = { n: Math.round(m.verticalShift.n / 100 * m.lineHeight * m.fontSize), u: 'px' };
+      }
+    };
+    settle(rule.model);
+    if (rule.hover) settle(rule.hover);
+    if (rule.focus) settle(rule.focus);
+    if (rule.active) settle(rule.active);
+  }
   return { rules, warnings };
+}
+
+/**
+ * The properties the model carries but only SOME targets can draw. A rule that
+ * states one of them is no longer a "no native answer" drop (the model holds
+ * it), but a target that cannot paint it must still say so - the export
+ * report names what that particular target loses, instead of the declaration
+ * vanishing without a word.
+ */
+export const MODEL_ONLY_PROPS = [
+  'text-shadow',
+  'vertical-align',
+  'word-break',
+  'overflow-wrap',
+  'pointer-events',
+  'user-select',
+  'list-style',
+  'order',
+] as const;
+
+/** The model-only properties this model actually carries (a rule stated them). */
+export function modelOnlyPropsIn(model: StyleModel): string[] {
+  const out: string[] = [];
+  if (model.textShadow) out.push('text-shadow');
+  if (model.verticalAlign) out.push('vertical-align');
+  if (model.verticalShift) out.push('vertical-align:<length>');
+  if (model.breakWord) out.push('word-break');
+  if (model.noPointer) out.push('pointer-events');
+  if (model.noSelect) out.push('user-select');
+  if (model.listStyle) out.push('list-style');
+  if (model.order !== undefined) out.push('order');
+  return out;
+}
+
+/**
+ * The specific downgrade note a model-carried filter/collapse reads as, for
+ * the target's report: what the CSS asked, what the target actually draws
+ * (or the honest "nothing - the target has no equivalent").
+ */
+export function filterDowngradeNote(model: StyleModel, target: string): string | null {
+  const notes: string[] = [];
+  if (model.filterBlur !== undefined || model.filterBrightness !== undefined) {
+    const drawn = TARGET_FILTER_SUPPORT[target] ?? [];
+    const parts: string[] = [];
+    if (model.filterBlur !== undefined) parts.push(drawn.includes('blur') ? `blur(${model.filterBlur}px) draws as a blur effect` : `blur(${model.filterBlur}px) has no ${target} equivalent - dropped`);
+    if (model.filterBrightness !== undefined) parts.push(drawn.includes('brightness') ? `brightness(${model.filterBrightness}) draws as a brightness effect` : `brightness(${model.filterBrightness}) has no ${target} equivalent - dropped`);
+    notes.push(`filter: ${parts.join('; ')}`);
+  }
+  if (model.borderCollapse) {
+    notes.push('border-collapse: collapse - no native table borders to merge; the cells keep their own borders as drawn');
+  }
+  return notes.length ? notes.join('; ') : null;
+}
+
+/** The targets that paint a vertical-align px offset (see valueAwareUnsupported):
+ *  Qt reads it off the span, Flutter translates the run, Tk carries it on the
+ *  run's Text tag, Compose converts it to an em ratio for BaselineShift. */
+const SHIFT_PAINTERS = new Set(['cpp', 'flutter', 'python', 'android']);
+
+/** The filter functions each target really draws (see filterDowngradeNote). */
+export const TARGET_FILTER_SUPPORT: Record<string, string[]> = {
+  xcode: ['blur', 'brightness'],
+  // Qt has a native QGraphicsBlurEffect; brightness has no QWidget effect.
+  cpp: ['blur'],
+};
+
+/**
+ * The model-only properties this target cannot paint - the honest remainder.
+ * `supported` is the target's own list of the ones it does paint.
+ */
+export function unsupportedModelProps(model: StyleModel, supported: string[]): string[] {
+  const ok = new Set(supported);
+  return modelOnlyPropsIn(model).filter((p) => !ok.has(p));
+}
+
+/**
+ * What each target can paint of the model-only properties. A target that
+ * draws one names it here; a property no target draws stays a model value
+ * nobody uses - and the export report says so once per stylesheet.
+ */
+export const TARGET_MODEL_ONLY_SUPPORT: Record<string, string[]> = {
+  flutter: ['text-shadow', 'user-select', 'word-break', 'vertical-align'],
+  // SwiftUI draws blur/brightness natively (TARGET_FILTER_SUPPORT); the
+  // remaining model-only properties it cannot paint are named per target.
+  xcode: ['text-shadow', 'pointer-events', 'user-select', 'vertical-align'],
+  arkts: ['text-shadow', 'pointer-events', 'user-select', 'word-break', 'vertical-align'],
+  android: ['text-shadow', 'pointer-events', 'user-select', 'vertical-align'],
+  java: ['text-shadow', 'pointer-events', 'word-break', 'vertical-align'],
+  dotnet: ['text-shadow', 'pointer-events', 'word-break', 'vertical-align'],
+  cpp: ['text-shadow', 'pointer-events', 'word-break', 'vertical-align'],
+  python: ['text-shadow', 'pointer-events', 'word-break', 'vertical-align'],
+  weapp: MODEL_ONLY_PROPS as unknown as string[],
+};
+
+/**
+ * The vertical-align values every target consumes (middle/top/bottom read as
+ * the box's own alignment). `sub`/`super` are a DIFFERENT beast - they are
+ * per-run, baseline-relative shifts, and only the desktop three reach them
+ * through their rich-text engine (Qt/Swing/WPF all render <sub>/<sup> or
+ * Typography.Variants). The mobile five have no inline subscript, so they must
+ * NAMED (never silent) - see valueAwareUnsupported below.
+ */
+const VA_BLOCK_VALUES = new Set(['middle', 'top', 'bottom']);
+const DESKTOP_RICH = new Set(['cpp', 'java', 'dotnet']);
+
+/** The model-only entries this model carries that `target` cannot paint - now
+ *  value-aware for vertical-align so `sub`/`super` are named where there is no
+ *  native equivalent, instead of vanishing with the whole property. */
+function valueAwareUnsupported(model: StyleModel, target: string): string[] {
+  const ok = new Set(TARGET_MODEL_ONLY_SUPPORT[target] ?? []);
+  const out: string[] = [];
+  for (const p of modelOnlyPropsIn(model)) {
+    if (p === 'vertical-align') {
+      const v = model.verticalAlign;
+      // `baseline` is the no-op default; middle/top/bottom are consumed
+      // everywhere; sub/super are consumed only by the desktop rich-text three.
+      const consumed = !!v && v !== 'baseline' && (VA_BLOCK_VALUES.has(v) || DESKTOP_RICH.has(target));
+      if (!consumed && v) out.push(`vertical-align:${v}`);
+      continue;
+    }
+    if (p === 'vertical-align:<length>') {
+      // The offset form has four painters: Qt's rich text reads the value
+      // straight off the span; Flutter translates the run off the baseline;
+      // Tk carries it on the run's Text tag (opts['offset']). A percent has
+      // no line-height to read against at export time, so it still names the
+      // loss everywhere.
+      const px = model.verticalShift?.u === 'px';
+      if (!px || !SHIFT_PAINTERS.has(target)) out.push(p);
+      continue;
+    }
+    if (!ok.has(p)) out.push(p);
+  }
+  return out;
+}
+
+/**
+ * The model-only properties a stylesheet states that the named target cannot
+ * paint - the honest remainder for THAT target, named once per stylesheet.
+ */
+export function unsupportedForTarget(target: string, sheet: StyleSheet): string[] {
+  const supported = TARGET_MODEL_ONLY_SUPPORT[target] ?? [];
+  const found = new Set<string>();
+  for (const rule of sheet.rules) {
+    for (const p of valueAwareUnsupported(rule.model, target)) found.add(p);
+    if (rule.hover) for (const p of valueAwareUnsupported(rule.hover, target)) found.add(p);
+    if (rule.focus) for (const p of valueAwareUnsupported(rule.focus, target)) found.add(p);
+    if (rule.active) for (const p of valueAwareUnsupported(rule.active, target)) found.add(p);
+  }
+  const ok = new Set(supported);
+  return [...found].filter((p) => !ok.has(p)).sort();
+}
+
+/**
+ * The specific filter/collapse downgrade lines one stylesheet carries for the
+ * named target - what the CSS asked and what the target draws (or does not).
+ * Names FIRST by selector, so the report points at the rule, not a property.
+ */
+export function filterDowngradesFor(target: string, sheet: StyleSheet): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (model: StyleModel, selector: string): void => {
+    const note = filterDowngradeNote(model, target);
+    if (note && !seen.has(note)) {
+      seen.add(note);
+      out.push(`${selector}: ${note}`);
+    }
+  };
+  for (const rule of sheet.rules) {
+    walk(rule.model, rule.selector);
+    if (rule.hover) walk(rule.hover, `${rule.selector}:hover`);
+    if (rule.focus) walk(rule.focus, `${rule.selector}:focus`);
+    if (rule.active) walk(rule.active, `${rule.selector}:active`);
+  }
+  return out;
 }
 
 /**
@@ -1385,6 +1808,10 @@ export interface StyleSubject {
   tag: string;
   id?: string;
   classes: string[];
+  /** The ancestor tags, nearest first - an <ol>/<ul> ancestor is what gives a
+   *  list item its marker. Optional: a caller that does not track them (an
+   *  isolated class resolution) just gets the type-decided marker. */
+  ancestors?: Array<{ tag: string }>;
 }
 
 /** Match one compound against an element. */
@@ -1433,7 +1860,7 @@ export function ruleMatches(rule: StyleRule, el: StyleSubject, ancestors: StyleS
 export interface ResolveOptions {
   /** Evaluate `@media (max|min)-width` rules against this width (px). 0 disables them. */
   viewport?: number;
-  /** R467: apply the `prefers-color-scheme: dark` half (a system in dark mode). */
+  /** Apply the `prefers-color-scheme: dark` half (a system in dark mode). */
   dark?: boolean;
 }
 
@@ -1486,7 +1913,27 @@ const UA_BASELINE: Record<string, StyleModel> = {
   pre: { fontFamily: 'monospace' },
   // A browser paints <mark> yellow; the export kept it as plain text.
   mark: { background: '#ffff00' },
+  // A browser paints a list marker beside every <li> (disc for <ul>, decimal
+  // for <ol>) with no stylesheet at all; a native target that skipped the
+  // baseline rendered a bare label. `listStyle` carries the marker type - the
+  // li emitter prefixes it (and an ordered list's number replaces it).
+  li: { listStyle: 'disc' },
 };
+
+/**
+ * The marker a list item paints: its own `list-style` wins; an <ol> ancestor
+ * (or a decimal type) numbers it; a <ul> ancestor or the baseline disc is a
+ * bullet. `none` draws nothing - the list styled its items bare.
+ */
+export function listMarkerOf(el: StyleSubject, model: StyleModel): { marker: string; numbered: boolean } | null {
+  const type = model.listStyle;
+  if (type === 'none') return null;
+  const orderedAncestor = el.ancestors?.some((a) => a.tag === 'ol') ?? false;
+  const decimal = type === 'decimal' || (type === undefined && orderedAncestor);
+  if (decimal) return { marker: '', numbered: true };
+  const bullet = type === 'circle' ? '◦ ' : type === 'square' ? '▪ ' : '• ';
+  return { marker: bullet, numbered: false };
+}
 
 /** The baseline model for one tag, or null when the browser styles it plainly. */
 function uaBaselineOf(tag: string): StyleModel | null {
@@ -1522,7 +1969,7 @@ export function cascadeFor(
   el: StyleSubject,
   ancestors: StyleSubject[] = [],
   opts: ResolveOptions = {},
-): { model: StyleModel; hover: StyleModel | null; focus: StyleModel | null; active: StyleModel | null } {
+): { model: StyleModel; hover: StyleModel | null; focus: StyleModel | null; active: StyleModel | null; markerModel: StyleModel | null } {
   const viewport = opts.viewport ?? 0;
   const matched = sheet.rules.filter((r) => {
     if (r.dark && !opts.dark) return false;
@@ -1545,13 +1992,17 @@ export function cascadeFor(
   let hover: StyleModel | null = null;
   let focus: StyleModel | null = null;
   let active: StyleModel | null = null;
+  // A `li::marker` rule whose selector matches THIS element styles the marker
+  // glyph - colour and font-size, merged in source order like any variant.
+  let markerModel: StyleModel | null = null;
   for (const r of matched) {
+    if (r.marker) { markerModel = mergeModels(markerModel, r.model); continue; }
     model = mergeModels(model, r.model);
     if (r.hover) hover = mergeModels(hover, r.hover);
     if (r.focus) focus = mergeModels(focus, r.focus);
     if (r.active) active = mergeModels(active, r.active);
   }
-  return { model, hover, focus, active };
+  return { model, hover, focus, active, markerModel };
 }
 
 /** Parse a literal `style="a: b; c: d"` into a model. */
@@ -1800,7 +2251,7 @@ export function isFlex(m: StyleModel): boolean {
   return m.display === 'flex';
 }
 
-/** R225: name an out-of-flow element the target cannot place. A silent drop is
+/** Name an out-of-flow element the target cannot place. A silent drop is
  *  the worst answer - the author believes the element is floating and it is not. */
 export function notePositionUnsupported(
   m: StyleModel,

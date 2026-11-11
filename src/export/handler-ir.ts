@@ -44,6 +44,10 @@ export interface HandlerDialect {
    *  `params` are the arrow parameters, so a dialect that has no event object
    *  can refuse a body that reads one. */
   refuses?(body: string, params: string[]): string | null;
+  /** Translate a handler body that reads the event object before the dialect
+   *  sees it. A native target can spell `e.key` / `e.clientX` here while the
+   *  shared IR keeps refusing genuinely unsupported event uses. */
+  event?(body: string, params: string[]): string;
 }
 
 export interface HandlerIr {
@@ -119,6 +123,8 @@ export function normalizeHandler(code: string, dialect: HandlerDialect, stateNam
     else return { params, stmts: [], reason: 'an unbalanced handler body', ref: null };
   }
   if (!body) return { params, stmts: [], reason: 'an empty handler body', ref: null };
+  body = stripTsTypes(body);
+  if (dialect.event && params.length) body = dialect.event(body, params);
 
   const refused = dialect.refuses ? dialect.refuses(body, params) : defaultRefuses(body, params);
   if (refused) return { params, stmts: [], reason: refused, ref: null };
@@ -142,6 +148,38 @@ export function inlineHandlerName(taken: Set<string>, prefix = '__h'): string {
 }
 
 // ---------------------------------------------------------------- internals
+
+/** Strip the two TS-only spellings an inline body can carry - casts
+ *  (`(e.target as HTMLInputElement)`) and non-null assertions
+ *  (`e.target!.value`). Types never survive to a target: every dialect speaks
+ *  the value, none speaks the annotation. Quote-aware, so a cast inside a
+ *  string literal survives. Exported: targets with their own arrow-body
+ *  channel (dart and friends) strip before their `e.target.value` rewrite,
+ *  which a cast would otherwise block. */
+export function stripTsTypes(body: string): string {
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') { out += body[++i] ?? ''; }
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; out += ch; continue; }
+    const cast = /^\(([^()]*)\s+as\s+[A-Za-z_$][\w$.<>[\]]*\)|^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s+as\s+[A-Za-z_$][\w$.<>[\]]*/.exec(body.slice(i));
+    if (cast) {
+      out += cast[1] ?? cast[2];
+      i += cast[0].length - 1;
+      continue;
+    }
+    // `x!.y` / `x!(...)` - the assertion bang after an identifier character.
+    if (ch === '!' && (body[i + 1] === '.' || body[i + 1] === '(') && i > 0 && /[\w$]/.test(body[i - 1])) continue;
+    out += ch;
+  }
+  return out;
+}
 
 function matchArrow(src: string): { params: string; body: string } | null {
   // `name =>` (a single unparenthesized parameter).

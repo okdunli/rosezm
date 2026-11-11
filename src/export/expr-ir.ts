@@ -69,7 +69,7 @@ export interface ExprDialect {
   /** `xs.slice(a, b)` - the sub-list from a (inclusive) to b (exclusive).
    *  Optional; a target with a native slice spelling uses it directly. */
   slice?(listExpr: string, from: string, to: string | null): string;
-  // R291: the string + search family. Every one of these is Optional, so a
+  // The string + search family. Every one of these is Optional, so a
   // target that cannot spell it honestly REFUSES instead of emitting JS.
   /** `xs.join(sep)` - the list rendered as one string. */
   join?(listExpr: string, sep: string): string;
@@ -257,7 +257,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
         args = args.slice(0, comma);
       }
     }
-    // R288: `xs.concat(ys)` - a plain argument, not an arrow. A list join has
+    // `xs.concat(ys)` - a plain argument, not an arrow. A list join has
     // no callback, so it must be handled before the arrow requirement below.
     if (call.name === 'concat') {
       const rest = splitTopLevel(args).map((a) => a.trim());
@@ -268,7 +268,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
       if (tail === null) return REFUSE;
       return d.concat(head, tail);
     }
-    // R288: `xs.slice(a[, b])` - plain arguments too. `slice` was the one
+    // `xs.slice(a[, b])` - plain arguments too. `slice` was the one
     // remaining collection method with no path: it survived into the target
     // verbatim (a JS method on a Kotlin list / a C++ RoseValue), so a handler
     // that dropped an element compiled into code that could not run.
@@ -284,7 +284,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
       if (rest.length > 1 && to === null) return REFUSE;
       return d.slice(head, from, to);
     }
-    // R291: `xs.join(sep)` and `s.split(sep)` - the two directions between a
+    // `xs.join(sep)` and `s.split(sep)` - the two directions between a
     // list and a string. Both take a plain argument and both are Optional, so a
     // target that has no spelling refuses instead of emitting JS method calls.
     if (call.name === 'join' || call.name === 'split') {
@@ -301,7 +301,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
       if (!d.split) return REFUSE;
       return d.split(head, arg);
     }
-    // R291: `xs.indexOf(item)` - a plain argument, no callback.
+    // `xs.indexOf(item)` - a plain argument, no callback.
     if (call.name === 'indexOf') {
       const rest = splitTopLevel(args).map((a) => a.trim());
       if (rest.length !== 1) return REFUSE;
@@ -312,7 +312,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
       if (item === null) return REFUSE;
       return d.indexOf(head, item);
     }
-    // R291: the string methods - `s.startsWith(p)`, `endsWith(s)`,
+    // The string methods - `s.startsWith(p)`, `endsWith(s)`,
     // `toUpperCase()` / `toLowerCase()`. All plain arguments, all Optional.
     if (call.name === 'startsWith' || call.name === 'endsWith') {
       const rest = splitTopLevel(args).map((a) => a.trim());
@@ -359,7 +359,7 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
       if (seedRaw !== null && seed === null) return REFUSE;
       return d.reduce(listExpr, arrow.params, body, seed);
     }
-    // R287: `xs.find((p) => pred)` and `xs.some((p) => pred)` - the two
+    // `xs.find((p) => pred)` and `xs.some((p) => pred)` - the two
     // predicate reads a search handler writes, previously a guaranteed refusal
     // (a raw JS arrow in the target, i.e. a stubbed handler).
     if (call.name === 'find' || call.name === 'some' || call.name === 'every') {
@@ -417,6 +417,18 @@ export function translateExpr(code: string, d: ExprDialect, params: Set<string>)
     }
     const patch = d.obj(pairs);
     return base === null ? patch : d.merge(base, patch);
+  }
+  // An optional INDEX read: `a?.['k']` - the same nullable read with a
+  // subscript tail, which the member shape above cannot match (its tail must
+  // be a plain key).
+  {
+    const ix = /^(.*?)\?\.\[(['"])([A-Za-z_$][\w$]*)\2\]$/.exec(src);
+    if (ix) {
+      if (!d.optChain) return REFUSE;
+      const obj = translateExpr(ix[1].trim(), d, params);
+      if (obj === null) return REFUSE;
+      return d.optChain(obj, ix[3]);
+    }
   }
   // An optional member read: `a?.b` - the nullable spelling the dialect owns.
   // Checked BEFORE the plain member read: `matchMember` would otherwise split
@@ -547,8 +559,13 @@ function isDottedHead(head: string): boolean {
   if (!segments.length) return false;
   for (const seg of segments) {
     const s = seg.trim();
-    // A bare name, or a name followed by a balanced argument list (the middle
-    // chain arrows live there): `nums`, `map((n) => n * 2)`, `list()`.
+    // A bare name, a name followed by a balanced argument list (the middle
+    // chain arrows live there): `nums`, `map((n) => n * 2)`, `list()` - or a
+    // bracketed segment: the array/subscript LITERAL a method is called on
+    // (`["a", "b"].join("-")` - the old head check refused every one).
+    if (/^\[[\s\S]*\]$/.test(s)) continue;
+    // ...but only when the dialect spells arrays at all (a test dialect may
+    // not - the arm below guards the same way).
     const m = /^([A-Za-z_$][\w$]*)\s*(\([\s\S]*\))?$/.exec(s);
     if (!m) return false;
     if (m[2] !== undefined) {
@@ -744,8 +761,13 @@ function receiverStart(code: string, dot: number): number {
     }
     return -1;
   }
+  // A numeric literal is a receiver too (`3.14159.toFixed(2)`): the
+  // identifier branch above cannot start on a digit, so the number is its
+  // own arm.
   const m = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.exec(code.slice(0, i + 1));
-  return m ? i + 1 - m[0].length : -1;
+  if (m) return i + 1 - m[0].length;
+  const num = /\d+(?:\.\d+)?$/.exec(code.slice(0, i + 1));
+  return num ? i + 1 - num[0].length : -1;
 }
 
 /** `EXPR.toFixed(n)` -> spell(EXPR, n), where EXPR may be any expression

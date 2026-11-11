@@ -26,8 +26,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { nativeUsage } from './native-api.js';
+import { keepOnlyExcept } from './fs-util.js';
 import { bakeShellDocuments, pageNames, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
-import { appIdentity, type AppIdentity } from './app-identity.js';
+import { appBuildNumber, appIdentity, type AppIdentity } from './app-identity.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
 
 const LABEL = 'zig';
@@ -41,7 +42,7 @@ export interface EmitZigOptions {
 
 export async function emitZig(opts: EmitZigOptions): Promise<{ pages: string[]; components: string[] }> {
   const out = path.join(opts.outDir, LABEL);
-  await fs.promises.rm(out, { recursive: true, force: true });
+  await keepOnlyExcept(out, ['zig-out', '.zig-cache']);
   await fs.promises.mkdir(out, { recursive: true });
 
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
@@ -56,7 +57,7 @@ export async function emitZig(opts: EmitZigOptions): Promise<{ pages: string[]; 
   // The binary embeds bytes; `server.js` is the SSR bundle it cannot run, and
   // inside a shipped artifact it is also every API route and its credentials.
   await pruneServerBundle(frontend);
-  await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  await writeShellBridge(frontend, opts.apiBase ?? '', native, { id: app.id, name: app.name, version: app.version, build: appBuildNumber(app.version) });
   for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`${LABEL}: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   const files = walkFiles(frontend);

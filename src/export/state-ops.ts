@@ -135,7 +135,7 @@ export function rewriteThrowNew(body: string): string {
   return body.replace(/\bthrow\s+new\s+(?:[A-Za-z_$][\w$]*)?Error\s*\(/g, 'roseThrow(');
 }
 
-/** R234: a promise constructor has no native spelling. `{#await}` heads were
+/** A promise constructor has no native spelling. `{#await}` heads were
  *  already normalized; a `Promise.resolve(v)` sitting in a HANDLER was not, and
  *  it leaked verbatim into Dart/Kotlin/C++ - three languages with no Promise.
  *  A resolved promise is just its value, so it collapses to that value. */
@@ -237,13 +237,11 @@ function chainStart(s: string, at: number): number {
   }
 }
 
-/**
- * Start index of the receiver expression that ends at the end of `s`, or -1.
- * The receiver is a balanced call/index (`st.get('x')`, `["a","b"]`) or a bare
- * identifier/member chain (`arr`, `cfg.size`). Strings are skipped so a bracket
- * inside a literal never miscounts the balance.
- */
-function receiverStart(s: string): number {
+/** Start index of the receiver expression that ends at the end of `s`, or -1.
+ * The receiver is a balanced call/index (`st.get('x')`, `["a","b"]`), a bare
+ * identifier/member chain (`arr`, `cfg.size`) or a string literal. Strings are
+ * skipped so a bracket inside a literal never miscounts the balance. */
+export function receiverStart(s: string): number {
   let j = s.length;
   while (j > 0 && s[j - 1] === ' ') j--;
   if (j === 0) return -1;
@@ -260,6 +258,10 @@ function receiverStart(s: string): number {
     return -1;
   }
   if (IDENT.test(last)) return chainStart(s, j);
+  // A literal receiver (`' ab '.trim()`) is a receiver too: the old fallback
+  // handed the *method name* to the kit call, which produced
+  // `" ab ".roseLower(trim())` - valid-looking and wrong.
+  if (last === '"' || last === "'" || last === '`') return chainStart(s, strStart(s, j - 1));
   return -1;
 }
 
@@ -370,7 +372,7 @@ export function rewriteJoinCalls(code: string, spell: (list: string, sep: string
  */
 export type StringMethodSpell = (
   recv: string,
-  method: 'trim' | 'trimStart' | 'trimEnd' | 'toLowerCase' | 'toUpperCase' | 'startsWith' | 'endsWith' | 'includes',
+  method: 'trim' | 'trimStart' | 'trimEnd' | 'toLowerCase' | 'toUpperCase' | 'startsWith' | 'endsWith' | 'includes' | 'charAt' | 'at' | 'repeat' | 'map' | 'filter' | 'reduce' | 'padStart' | 'padEnd',
   args: string[],
   boolPos: boolean,
 ) => string | null;
@@ -382,7 +384,7 @@ function isBoolPosition(out: string): boolean {
 }
 
 export function rewriteStringMethods(code: string, spell: StringMethodSpell): string {
-  const METHODS = ['trim', 'trimStart', 'trimEnd', 'toLowerCase', 'toUpperCase', 'startsWith', 'endsWith', 'includes'] as const;
+  const METHODS = ['trim', 'trimStart', 'trimEnd', 'toLowerCase', 'toUpperCase', 'startsWith', 'endsWith', 'includes', 'charAt', 'at', 'repeat', 'map', 'filter', 'reduce'] as const;
   let out = '';
   let i = 0;
   while (i < code.length) {
@@ -394,10 +396,25 @@ export function rewriteStringMethods(code: string, spell: StringMethodSpell): st
       continue;
     }
     if (ch === '.') {
-      const name = METHODS.find((m) => code.startsWith(`.${m}(`, i) && !/[A-Za-z0-9_$]/.test(code[i + m.length + 2] ?? ''));
+      const name = METHODS.find((m) => code.startsWith(`.${m}(`, i));
       if (name) {
         const open = i + name.length + 1;
-        const close = matchParen(code, open);
+        let close = matchParen(code, open);
+        // An arrow's param parens double as the call's first paren:
+        // `xs.map((r) => r.id)` closes after `r` for a depth scan, but the CALL
+        // ends at the `)` before the chain continues. While the args so far
+        // carry no `=>` and the text resumes with one, extend.
+        for (let guard = 0; guard < 8; guard++) {
+          if (/=>/.test(code.slice(open + 1, close)) || !/^\s*=>/.test(code.slice(close + 1))) break;
+          let d = 0;
+          let next = -1;
+          for (let k = close + 1; k < code.length; k++) {
+            if (code[k] === '(') d++;
+            else if (code[k] === ')') { d--; if (d === 0) { next = k; break; } }
+          }
+          if (next < 0) break;
+          close = next;
+        }
         const inner = close < 0 ? null : sliceBalanced(code, open);
         const start = close === null ? -1 : receiverStart(out);
         if (inner !== null && start >= 0) {
@@ -491,7 +508,7 @@ function coerceInside(src: string, wrap: (e: string) => string): string {
 
 /**
  * The same recursion for a text whose outer bracket is deliberately not closed
- * in it - the body of a comprehension after R285's clause cut. `coerceInside`
+ * in it - the body of a comprehension after 's clause cut. `coerceInside`
  * needs a balanced group; here the group closes in the clause the caller kept,
  * so an unclosed opener recurses into the REST of the text instead of failing.
  */
@@ -520,7 +537,7 @@ function coerceBelow(src: string, wrap: (e: string) => string): string {
 
 /**
  * Whether the `?`/`:` of a ternary sit at bracket-depth 0 in `src` (outside
- * strings). R256: the top-level split below treats a `?`-chain as plain
+ * strings). the top-level split below treats a `?`-chain as plain
  * operands, so `user() ? 'Hello, ' + user().name + ' - x' : 'y'` wrapped only
  * the then-branch's pieces and left the `:` dangling - a SyntaxError in every
  * bracketed target. A chain with a top-level ternary is coerced per ARM
@@ -562,7 +579,7 @@ function coerceTernaryChain(src: string, wrap: (expr: string) => string): string
     else if (depth === 0 && ch === '?') { q = i; break; }
   }
   if (q < 0) return src;
-  // R256: only the TAIL of the condition is trimmed. The head may be the
+  // Only the TAIL of the condition is trimmed. The head may be the
   // space that follows an opening brace - Swift's own closure
   // `roseMapIdx(groups) { g, i in ... }` arrives here as the body of a
   // balanced group, and trimming its head turned the closure into
@@ -597,6 +614,519 @@ function coerceTernaryChain(src: string, wrap: (expr: string) => string): string
 }
 
 /**
+ * String-concat coercion that never touches an assignment's LEFT side.
+ *
+ * `coerceStringConcat` walks a line as one expression, which is right for a
+ * template value and wrong for a statement: `const label = 'x' + text()`
+ * reached it as `label = "x" + text()` and came back as
+ * `str(label = "x") + str(st.get('text')` - the `=` was inside an operand, the
+ * `str(` wrapper swallowed the assignment, and the closing paren vanished. That
+ * is not a bad value, it is a page that does not parse.
+ *
+ * So a statement whose top level has a single `=` is split there exactly once:
+ * the `name = ` prefix is emitted verbatim, the right-hand side goes through the
+ * shared pass (which is what makes `'Item ' + n + 1` coerce correctly). A line
+ * with no top-level `=` - a bare call, a `return`, an augmented `+=` (not an
+ * assignment we may split) - goes through unchanged.
+ *
+ * The statement's own `;` is held back for the same reason: an operand is cut at
+ * a top-level `+`, so the last one would carry the terminator into the wrapper -
+ * `tag = "n=" + n();` came out as `tag = "n=" + String(describing: n;)`, which
+ * does not compile.
+ */
+export function coerceStringConcatInAssignments(src: string, wrap: (e: string) => string): string {
+  return src.split('\n').map((raw) => {
+    const tail = raw.match(/[\s;]+$/)?.[0] ?? '';
+    const line = tail.includes(';') ? raw.slice(0, raw.length - tail.length) : raw;
+    const semi = tail.includes(';') ? ';' : '';
+    const indent = (line.match(/^\s*/) ?? [''])[0];
+    let stmt = line.slice(indent.length);
+    // `return a + b` is a STATEMENT with an expression behind it. Without the
+    // strip, the prefix became the first operand: `str(return "x")` - a
+    // SyntaxError the whole page died on (4th member of this family).
+    let prefix = '';
+    const rm = /^(return\s+)([\s\S]+)$/.exec(stmt);
+    if (rm) {
+      prefix = rm[1];
+      stmt = rm[2];
+    }
+    const eq = topLevelAssign(stmt);
+    if (eq < 0) return indent + prefix + coerceStringConcat(stmt, wrap) + semi;
+    const rhs = stmt.slice(eq + 1);
+    const lead = rhs.match(/^\s*/)?.[0] ?? '';
+    return indent + prefix + stmt.slice(0, eq + 1) + lead + coerceStringConcat(rhs.slice(lead.length), wrap) + semi;
+  }).join('\n');
+}
+
+/** Index of a single top-level `=` that is a plain assignment, or -1.
+ *  `==`, `!=`, `<=`, `>=`, `+=`, `-=`, `=>` and a `=` inside brackets or a
+ *  string are NOT assignment operators, so they never split a line. */
+export function topLevelAssign(src: string): number {
+  let depth = 0;
+  let quote = '';
+  let found = -1;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+    if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; continue; }
+    if (c === ')' || c === ']' || c === '}') { depth--; continue; }
+    if (c !== '=' || depth !== 0) continue;
+    const prev = src[i - 1] ?? '';
+    const next = src[i + 1] ?? '';
+    if (next === '=' || next === '>') { i++; continue; }
+    if ('=!<>+-*/%&|^'.includes(prev)) continue;
+    // A second top-level `=` means this is not a plain `name = expr` statement.
+    if (found >= 0) return -1;
+    found = i;
+  }
+  return found;
+}
+
+
+/**
+ * `x?.['k']` - the optional-chain INDEX. The member-read passes spell `x.k`
+ * and the subscript passes spell `x['k']`, but the `?.` in between is a chain
+ * link neither owns: left alone it reaches the file as `x.["k"]` (Java,
+ * Python) or `x?.["a"]` (Swift, where the dot is wrong). The receiver ends at
+ * the `?` and is walked back over the same shapes - a callified state read, a
+ * chain, a local - and the caller spells the null-safe read it owns. The key
+ * is delivered WITHOUT its quotes.
+ */
+export function rewriteOptionalIndex(code: string, spell: (recv: string, key: string) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 128; guard++) {
+    const at = out.indexOf('?.[', scan);
+    if (at < 0) break;
+    const open = at + 2;
+    let depth = 0;
+    let quote = '';
+    let close = -1;
+    for (let k = open; k < out.length; k++) {
+      const c = out[k];
+      if (quote) { if (c === '\\') k++; else if (c === quote) quote = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+      if (c === '[') depth++;
+      else if (c === ']') { depth--; if (depth === 0) { close = k; break; } }
+    }
+    if (close < 0) break;
+    const key = out.slice(open + 1, close).trim().replace(/^(['"])(.*)\1$/, '$2');
+    if (!/^([A-Za-z_$][\w$]*)$/.test(key)) { scan = close + 1; continue; }
+    const recvAt = receiverStartAtDot(out, at);
+    if (recvAt < 0) { scan = close + 1; continue; }
+    const recv = out.slice(recvAt, at).trim();
+    const spelled = spell(recv, key);
+    if (spelled === null) { scan = close + 1; continue; }
+    out = out.slice(0, recvAt) + spelled + out.slice(close + 1);
+    scan = recvAt;
+  }
+  return out;
+}
+
+/**
+ * `s.replace(/pat/flags, repl)` - the regex-literal replace. No native target
+ * has a regex literal: the pattern arrives as a string (backslashes doubled,
+ * the quote escaped) and the caller spells the call its kit owns - a global
+ * pattern is `global` (every match), its absence replaces the first only. The
+ * receiver may be a literal, a chain or a callified state read; a receiver the
+ * scan cannot name is left alone.
+ */
+export function rewriteRegexReplace(code: string, spell: (recv: string, pat: string, repl: string, global: boolean) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 128; guard++) {
+    const m = /\.\s*replace\s*\(\s*\//.exec(out.slice(scan));
+    if (!m) break;
+    const dot = scan + m.index;
+    let recvAt = receiverStartAtDot(out, dot);
+    if (recvAt < 0) {
+      let q = dot - 1;
+      while (q >= 0 && /\s/.test(out[q])) q--;
+      if (q >= 0 && (out[q] === '"' || out[q] === "'" || out[q] === '`')) {
+        const quote = out[q];
+        let k = q - 1;
+        while (k >= 0 && out[k] !== quote) { if (out[k] === '\\') k--; k--; }
+        recvAt = k < 0 ? -1 : k;
+      }
+    }
+    if (recvAt < 0) { scan = dot + 1; continue; }
+    const recv = out.slice(recvAt, dot).trim();
+    let i = out.indexOf('/', dot);
+    if (i < 0) break;
+    let pat = '';
+    let j = i + 1;
+    while (j < out.length) {
+      if (out[j] === '\\') { pat += out[j] + out[j + 1]; j += 2; continue; }
+      if (out[j] === '/') break;
+      pat += out[j];
+      j++;
+    }
+    if (j >= out.length) break;
+    let flags = '';
+    let k = j + 1;
+    while (k < out.length && /[a-z]/.test(out[k])) { flags += out[k]; k++; }
+    let e = k;
+    while (e < out.length && /\s/.test(out[e])) e++;
+    if (out[e] !== ',') { scan = dot + 1; continue; }
+    // The replacement runs to the close paren that matches `.replace(`'s own -
+    // it is the LAST argument, so a balanced scan from the comma is enough.
+    const open = out.indexOf('(', dot);
+    let depth = 0;
+    let close = -1;
+    let q2 = '';
+    for (let t = open; t < out.length; t++) {
+      const c = out[t];
+      if (q2) { if (c === '\\') t++; else if (c === q2) q2 = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { q2 = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { close = t; break; } }
+    }
+    if (close < 0) break;
+    const repl = out.slice(e + 1, close).trim();
+    const spelled = spell(recv, pat, repl, flags.includes('g'));
+    if (spelled === null) { scan = close + 1; continue; }
+    out = out.slice(0, recvAt) + spelled + out.slice(close + 1);
+    scan = recvAt;
+  }
+  return out;
+}
+
+/**
+ * `Object.assign(a, b)` - the two-argument map copy. No native target has it:
+ * the caller spells the merge its kit owns (the arguments ride through
+ * verbatim, and each target's own object-literal pass spells the `{ ... }`
+ * arguments around it).
+ */
+export function rewriteObjectAssign(code: string, spell: (a: string, b: string) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 64; guard++) {
+    const m = /\bObject\s*\.\s*assign\s*\(/.exec(out.slice(scan));
+    if (!m) break;
+    const open = scan + m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    let q = '';
+    for (let k = open; k < out.length; k++) {
+      const c = out[k];
+      if (q) { if (c === '\\') k++; else if (c === q) q = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { close = k; break; } }
+    }
+    if (close < 0) break;
+    const inner = out.slice(open + 1, close);
+    // One top-level comma splits the two arguments (a nested call keeps its
+    // commas inside its own parens).
+    let d2 = 0;
+    let q2 = '';
+    let comma = -1;
+    for (let k = 0; k < inner.length; k++) {
+      const c = inner[k];
+      if (q2) { if (c === '\\') k++; else if (c === q2) q2 = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { q2 = c; continue; }
+      if (c === '(' || c === '[' || c === '{') d2++;
+      else if (c === ')' || c === ']' || c === '}') d2--;
+      else if (c === ',' && d2 === 0) { comma = k; break; }
+    }
+    if (comma < 0) { scan = close + 1; continue; }
+    const a = inner.slice(0, comma).trim();
+    const rest = inner.slice(comma + 1).trim();
+    // JS Object.assign merges MANY sources; fold the rest recursively.
+    const more = /^Object\s*\.\s*assign\s*\(/.test(rest);
+    const spelled = more ? null : spell(a, rest);
+    if (spelled === null) { scan = close + 1; continue; }
+    out = out.slice(0, scan + m.index) + spelled + out.slice(close + 1);
+    scan = 0;
+  }
+  return out;
+}
+
+/**
+ * `[...new Set(xs)]` - the JS dedupe idiom. The `new` trips every target's
+ * refusal before anything else runs, so the whole shape is rewritten FIRST,
+ * wherever it appears: the caller spells the deduped list its kit owns (the
+ * argument rides through verbatim).
+ */
+export function rewriteSetDedupe(code: string, spell: (list: string) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 64; guard++) {
+    const m = /\.\.\.\s*new\s+Set\s*\(/.exec(out.slice(scan));
+    if (!m) break;
+    const open = scan + m.index + m[0].length - 1;
+    let depth = 0;
+    let close = -1;
+    for (let k = open; k < out.length; k++) {
+      if (out[k] === '(') depth++;
+      else if (out[k] === ')') { depth--; if (depth === 0) { close = k; break; } }
+    }
+    if (close < 0) break;
+    const list = out.slice(open + 1, close).trim();
+    const spelled = spell(list);
+    if (spelled === null) { scan = close + 1; continue; }
+    // The spread's `[` ... the Set's `)` ... and the spread's own `]` are all
+    // consumed: leaving the `]` behind would ride into the next expression.
+    let start = scan + m.index;
+    while (start > 0 && out[start] !== '[') start--;
+    let end = close + 1;
+    if (out[end] === ']') end++;
+    out = out.slice(0, start) + spelled + out.slice(end);
+    scan = start;
+  }
+  return out;
+}
+
+/**
+ * `key in map` - the JS membership test over a map/object. Every target reads
+ * it differently (Java `containsKey`, C# `ContainsKey`, Swift `keys.contains`,
+ * Kotlin `containsKey`, Dart `containsKey`) and the raw `in` reaches every
+ * file as garbage. Only a string-literal key is rewritten - the common shape -
+ * and the caller spells the test it owns.
+ */
+export function rewriteInCheck(code: string, spell: (key: string, obj: string) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 128; guard++) {
+    const m = /(['"])([^'"\\\n]+)\1\s+in\s+/.exec(out.slice(scan));
+    if (!m) break;
+    const key = m[2];
+    const objStart = scan + m.index + m[0].length;
+    // The receiver is a map-ish expression: a callified read, a chain or a local.
+    const rm = /^[A-Za-z_$][\w$.]*(?:\([^()]*\))?/.exec(out.slice(objStart));
+    if (!rm) { scan = objStart; continue; }
+    const obj = rm[0];
+    const spelled = spell(key, obj);
+    if (spelled === null) { scan = objStart + obj.length; continue; }
+    out = out.slice(0, scan + m.index) + spelled + out.slice(objStart + obj.length);
+    scan = 0;
+  }
+  return out;
+}
+
+export function rewriteCollectionChain(code: string, spell: (method: string, recv: string, args: string[]) => string | null): string {
+  const NAMES = ['join', 'split', 'indexOf', 'every', 'startsWith', 'endsWith', 'toUpperCase', 'toLowerCase', 'map', 'filter', 'reduce'];
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === '"' || ch === "'" || ch === '`') { const end = skipStr(code, i); out += code.slice(i, end); i = end; continue; }
+    const name = ch === '.' ? NAMES.find((m) => code.startsWith(`.${m}(`, i)) : undefined;
+    // Skip if already translated by the dialect (RoseTheme.join(...) has .join( in it)
+    if (name && out.endsWith('RoseTheme')) { out += ch; i++; continue; }
+    if (name) {
+      const open = i + name.length + 1;
+      let close = matchParen(code, open);
+      // An arrow's param parens double as the call's first paren:
+      // `xs.map((r) => r.id)` closes after `r` for a depth scan, but the CALL
+      // ends at the `)` before the chain continues. While the args so far carry
+      // no `=>` and the text resumes with one, extend to the next depth-0 `)`.
+      for (let guard = 0; guard < 8; guard++) {
+        if (/=>/.test(code.slice(open + 1, close)) || !/^\s*=>/.test(code.slice(close + 1))) break;
+        const next = (() => {
+          let d = 0;
+          for (let k = close + 1; k < code.length; k++) {
+            if (code[k] === '(') d++;
+            else if (code[k] === ')') { d--; if (d === 0) return k; }
+          }
+          return -1;
+        })();
+        if (next < 0) break;
+        close = next;
+      }
+      // The receiver is spelled in OUT (the text emitted so far), and it is a
+      // whole chain: `RoseTheme.filterList(app.v("items"), x -> ...)` - the old
+      // walk stopped at the chain's first dot and handed the CLASS NAME to the
+      // spell (`RoseTheme.join(RoseTheme, ...)`).
+      const recvStart = close < 0 ? -1 : receiverStartAtDot(code, i);
+      if (close >= 0 && recvStart >= 0) {
+        // The receiver comes from OUT (the text emitted so far): a chained
+        // call (map -> reduce) has its inner link ALREADY converted in out,
+        // while code still carries the raw JS - the reduce spell would
+        // otherwise re-emit the unconverted arrows and trip the refusal.
+        // The receiver comes from OUT (the text emitted so far): a chained
+        // call (map -> reduce) has its inner link ALREADY converted in out,
+        // while code still carries the raw JS - the reduce spell would
+        // otherwise re-emit the unconverted arrows and trip the refusal.
+        const recvStartOut = out.length - (i - recvStart);
+        const recv = out.slice(recvStartOut);
+        const args = splitTopLevel(code.slice(open + 1, close));
+        const spelled = spell(name, recv, args);
+        if (spelled !== null) {
+          out = out.slice(0, recvStartOut) + spelled;
+          // Keep code and out in sync: the NEXT call in the chain (reduce)
+          // walks code for its receiver, which must read the CONVERTED text.
+          code = code.slice(0, recvStart) + spelled + code.slice(close + 1);
+          i = recvStart + spelled.length;
+          continue;
+        }
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+/**
+ * `const name = (params) => body` inside a handler body: a LOCAL lambda. The
+ * declaration and the call sites spell differently per target - python and
+ * swift keep the call sites (`f(x)` works on a lambda/closure), java and C#
+ * need them rewritten (`f.apply(x)` / `f.Invoke(x)`). `spell` receives the
+ * declaration pieces and the CALL SITES as balanced spans, keyed by the call
+ * offset in the ORIGINAL text, so a target that rewrites calls can find them
+ * after the declaration splice shifted everything.
+ */
+export function rewriteLocalArrow(
+  code: string,
+  spell: (name: string, params: string[], body: string, callSites: Array<{ start: number; text: string }>) => string | [string, string] | null,
+): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 32; guard++) {
+    const m = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(/.exec(out.slice(scan));
+    if (!m) break;
+    const declStart = scan + m.index;
+    const open = declStart + m[0].length - 1;
+    // The params parens: balanced from `open`.
+    let depth = 0;
+    let paramsClose = -1;
+    for (let k = open; k < out.length; k++) {
+      if (out[k] === '(') depth++;
+      else if (out[k] === ')') { depth--; if (depth === 0) { paramsClose = k; break; } }
+    }
+    if (paramsClose < 0) break;
+    // The `=>` must follow (this is an arrow, not a parenthesized expression).
+    let at = paramsClose + 1;
+    while (at < out.length && /\s/.test(out[at])) at++;
+    if (out.slice(at, at + 2) !== '=>') { scan = paramsClose + 1; continue; }
+    const arrowAt = at;
+    // The declaration ends at the statement's `;` (balanced, strings aware).
+    // The slice is bounded at that `;` BEFORE matchArrow runs - matchArrow
+    // would otherwise read past it and swallow the statements that follow.
+    let end = arrowAt + 2;
+    let d2 = 0;
+    let q2 = '';
+    while (end < out.length) {
+      const c = out[end];
+      if (q2) { if (c === '\\') end++; else if (c === q2) q2 = ''; }
+      else if (c === '"' || c === "'" || c === '`') q2 = c;
+      else if (c === '(' || c === '[' || c === '{') d2++;
+      else if (c === ')' || c === ']' || c === '}') { if (d2 === 0) break; d2--; }
+      else if (c === ';' && d2 === 0) break;
+      end++;
+    }
+    if (out[end] === ';') end++;
+    // The body slice stops before the statement `;` the splice consumed.
+    const bodyBound = out[end - 1] === ';' ? end - 1 : end;
+    const arrow = matchArrow(out.slice(open, bodyBound));
+    if (!arrow || arrow.params.length === 0) { scan = paramsClose + 1; continue; }
+    // The call sites: every `name(` inside the SAME handler body, outside the
+    // declaration span. The caller (which knows the body extent) hands them in
+    // through a second pass - here they are collected and spelled by `spell`
+    // via the `callSites` argument (start offsets in the ORIGINAL text).
+    // The call sites are rewritten by the target that needs it (java .apply,
+    // C# Invoke) via a follow-up pass on the spelled text; python and swift
+    // call the lambda variable unchanged.
+    const params = arrow.params;
+    const bodyText = arrow.body.trim();
+    const spelled = spell(m[1], params, bodyText, []);
+    if (spelled === null) { scan = end; continue; }
+    const [text, safe] = Array.isArray(spelled) ? spelled : [spelled, m[1]];
+    out = out.slice(0, declStart) + text + out.slice(end);
+    // A target that renamed the arrow (a reserved word) renames its call
+    // sites too - bare calls only, member reads keep their own name.
+    if (safe !== m[1]) out = out.replace(new RegExp(`(?<![\\w$.])${m[1]}\\s*\\(`, 'g'), `${safe}(`);
+    scan = 0;
+  }
+  return out;
+}
+
+/**
+ * The arrow's parameter list and body, target-ready: a reserved-word param
+ * gains a `_` suffix (its body reads follow), and a parameter read that is an
+ * operand of unambiguous arithmetic or a comparison is wrapped (an Object
+ * parameter cannot take `*` directly). `+` stays bare - String concat
+ * compiles, numeric `+` would need real type inference; upgrade when a page
+ * trips it.
+ */
+export function spellArrowParams(params: string[], body: string, reserved: RegExp, wrap: (p: string) => string, wrapStr?: (p: string) => string): { names: string[]; body: string } {
+  const names = params.map((p) => (reserved.test(p) ? `${p}_` : p));
+  let b = body;
+  params.forEach((p, i) => { if (names[i] !== p) b = b.replace(new RegExp(`(?<![\\w$.])${p}\\b`, 'g'), names[i]); });
+  // A `+` whose other side is a literal settles the ambiguity: a string
+  // literal makes the chain concat (the parameter wraps in the target's
+  // string coercion - `Any? + String` does not compile on the typed kits),
+  // a number literal makes it arithmetic (the numeric wrap). A mixed chain
+  // (`n * 2 + 'x'`) still has no answer without real type inference.
+  if (wrapStr) {
+    for (const n of names) {
+      b = b.replace(new RegExp(`(?<![\\w$.])${n}\\b(?=\\s*\\+\\s*['"])`, 'g'), wrapStr(n))
+        .replace(new RegExp(`(['"])\\s*\\+\\s*(?<![\\w$.])${n}\\b`, 'g'), `$1 + ${wrapStr(n)}`)
+        .replace(new RegExp(`(?<![\\w$.])${n}\\b(?=\\s*\\+\\s*-?\\d)`, 'g'), wrap(n))
+        .replace(new RegExp(`((?<![\\w.])-?\\d+)\\s*\\+\\s*(?<![\\w$.])${n}\\b`, 'g'), `$1 + ${wrap(n)}`);
+    }
+  }
+  if (/[*%<>\/-]/.test(b)) {
+    for (const n of names) {
+      b = b.replace(new RegExp(`(?<![\\w$.])${n}\\b(?=\\s*[*%<>\\/-])`, 'g'), wrap(n))
+        .replace(new RegExp(`(?<=[*%<>\\/-]\\s*)(?<![\\w$.])${n}\\b`, 'g'), wrap(n));
+    }
+  }
+  return { names, body: b };
+}
+
+/**
+ * esbuild (target es2020) lowers `x ||= y` to `x || (x = y)` before any
+ * emitter pass runs. The shape is JS-correct and no target accepts it: the
+ * left is a state READ, and `(x = y)` assigns to it. The caller spells the
+ * whole statement from its parts - the read (identical on both sides), the
+ * operator, and the right-hand side - or returns null to leave this one as-is.
+ * The scan is statement-shaped: the operand starts after the nearest `;`, `{`,
+ * `}` or newline, and the parenthesized assignment must re-state that operand.
+ */
+export function rewriteLoweredLogicalAssign(code: string, spell: (read: string, op: '||' | '&&' | '??', rhs: string, indent: string) => string | null): string {
+  let out = code;
+  let scan = 0;
+  for (let guard = 0; guard < 256; guard++) {
+    const m = /\s*(\|\||&&|\?\?)\s*\(/.exec(out.slice(scan));
+    if (!m) break;
+    const op = m[1] as '||' | '&&' | '??';
+    const opAt = scan + m.index + m[0].indexOf(op);
+    let s = opAt - 1;
+    while (s >= 0 && !';{}'.includes(out[s]) && out[s] !== '\n') s--;
+    s++;
+    const read = out.slice(s, opAt).trim();
+    const open = out.indexOf('(', opAt);
+    let depth = 0;
+    let close = -1;
+    for (let k = open; k < out.length; k++) {
+      const c = out[k];
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { close = k; break; } }
+    }
+    if (close < 0) break;
+    const inner = out.slice(open + 1, close);
+    const eq = inner.indexOf('=');
+    const ok = read && !/[+\-*/%,&|?:;]/.test(read) && eq > 0
+      && inner.slice(0, eq).replace(/\s+/g, '') === read.replace(/\s+/g, '');
+    if (!ok) { scan = open + 1; continue; }
+    const rhs = inner.slice(eq + 1).trim();
+    const indent = out.slice(s, opAt).match(/^\s*/)![0];
+    const spelled = spell(read, op, rhs, indent);
+    if (spelled === null) { scan = close + 1; continue; }
+    let end = close + 1;
+    if (out[end] === ';') end++;
+    // A statement without `;` (Python) keeps its newline: skipping it would
+    // glue the replacement to the next statement.
+    while (end < out.length && (out[end] === ' ' || out[end] === '\t')) end++;
+    out = out.slice(0, s) + indent + spelled + out.slice(end);
+    scan = s;
+  }
+  return out;
+}
+
+/**
  * JS `+` concatenates the moment one operand is a string, coercing the rest;
  * several target languages raise on `"a" + 1` (Python, Dart, Swift, C++). Walk
  * every top-level `+` chain (a chain ends at a comma or a bracket) and, when a
@@ -608,11 +1138,29 @@ function coerceTernaryChain(src: string, wrap: (expr: string) => string): string
  * alone so `{ 'k': "x" + n }` still reads as a dict/map entry.
  */
 export function coerceStringConcat(src: string, wrap: (expr: string) => string): string {
-  // R256: a top-level ternary makes the whole expression one chain. The split
+  // A top-level ternary makes the whole expression one chain. The split
   // below is blind to `?`/`:` - it wrapped the then-branch per operand and
   // left the else-branch dangling (a SyntaxError in ArkTS/Swift/Android), so
   // the ternary is coerced in one piece and its brackets/colons stay paired.
   // Comprehensions are decided by the clause cut further down, not here.
+  // A lambda's `=>` ends the parameter list: the concatenation chain lives in
+  // the BODY. Without this the arrow itself was read as the left operand and
+  // `.map((x) => x + "!")` came out as `.map(((x) => x).toString() + "!")` -
+  // valid syntax, wrong program.
+  const arrowAt = (() => {
+    let depth = 0;
+    let quote = '';
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') depth--;
+      else if (c === '=' && src[i + 1] === '>' && depth === 0) return i;
+    }
+    return -1;
+  })();
+  if (arrowAt >= 0) return src.slice(0, arrowAt + 2) + coerceStringConcat(src.slice(arrowAt + 2), wrap);
   if (hasTopLevelTernary(src)) return coerceTernaryChain(src, wrap);
   const parts: Array<{ operand: string; gap: string; kind: '+' | ',' | 'end' }> = [];
   let depth = 0;
@@ -623,11 +1171,11 @@ export function coerceStringConcat(src: string, wrap: (expr: string) => string):
     if (ch === "'" || ch === '"' || ch === '`') { i = skipStr(src, i); continue; }
     if (ch === '(' || ch === '[' || ch === '{') { depth++; i++; continue; }
     if (ch === ')' || ch === ']' || ch === '}') { depth--; i++; continue; }
-    // R285: a comprehension clause (`for x in y` / `if p`) inside a bracket is
+    // A comprehension clause (`for x in y` / `if p`) inside a bracket is
     // not part of the concatenation chain - without this the clause was
     // swallowed into the operand and wrapped: `[t + "!" for t in xs]` came out
     // as `[str(t) + str("!" for t in xs)]`, a generator instead of a list.
-    // R256: the cut leaves the comprehension's own `[` unclosed inside the
+    // The cut leaves the comprehension's own `[` unclosed inside the
     // body operand, so the body is coerced HERE as its own expression (a whole
     // body, brackets balanced within it) instead of falling through to the
     // chain walk, whose hasTopLevel saw only in-bracket quotes and skipped it:
@@ -663,7 +1211,7 @@ export function coerceStringConcat(src: string, wrap: (expr: string) => string):
     let end = k;
     while (end < parts.length - 1 && parts[end].kind === '+') end++;
     const chain = parts.slice(k, end + 1).map((p) => p.operand);
-    // R256: a comprehension body operand carries an unclosed `[` - its quotes
+    // A comprehension body operand carries an unclosed `[` - its quotes
     // are "inside a bracket" to hasTopLevel, so the wrap test must look into
     // the open group too (hasTopLevelOpen), or the body never coerces.
     if (chain.length > 1 && chain.some((t) => hasTopLevelOpen(t, '\'"`'))) {
@@ -688,8 +1236,8 @@ export function rewriteSpreadWrites(
   autoSetter?: (setterName: string) => string | null,
 ): string {
   for (;;) {
-    // R286: the AUTO-SETTER form - `setItems([...items(), 'new'])` - is what
-    // real handlers write, exactly like R285's `.map()` gap. Recognized when
+    // The AUTO-SETTER form - `setItems([...items(), 'new'])` - is what
+    // real handlers write, exactly like 's `.map()` gap. Recognized when
     // the caller supplies the setter-to-key mapping.
     let at = -1;
     let open = -1;
@@ -746,7 +1294,7 @@ function spreadReplacement(value: string, key: string, spell: SpreadSpell): stri
   if (parts[1].startsWith('...') && !parts[0].startsWith('...')) {
     return spell('prepend', key, parts[1].slice(3).trim(), parts[0]);
   }
-  // R288: `[...a, ...b]` - two spreads joined (a splice-by-range lowering, and
+  // `[...a, ...b]` - two spreads joined (a splice-by-range lowering, and
   // the ordinary "concat two lists"). `append` takes one item, so the second
   // spread is appended as a single element and then flattened is NOT possible
   // with the spread vocabulary alone - the pair is left to the expression IR,
@@ -812,7 +1360,7 @@ export function rewriteOrFallback(body: string, empty: (expr: string) => string,
   // Match `<operand> || <literal>`, where the operand is an identifier, a member
   // read, a call, or any chain mixing them (`RoseTheme.text(x)`). Calls are
   // matched with a depth-aware scan so a nested call is not cut short.
-  // R256: the operand regex walks back only to the LAST `.name` link before the
+  // The operand regex walks back only to the LAST `.name` link before the
   // `||`, so a receiver the earlier passes already chained -
   // `app.v("colors").join(", ")` - matched as `join(", ")` ALONE. The rewrite
   // then left the receiver as raw text in front of it:
@@ -857,7 +1405,7 @@ export function rewriteOrFallback(body: string, empty: (expr: string) => string,
 }
 
 /**
- * R256: grow a matched `||` operand to its real extent. The regex's operand
+ * Grow a matched `||` operand to its real extent. The regex's operand
  * chain cannot span two calls, so `app.v("colors").join(", ")` matches as
  * either `app.v("colors")` (a `.join` link after it) or `join(", ")` alone
  * (the receiver to its left is missed) - both leave raw text inside the
@@ -991,7 +1539,100 @@ export function rewriteInitializer(
  * allowed before the excluded character, because `map {` is the idiomatic form.
  */
 export function rewriteMemberReads(code: string, spell: (obj: string, key: string) => string): string {
-  return code.replace(/\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)(?!\s*[\w({])/g, (_whole, obj: string, key: string) => spell(obj, key));
+  let out = '';
+  let i = 0;
+  const re = /\b([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)(?!\s*[\w({])/g;
+  while (i < code.length) {
+    const q = code[i];
+    if (q === '"' || q === "'" || q === '`') {
+      let j = i + 1;
+      while (j < code.length && code[j] !== q) { if (code[j] === '\\') j++; j++; }
+      out += code.slice(i, Math.min(j + 1, code.length));
+      i = j + 1;
+      continue;
+    }
+    re.lastIndex = i;
+    const m = re.exec(code);
+    if (!m) { out += code.slice(i); break; }
+    out += code.slice(i, m.index) + spell(m[1], m[2]);
+    i = m.index + m[0].length;
+  }
+  return out;
+}
+
+/** `for (const x of list)` is a loop every target spells differently: Kotlin's
+ *  `in`, Python's `in ...:`, C#'s `foreach`, Java/C++'s `:`, Swift's `in`,
+ *  Dart's `(final x in ...)`. The JS text itself compiles nowhere, and the
+ *  statement is common enough that leaving it to each emitter's refusal list
+ *  stubbed whole handlers. */
+/** `Object.keys(x)` / `Object.values(x)` / `Object.entries(x)` have no direct
+ *  spelling on any native target: each kit answers them through its own map
+ *  helpers, so a page's "list the config keys" handler compiles everywhere. */
+export function rewriteObjectBuiltins(code: string, keys: (x: string) => string, values: (x: string) => string, entries: (x: string) => string): string {
+  return code
+    .replace(/\bObject\s*\.\s*entries\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_m, x: string) => entries(x.trim()))
+    .replace(/\bObject\s*\.\s*values\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_m, x: string) => values(x.trim()))
+    .replace(/\bObject\s*\.\s*keys\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g, (_m, x: string) => keys(x.trim()));
+}
+
+/** The expression a `.method(` sits on, scanned on the SOURCE from its dot: a
+ * name, a call, a subscript or a brace group - balanced, so
+ * `a().b(x -> ...)`.method(` and `xs.sortedWith { ... }.join(` keep their whole
+ * receiver. Returns the start of that scanned run, or -1 when nothing was
+ * consumed (a literal receiver, a stray operator) and the caller leaves the
+ * call to a later pass. */
+export function receiverStartAtDot(src: string, dot: number): number {
+  let i = dot - 1;
+  while (i >= 0 && /\s/.test(src[i])) i--;
+  let consumed = false;
+  while (i >= 0) {
+    const ch = src[i];
+    if (ch === ')' || ch === ']' || ch === '}') {
+      const open = ch === ')' ? '(' : ch === ']' ? '[' : '{';
+      let depth = 0;
+      for (; i >= 0; i--) {
+        if (src[i] === ch) depth++;
+        else if (src[i] === open) { depth--; if (!depth) { i--; consumed = true; break; } }
+      }
+      if (!consumed) return -1;
+      continue;
+    }
+    if (/[A-Za-z0-9_$.]/.test(ch)) { i--; consumed = true; continue; }
+    break;
+  }
+  return consumed ? i + 1 : -1;
+}
+
+export function rewriteForOf(code: string, spell: (name: string, list: string) => string): string {
+  let out = code;
+  for (let guard = 0; guard < 64; guard++) {
+    const at = /\bfor\s*\(/.exec(out);
+    if (!at) break;
+    const open = at.index + at[0].length - 1;
+    // The list expression ends at the BALANCED close: `for (const x of a())`
+    // would otherwise stop at the call's own `)`.
+    let depth = 0;
+    let close = -1;
+    let quote = '';
+    for (let i = open; i < out.length; i++) {
+      const ch = out[i];
+      if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = ''; continue; }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+      if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) { close = i; break; }
+    }
+    if (close < 0) break;
+    const inner = out.slice(open + 1, close);
+    const m = /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([\s\S]+)$/.exec(inner);
+    if (!m) {
+      // Not a for-of: skip this `for` and keep scanning after it.
+      const skip = out.slice(0, close + 1);
+      const rest = rewriteForOf(out.slice(close + 1), spell);
+      return skip + rest;
+    }
+    out = out.slice(0, at.index) + spell(m[1], m[2].trim()) + out.slice(close + 1);
+  }
+  return out;
 }
 
 /**
@@ -1022,6 +1663,11 @@ export function callifyBareReads(
   member?: (base: string, key: string) => string,
 ): string {
   const DECL = /(?:^|[^\w$])(?:let|const|var|function|class|new|case|import|export|interface|type)\s+$/;
+  // A switch label is a statement start too: `case 0: s = 'zero'` - the `:` in
+  // front of it is punctuation, not an object-literal key.
+  // The accumulator strips spaces, so `case 0:` reaches here as `case0:` -
+  // the boundary after `case` cannot be relied on.
+  const LABEL = /(?:^|[^\w$])case[^:;{}]*:\s*$|(?:^|[^\w$])default\s*:\s*$/;
   let out = '';
   let i = 0;
   while (i < code.length) {
@@ -1039,9 +1685,11 @@ export function callifyBareReads(
     while (k < code.length && /\s/.test(code[k] as string)) k++;
     const next = code[k] ?? '';
     // A call is the callified spelling (`items()`), a leading `.` means this is
-    // a member read rather than a binding, and `key:` at the head of an object
-    // literal is punctuation - all three stay exactly as the source wrote them.
-    if (before.endsWith('.') || DECL.test(before) || next === '(' || (next === ':' && (/[{,]$/.test(before) || before === '' || /[=&|!<>+\-*/?:]$/.test(before)))) {
+    // a member read rather than a binding, `key:` at the head of an object
+    // literal is punctuation, and `key?:` is a TYPE annotation's optional
+    // property (no expression read is followed by a glued `?:` - `?.` and `??`
+    // fall through) - all four stay exactly as the source wrote them.
+    if (before.endsWith('.') || DECL.test(before) || LABEL.test(before) || next === '(' || (next === ':' && (/[{,]$/.test(before) || before === '' || /[=&|!<>+\-*/?:]$/.test(before))) || (next === '?' && code[k + 1] === ':')) {
       out += name;
       i = end;
       continue;
@@ -1058,7 +1706,12 @@ export function callifyBareReads(
       while (r < code.length && /\s/.test(code[r] as string)) r++;
       const afterKey = code[r] ?? '';
       if (q > p && afterKey !== '(' && afterKey !== '.') {
-        out += `${member(spell(name), code.slice(p, q))}${code.slice(end, p)}`;
+        // The member spelling has consumed the dot: appending
+        // `code.slice(end, p)` here re-emitted the `.` after the spelled
+        // Get(...) call, and the generated file did not compile
+        // (`RoseTheme.Get(app.V("form"), "name").)`. The key's own span is
+        // consumed too - the scan resumes after it.
+        out += `${member(spell(name), code.slice(p, q))}`;
         i = q;
         continue;
       }
@@ -1238,7 +1891,7 @@ export function rewriteMapperSets(body: string, spell: (key: string, param: stri
 }
 
 /**
- * R285: replace outside string literals and comments only.
+ * Replace outside string literals and comments only.
  *
  * Python's `!x` -> `not x` rewrite is a bare regex, and a handler that
  * appends a bang to a string (`t + '!'`) had its LITERAL turned into
@@ -1307,14 +1960,14 @@ export function replaceOutsideStrings(src: string, re: RegExp, fn: (m: RegExpExe
 }
 
 /**
- * R288: `xs.push(item)` / `xs.unshift(item)` / `xs.splice(at, n)` - a direct
+ * `xs.push(item)` / `xs.unshift(item)` / `xs.splice(at, n)` - a direct
  * array MUTATION. JS mutates in place and the setter re-publishes; a compiled
  * target has mutable lists too, but its state write goes through a setter, so
  * the mutation has to become a WRITE the target can spell. Lowered to the
  * already-translatable forms on the same state field:
  * `items().push(x); setItems(items())` -> `setItems([...items(), x])`,
  * `items().splice(i, n); setItems(items())` -> `setItems(items().filter((__e, __j) => __j < i || __j >= i + n))`.
- * The spread and filter spellings are the target's own (R286 / R275), so every
+ * The spread and filter spellings are the target's own , so every
  * compiled target gains the two most-written list mutations for free.
  *
  * Only a mutation over a known state getter whose setter is called in the SAME
@@ -1366,7 +2019,7 @@ export function rewriteArrayMutations(
   return out;
 }
 /**
- * R285: `setList(list().map((x) => ...))` - the AUTO-SETTER form of the same
+ * `setList(list().map((x) => ...))` - the AUTO-SETTER form of the same
  * write `rewriteDirectSetValue` covers for `$setState`. The compiler mints
  * `setTodos` for every `let todos = $state(...)`, so this is the shape real
  * handlers actually write - and it had no path at all: the raw JS arrow and
@@ -1718,7 +2371,7 @@ export function rewriteContentReads(code: string, list: string, get: string, emp
  *
  * `user ? a : b` is a boolean in JS for any operand. In Kotlin, ArkTS, Swift,
  * Java and C# the condition must *be* a boolean, so an `Any?` / `Object` /
- * optional operand is a compile error - the same class of bug as `||` (R161),
+ * optional operand is a compile error - the same class of bug as `||` ,
  * in the construct that appears far more often. `test` is supplied by the
  * caller: each target spells "not null" its own way.
  *
