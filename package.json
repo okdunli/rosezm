@@ -3,6 +3,7 @@
   "version": "0.2.1",
   "description": "Modular extensible full-stack framework for web and embedded applications, crafted with extreme romance and polished developer experience.",
   "type": "module",
+  "types": "src/types/rosezm.d.ts",
   "scripts": {
     "dev": "tsx src/cli/index.ts dev example",
     "build": "tsx src/cli/index.ts build example",
@@ -76,7 +77,8 @@
     "deploy/native",
     "deploy/server.cjs",
     "deploy/vercel.json",
-    "LICENSE"
+    "LICENSE",
+    "native/darwin"
   ],
   "license": "MIT",
   "author": {
@@ -110,7 +112,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -124,8 +126,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "allowScripts": {
-    "esbuild@0.24.2": true,
-    "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "esbuild": true
   }
 }
