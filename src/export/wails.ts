@@ -31,7 +31,8 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
-import { appIdentity, type AppIdentity } from './app-identity.js';
+import { keepOnlyExcept } from './fs-util.js';
+import { appBuildNumber, appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon, icoFromPng, icnsFromPng } from './app-icon.js';
 import { nativeUsage, type NativeCapability } from './native-api.js';
 import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
@@ -55,7 +56,9 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   const out = path.join(opts.outDir, LABEL);
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
   const app = appIdentity(opts.projectRoot);
-  await fs.promises.rm(out, { recursive: true, force: true });
+  // build/ is what a Wails user brands (icons, platform manifests) and
+  // frontend/node_modules survives a reinstall: neither is ours to delete.
+  await keepOnlyExcept(out, ['build', 'frontend/node_modules']);
   await fs.promises.mkdir(out, { recursive: true });
 
   const pageFiles = await scanRoseFiles(opts.projectRoot);
@@ -80,7 +83,7 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   // answers exactly those on the WebView's own APIs, so the scan has to run
   // before it is written.
   const native: NativeCapability[] = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
-  await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  await writeShellBridge(frontend, opts.apiBase ?? '', native, { id: app.id, name: app.name, version: app.version, build: appBuildNumber(app.version) });
   for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`${LABEL}: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   await fs.promises.writeFile(path.join(out, 'wails.json'), JSON.stringify(wailsJson(app), null, 2) + '\n', 'utf8');
@@ -88,13 +91,13 @@ export async function emitWails(opts: EmitWailsOptions): Promise<{ pages: string
   await fs.promises.writeFile(path.join(out, 'main.go'), mainGo(app), 'utf8');
   await fs.promises.writeFile(path.join(out, 'app.go'), appGo(), 'utf8');
   await fs.promises.mkdir(path.join(out, 'build'), { recursive: true });
-  // R456: `wails build` wants a Windows exe icon at build/windows/icon.ico; the
+  // `wails build` wants a Windows exe icon at build/windows/icon.ico; the
   // PNG alone left the binary with the default one.
   const icon = appIcon(opts.projectRoot, LABEL, opts.warnings);
   await fs.promises.writeFile(path.join(out, 'build', 'appicon.png'), icon);
   await fs.promises.mkdir(path.join(out, 'build', 'windows'), { recursive: true });
   await fs.promises.writeFile(path.join(out, 'build', 'windows', 'icon.ico'), icoFromPng(icon));
-  // R460: `wails build` on macOS reads build/darwin/icon.icns. A square
+  // `wails build` on macOS reads build/darwin/icon.icns. A square
   // 32..1024 picture is wrapped as one entry; anything else keeps the default
   // and the warning says why (a wrong .icns is worse than none).
   const icns = icnsFromPng(icon);

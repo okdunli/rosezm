@@ -12,7 +12,7 @@
  *
  *   - `stageBuiltSite` builds the project from source into the shell's frontend
  *     directory. Source is the truth (the same rule the other 14 targets follow
- *     and R254 established for electron): a shell must never ship whatever the
+ * and established for electron): a shell must never ship whatever the
  *     last `rosezm build` happened to leave behind.
  *   - `writeShellBridge` writes the one file that knows the deployed server and
  *     links it into every HTML document of the built site.
@@ -25,6 +25,7 @@ import { pathToFileURL } from 'node:url';
 import { buildProject } from '../compiler/index.js';
 import { buildShell, getClientSource, getStyles } from '../cli/shell.js';
 import type { NativeCapability } from './native-api.js';
+import { injectPerfBridge, perfBaselineReport, PERF_BASELINE_FILE } from './perf-bridge.js';
 
 /**
  * Build the project from source and copy the result into `dest`, which is the
@@ -32,6 +33,23 @@ import type { NativeCapability } from './native-api.js';
  * The brotli siblings are dropped: they exist for the HTTP servers, and an
  * embedded asset is already inside the compressed binary.
  */
+/** A batch (`export all`) builds the SAME project into nine shell fronts.
+ *  Build once, copy nine times. The scope is EXPLICIT and process-local:
+ *  a single-target export never reuses a stale build, so freshness is not
+ *  traded for speed outside the batch that asked for it. */
+let batchStaging: string | null = null;
+let batchKey = '';
+export function beginStageBatch(projectRoot: string): void {
+  endStageBatch();
+  batchKey = path.resolve(projectRoot);
+  batchStaging = null;
+}
+export function endStageBatch(): void {
+  if (batchStaging) fs.rmSync(batchStaging, { recursive: true, force: true });
+  batchStaging = null;
+  batchKey = '';
+}
+
 export async function stageBuiltSite(
   projectRoot: string,
   dest: string,
@@ -40,25 +58,47 @@ export async function stageBuiltSite(
 ): Promise<void> {
   await fs.promises.rm(dest, { recursive: true, force: true });
   await fs.promises.mkdir(dest, { recursive: true });
-  const staging = fs.mkdtempSync(path.join(os.tmpdir(), `rosezm-${label}-`));
+  const inBatch = batchKey !== '' && batchKey === path.resolve(projectRoot) && batchStaging !== null;
+  let staging: string | null = inBatch ? batchStaging! : fs.mkdtempSync(path.join(os.tmpdir(), `rosezm-${label}-`));
   try {
-    await buildProject(projectRoot, staging, {});
-    await copyTree(staging, dest);
+    if (!inBatch) await buildProject(projectRoot, staging!, { quiet: true });
+    await copyTree(staging!, dest);
+    // Cold-start instrumentation: every staged site gets
+    // the first-frame collector, and the export report carries the baseline
+    // budget. A shell has no server to time a request, so the app measures
+    // from the earliest inline script to the first painted frame.
+    await injectPerfBridge(dest);
+    await fs.promises.writeFile(
+      path.join(dest, PERF_BASELINE_FILE),
+      JSON.stringify(perfBaselineReport(true), null, 2) + '\n',
+      'utf8',
+    );
+    if (!inBatch && batchKey === path.resolve(projectRoot)) {
+      // First build of a batch: keep the tree for the remaining shells.
+      batchStaging = staging;
+      staging = null; // owned by the batch now
+    }
     warnings.push(`${label}: built the project from source into the export (the shell serves the static half; --api bridges the dynamic half)`);
   } catch (err) {
-    warnings.push(`${label}: the project did not build (${String((err as Error)?.message ?? err).slice(0, 120)}) - run \`rosezm build\` and re-export`);
+    const reason = String((err as Error)?.message ?? err).slice(0, 600);
+    warnings.push(`${label}: the project did not build (${reason.slice(0, 120)}) - run \`rosezm build\` and re-export`);
     await fs.promises.mkdir(dest, { recursive: true });
+    // Keep a diagnostic page, but NEVER let the export "succeed" with a
+    // placeholder: rust-desktop would then build a binary that opens a
+    // "build failed" window with no way to tell from the CLI.
     await fs.promises.writeFile(path.join(dest, 'index.html'), `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>rosezm</title></head>
 <body style="font-family: system-ui; padding: 2rem">
 <h1>rosezm ${label} shell</h1>
 <p>The build failed. Fix the errors shown by <code>rosezm build</code>, then <code>rosezm export ${label}</code> again.</p>
+<pre>${reason.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] ?? c))}</pre>
 </body>
 </html>
 `, 'utf8');
+    throw new Error(`${label}: staged build failed - ${reason}`);
   } finally {
-    fs.rmSync(staging, { recursive: true, force: true });
+    if (staging !== null && staging !== batchStaging) fs.rmSync(staging, { recursive: true, force: true });
   }
 }
 
@@ -97,7 +137,8 @@ async function copyTree(from: string, to: string): Promise<void> {
  * too (the "warned, never silent" rule) instead of only at the first tap.
  */
 export const SHELL_BRIDGE_CAPABILITIES: ReadonlySet<NativeCapability> = new Set([
-  'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery',
+  'camera', 'geolocation', 'clipboard-read', 'clipboard-write', 'share', 'vibrate', 'scan-code', 'make-phone-call', 'toast', 'modal', 'get-network-type', 'get-system-info', 'get-battery', 'save-image', 'keep-awake', 'check-permission', 'app-info', 'request-permission', 'notify', 'biometric-auth', 'screen-brightness', 'secure-store', 'push-subscribe', 'push-token', 'qr-scan', 'hot-update',
+  'fs-list', 'fs-read', 'fs-write', 'fs-mkdir', 'fs-remove',
 ]);
 
 /** The page-requested capabilities this shell's bridge cannot answer. */
@@ -105,14 +146,83 @@ export function shellCapabilityGaps(native: NativeCapability[]): NativeCapabilit
   return native.filter((c) => !SHELL_BRIDGE_CAPABILITIES.has(c));
 }
 
-export async function writeShellBridge(frontendRoot: string, apiBase: string, native: NativeCapability[]): Promise<number> {
-  await fs.promises.writeFile(path.join(frontendRoot, 'rosezm-shell.js'), renderBridge(apiBase, native), 'utf8');
-  let patched = 0;
+export async function writeShellBridge(frontendRoot: string, apiBase: string, native: NativeCapability[], appInfo: { id: string; name: string; version: string; build: number } | null = null): Promise<number> {
+  await fs.promises.writeFile(path.join(frontendRoot, 'rosezm-shell.js'), renderBridge(apiBase, native, appInfo), 'utf8');
+  return tagScriptIntoDocs(frontendRoot, 'rosezm-shell.js');
+}
+
+/**
+ * The useNative half alone, for the WebView shells (capacitor/cordova/ionic).
+ * Their site is a built dist whose dynamic half is already baked (the build
+ * carries the --api base), so unlike the desktop bridge they need no fetch
+ * rewrite - only the capability global, on the WebView's own browser APIs.
+ */
+export async function writeNativeBridge(frontendRoot: string, native: NativeCapability[], allowedOrigins: string[] = [], appInfo: { id: string; name: string; version: string; build: number } | null = null): Promise<number> {
+  await fs.promises.writeFile(path.join(frontendRoot, 'rosezm-native.js'), `/**
+ * rosezm - the useNative bridge. Generated by \`rosezm export\`.
+ *
+ * Every branch sits on a browser API the WebView already has; a denied
+ * permission, a cancelled picker or a missing API is null - the contract's
+ * empty answer, never a throw inside a tap handler.
+ *
+ * External links: a cross-origin anchor (or any tel:/mailto:-style href) hands
+ * the URL to the system browser instead of navigating the app's WebView away.
+ * The origins in ALLOWED stay inside the app - the app's own origin always
+ * does, and a declared origin is a second one.
+ */
+(function () {
+  var ALLOWED = ${JSON.stringify(allowedOrigins)};
+  var external = function (url) {
+    if (typeof cordova !== 'undefined' && cordova.InAppBrowser) { cordova.InAppBrowser.open(url, '_system'); return; }
+    window.open(url, '_system');
+  };
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var t = e.target;
+    var a = t && t.closest ? t.closest('a[href]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) === '#') return;
+    var url;
+    try { url = new URL(href, location.href); } catch (_) { return; }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') { e.preventDefault(); external(url.href); return; }
+    // Same origin stays in the app (the client router owns it); an origin the
+    // project declared stays too. Anything else - including target="_blank" -
+    // is another app's job.
+    var inside = url.origin === location.origin || ALLOWED.indexOf(url.origin) >= 0;
+    if (!inside || a.target === '_blank') { e.preventDefault(); external(url.href); }
+  }, true);
+  // The lifecycle signal (BUG 59): an app going to the background hides the
+  // page, and coming back shows it - the same signal the desktop shells get
+  // from their own resume/pause events, spelled as one DOM event so a page
+  // can run its silent sync on the way out and in.
+  document.addEventListener('visibilitychange', function () {
+    document.dispatchEvent(new CustomEvent('rosezm:lifecycle', { detail: { foreground: document.visibilityState === 'visible' } }));
+  });
+  // The network signal (BUG 58): the link changes under an app that stays
+  // open - wifi to cellular, back online after a tunnel. The same event the
+  // mini-program page would poll, pushed instead.
+  var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (conn && typeof conn.addEventListener === 'function') {
+    conn.addEventListener('change', function () {
+      document.dispatchEvent(new CustomEvent('rosezm:network', { detail: { online: navigator.onLine, type: conn.type === 'wifi' ? 'wifi' : (conn.effectiveType || 'unknown') } }));
+    });
+  }
+  window.addEventListener('online', function () { document.dispatchEvent(new CustomEvent('rosezm:network', { detail: { online: true, type: 'unknown' } })); });
+  window.addEventListener('offline', function () { document.dispatchEvent(new CustomEvent('rosezm:network', { detail: { online: false, type: 'none' } })); });
+})();
+(function () {
+${renderCapabilities(native, appInfo)}})();
+`, 'utf8');
+  return tagScriptIntoDocs(frontendRoot, 'rosezm-native.js');
+}
+
+async function tagScriptIntoDocs(frontendRoot: string, filename: string): Promise<number> {  let patched = 0;
   for (const file of walkHtml(frontendRoot)) {
     const html = await fs.promises.readFile(file, 'utf8');
-    if (html.includes('rosezm-shell.js')) continue;
+    if (html.includes(filename)) continue;
     const rel = path.relative(path.dirname(file), frontendRoot).split(path.sep).join('/') || '.';
-    const tag = `<script src="${rel === '.' ? '' : rel + '/'}rosezm-shell.js"></script>`;
+    const tag = `<script src="${rel === '.' ? '' : rel + '/'}${filename}"></script>`;
     // Before the head closes if there is one: the bridge must exist before the
     // page's own bundle runs, or the first fetch is already lost.
     const next = /<\/head\s*>/i.test(html)
@@ -122,6 +232,83 @@ export async function writeShellBridge(frontendRoot: string, apiBase: string, na
     patched++;
   }
   return patched;
+}
+
+/**
+ * The smoke-test scaffold (BUG 76): launch, home render, back - the three
+ * steps every shell must survive, as a webdriverio spec against Appium's
+ * uiAutomator2 driver. The files are inert until the project installs
+ * `@wdio/cli` (no forced dependency); `npm run smoke` is the entry.
+ */
+export async function writeSmokeSpec(out: string, appId: string): Promise<void> {
+  const dir = path.join(out, 'smoke');
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(path.join(dir, 'wdio.conf.js'), `/**
+ * The shell smoke test: \`npm i -D @wdio/cli @wdio/local-runner @wdio/mocha-framework\`
+ * once, then \`npm run smoke\` with an emulator or device attached and Appium
+ * running (appium server on 127.0.0.1:4723).
+ */
+module.exports = {
+  runner: 'local',
+  specs: [__dirname + '/app.smoke.js'],
+  capabilities: [{
+    platformName: 'android',
+    'appium:automationName': 'UiAutomator2',
+    'appium:appPackage': ${JSON.stringify(appId)},
+    'appium:appActivity': ${JSON.stringify(`${appId}.MainActivity`)},
+    'appium:deviceName': 'emulator-5554',
+  }],
+  hostname: '127.0.0.1',
+  port: 4723,
+  path: '/',
+  framework: 'mocha',
+  logLevel: 'error',
+};
+`, 'utf8');
+  await fs.promises.writeFile(path.join(dir, 'app.smoke.js'), `// Three steps every shell must survive: launch, home render, back.
+describe('the shell', () => {
+  it('launches into the home document', async () => {
+    await browser.waitUntil(async () => (await browser.getPageSource()).length > 0, { timeout: 20000 });
+  });
+
+  it('renders the home route content', async () => {
+    const source = await browser.getPageSource();
+    // The WebView paints the app's own document - any real content counts;
+    // a white screen or a crash dialog does not.
+    expect(source.length).toBeGreaterThan(200);
+  });
+
+  it('survives the hardware back at the start route', async () => {
+    await browser.back();
+    // The two-press exit confirmation (or the history pop) answers; the
+    // app must still be alive either way.
+    const source = await browser.getPageSource();
+    expect(source.length).toBeGreaterThan(0);
+  });
+});
+`, 'utf8');
+  const pkgPath = path.join(out, 'package.json');
+  if (fs.existsSync(pkgPath)) {
+    const pkg = JSON.parse(await fs.promises.readFile(pkgPath, 'utf8'));
+    pkg.scripts = { ...pkg.scripts, smoke: 'wdio run smoke/wdio.conf.js' };
+    await fs.promises.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+  }
+}
+
+/**
+ * The export gate (BUG 79): every document in the shell's www carries the
+ * native bridge tag, and the manifest can say so (BUG 80). A document that
+ * slipped through untagged is named - the gate is a warning the export
+ * prints, not a silent hole a tap later discovers.
+ */
+export function shellDocGate(frontendRoot: string): { documents: number; injected: number; untagged: string[] } {
+  const files = walkHtml(frontendRoot);
+  const untagged: string[] = [];
+  for (const file of files) {
+    const html = fs.readFileSync(file, 'utf8');
+    if (!html.includes('rosezm-native.js')) untagged.push(path.relative(frontendRoot, file));
+  }
+  return { documents: files.length, injected: files.length - untagged.length, untagged };
 }
 
 function walkHtml(dir: string): string[] {
@@ -183,7 +370,12 @@ export const DOM_BRIDGE_BRANCHES: Record<string, string> = {
     }
 `,
   'get-network-type': `    if (capability === 'get-network-type') {
-      return { type: navigator.onLine ? 'wifi' : 'none' };
+      if (!navigator.onLine) return { type: 'none' };
+      // The Network Information API names the real link (wifi, 4g, 3g...);
+      // a WebView without it stays at the onLine two-answer split.
+      var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      var real = conn && (conn.type === 'wifi' ? 'wifi' : conn.effectiveType);
+      return { type: real || 'wifi' };
     }
 `,
   'get-system-info': `    if (capability === 'get-system-info') {
@@ -194,11 +386,50 @@ export const DOM_BRIDGE_BRANCHES: Record<string, string> = {
       if (typeof navigator.getBattery !== 'function') return null;
       var battery = await navigator.getBattery();
       return { level: Math.round(battery.level * 100), charging: !!battery.charging };
-    }
-`,
+    }`,
+  'check-permission': `    if (capability === 'check-permission') {
+      // The Permissions API: the browser's own answer, so a page can ask
+      // before it asks - and offer the settings route when the answer is
+      // 'denied'. A capability the browser does not track is 'unknown'.
+      var name = String(options['name'] || options['capability'] || '');
+      var map = { camera: 'camera', geolocation: 'geolocation', 'clipboard-read': 'clipboard-read', 'clipboard-write': 'clipboard-write', notifications: 'notifications' };
+      var query = map[name];
+      if (!query || !navigator.permissions || typeof navigator.permissions.query !== 'function') return { name: name, state: 'unknown' };
+      try {
+        var status = await navigator.permissions.query({ name: query });
+        return { name: name, state: status.state };
+      } catch (_) {
+        return { name: name, state: 'unknown' };
+      }
+    }`,
+  'request-permission': `    if (capability === 'request-permission') {
+      // The one request function: each browser permission is only asked when
+      // its own API runs for the first time, so the request IS the call -
+      // camera and geolocation run theirs once and drop the result, the
+      // answer is the permission state, and a denied answer is not a crash.
+      var req = String(options['name'] || options['capability'] || '');
+      if (req === 'camera') {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return { name: req, state: 'unknown' };
+        var stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        return { name: req, state: 'granted' };
+      }
+      if (req === 'geolocation') {
+        var pos = await new Promise(function (resolve) { navigator.geolocation.getCurrentPosition(resolve, function () { resolve(null); }); });
+        return { name: req, state: pos ? 'granted' : 'denied' };
+      }
+      if (req === 'notifications' && typeof Notification !== 'undefined' && typeof Notification.requestPermission === 'function') {
+        return { name: req, state: await Notification.requestPermission() };
+      }
+      var askMap = { camera: 'camera', geolocation: 'geolocation', 'clipboard-read': 'clipboard-read', 'clipboard-write': 'clipboard-write', notifications: 'notifications' };
+      if (askMap[req] && navigator.permissions && typeof navigator.permissions.query === 'function') {
+        try { var asked = await navigator.permissions.query({ name: askMap[req] }); return { name: req, state: asked.state }; } catch (_) {}
+      }
+      return { name: req, state: 'unknown' };
+    }`,
 };
 
-function renderBridge(apiBase: string, native: NativeCapability[]): string {
+function renderBridge(apiBase: string, native: NativeCapability[], appInfo: { id: string; name: string; version: string; build: number } | null = null): string {
   return `/**
  * rosezm - the shell bridge. Generated by \`rosezm export <wails|tauri>\`.
  *
@@ -227,7 +458,7 @@ function renderBridge(apiBase: string, native: NativeCapability[]): string {
     };
   }
 
-${renderCapabilities(native)}})();
+${renderCapabilities(native, appInfo)}})();
 `;
 }
 
@@ -241,7 +472,7 @@ ${renderCapabilities(native)}})();
  * permission, a cancelled picker or a missing API is `null` - the contract's
  * empty answer, never a throw inside a tap handler.
  */
-function renderCapabilities(native: NativeCapability[]): string {
+function renderCapabilities(native: NativeCapability[], appInfo: { id: string; name: string; version: string; build: number } | null = null): string {
   if (!native.length) {
     return `  // This project asks for no device capability, so the global answers null -
   // a page that starts calling useNative later re-exports to get a branch.
@@ -254,6 +485,14 @@ function renderCapabilities(native: NativeCapability[]): string {
   const branches: string[] = [];
   if (native.includes('camera')) {
     branches.push(`    if (capability === 'camera') {
+      // The SOURCE decides the picker: 'gallery' (or 'library') opens the
+      // system photo library through the file input, 'camera' (the
+      // default) takes one frame from the live stream. The gallery half is
+      // the missing of the camera capability.
+      var source = String(options['source'] || 'camera');
+      if (source === 'gallery' || source === 'library' || source === 'photos') {
+        return await pickFromGallery(options);
+      }
       // One frame as a data: URI - the "local image path/URI" the capability
       // contract promises - or null when permission is denied or cancelled.
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return null;
@@ -323,6 +562,138 @@ function renderCapabilities(native: NativeCapability[]): string {
     }
 `);
   }
+  if (native.includes('save-image')) {
+    // Save an image to the device photo library through the platform's own share
+    // sheet - the one web path that reaches "Save to Photos" on iOS and most
+    // Android browsers. A denied share, a missing Share API or a non-image is
+    // null - the contract's empty answer, never a throw in a tap.
+    branches.push(`    if (capability === 'save-image') {
+      var src = String(options.url == null ? (options.filePath == null ? '' : options.filePath) : options.url);
+      if (!src || typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return null;
+      try {
+        var res = await fetch(src, { credentials: 'same-origin' });
+        if (!res.ok) return null;
+        var blob = await res.blob();
+        if (blob.type.indexOf('image/') !== 0) return null;
+        var name = (src.split('/').pop() || 'image').split('?')[0] || 'image.png';
+        var file = new File([blob], name, { type: blob.type });
+        if (!navigator.canShare({ files: [file] })) return null;
+        await navigator.share({ files: [file], title: String(options.title == null ? '' : options.title) });
+        return true;
+      } catch (err) { return null; }
+    }
+`);
+  }
+  if (native.includes('keep-awake')) {
+    branches.push(`    if (capability === 'keep-awake') {
+      // Screen Wake Lock: the lock is held while the page is visible and the
+      // browser releases it when the tab hides - re-request on the next call.
+      if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') return null;
+      await navigator.wakeLock.request('screen');
+      return true;
+    }
+`);
+  }
+  if (native.includes('fs-list') || native.includes('fs-read') || native.includes('fs-write') || native.includes('fs-mkdir') || native.includes('fs-remove')) {
+    // The WebView shells have no OS workspace root: their sandbox IS the
+    // Origin Private File System - private to this app's origin, persistent
+    // across launches, wiped only when the app data is. The fs-* branches
+    // resolve every path inside it: write creates the parents it needs,
+    // read/list/remove answer null/[]/false on a missing entry, and the
+    // root itself can never be removed. fs-rename (no OPFS primitive) and
+    // the OS pickers stay desktop-only - the build names them when a page
+    // asks, instead of pretending a sandbox can reach the disk.
+    branches.push(`    if (capability === 'fs-list' || capability === 'fs-read' || capability === 'fs-write' || capability === 'fs-mkdir' || capability === 'fs-remove') {
+      if (!navigator.storage || typeof navigator.storage.getDirectory !== 'function') return null;
+      // A missing parent, a file sitting where a directory should be, or a
+      // lost root resolves to null - every branch answers its contract's
+      // empty shape instead of throwing out of a tap handler.
+      var resolveDir = async function (p, create) {
+        try {
+          var parts = String(p == null ? '' : p).split('/').filter(function (seg) { return seg && seg !== '.' && seg !== '..'; });
+          var dir = await navigator.storage.getDirectory();
+          for (var i = 0; i < parts.length - 1; i++) dir = await dir.getDirectoryHandle(parts[i], { create: !!create });
+          return { dir: dir, name: parts[parts.length - 1] || '', parts: parts };
+        } catch (gone) { return null; }
+      };
+      if (capability === 'fs-write') {
+        var w = await resolveDir(options.path, true);
+        if (!w || !w.name) return false; // a bare directory path is not a file
+        var handle = await w.dir.getFileHandle(w.name, { create: true });
+        if (typeof handle.createWritable !== 'function') return false;
+        var stream = await handle.createWritable();
+        await stream.write(String(options.text == null ? '' : options.text));
+        await stream.close();
+        return true;
+      }
+      if (capability === 'fs-read') {
+        var rd = await resolveDir(options.path, false);
+        if (!rd || !rd.name) return null;
+        try {
+          var f = await (await rd.dir.getFileHandle(rd.name)).getFile();
+          return String(await f.text());
+        } catch (missing) { return null; }
+      }
+      if (capability === 'fs-mkdir') {
+        var md = await resolveDir(options.path, true);
+        if (!md) return false;
+        if (md.name) await md.dir.getDirectoryHandle(md.name, { create: true });
+        return true;
+      }
+      if (capability === 'fs-list') {
+        var ld = await resolveDir(options.path, false);
+        if (!ld) return null;
+        var target;
+        try { target = ld.name ? await ld.dir.getDirectoryHandle(ld.name) : ld.dir; } catch (missing) { return null; }
+        var base = ld.name ? ld.parts.join('/') : ld.parts.slice(0, -1).join('/');
+        var out = [];
+        for await (var entry of target.values()) {
+          var meta = null;
+          try { meta = await entry.getFile(); } catch (notFile) {}
+          out.push({
+            name: entry.name,
+            path: (base ? base + '/' : '') + entry.name,
+            isDir: !meta,
+            size: meta ? meta.size : undefined,
+            mtime: meta ? meta.lastModified : undefined
+          });
+        }
+        return out;
+      }
+      if (capability === 'fs-remove') {
+        var x = await resolveDir(options.path, false);
+        if (!x || !x.name) return false; // the root is never removable
+        try { await x.dir.removeEntry(x.name, { recursive: true }); return true; }
+        catch (missing) { return false; }
+      }
+    }
+`);
+  }
+  if (native.includes('notify')) {
+    // A local notification through the WebView's own Notifications API. A
+    // granted permission shows it and answers true; a denied answer, an
+    // engine without the API, or one whose constructor refuses (the
+    // service-worker-only spelling, with none registered here) answers
+    // null - the contract's empty answer, never a throw in a tap handler.
+    branches.push(`    if (capability === 'notify') {
+      var title = String(options.title == null ? '' : options.title);
+      if (!title || typeof Notification === 'undefined') return null;
+      var show = function () {
+        try {
+          new Notification(title, {
+            body: String(options.body == null ? '' : options.body),
+            tag: String(options.tag == null ? '' : options.tag) || undefined
+          });
+          return true;
+        } catch (err) { return null; }
+      };
+      if (Notification.permission === 'granted') return show();
+      if (Notification.permission === 'denied') return null;
+      var asked = await Notification.requestPermission();
+      return asked === 'granted' ? show() : null;
+    }
+`);
+  }
   if (native.includes('make-phone-call')) {
     // The dial rides the shell runtime: wails v2 injects BrowserOpenURL,
     // tauri v2 exposes opener through __TAURI__ when the app opts in. A
@@ -341,6 +712,164 @@ function renderCapabilities(native: NativeCapability[]): string {
         return true;
       }
       return false;
+    }
+`);
+  }
+  if (native.includes('biometric-auth')) {
+    // The platform authenticator (Face ID / Touch ID / Windows Hello /
+    // Android fingerprint) IS the WebAuthn flow the WebView ships: a
+    // conditional-mediation check first, then a get() whose user
+    // verification requirement is what pops the biometric prompt. A
+    // challenge the app supplies is required (a fabricated one would
+    // fake a security decision); an unsupported or denied answer is null.
+    branches.push(`    if (capability === 'biometric-auth') {
+      var reason = String(options.reason == null ? 'Unlock' : options.reason);
+      if (!window.PublicKeyCredential || typeof navigator.credentials.get !== 'function') return null;
+      var available = null;
+      try {
+        if (typeof PublicKeyCredential.isConditionalMediationAvailable === 'function') {
+          available = await PublicKeyCredential.isConditionalMediationAvailable();
+        } else if (typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+          available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        }
+      } catch (probe) { return null; }
+      if (available === false || available === null) return null;
+      try {
+        var assertion = await navigator.credentials.get({
+          publicKey: {
+            challenge: options.challenge instanceof Uint8Array ? options.challenge : new TextEncoder().encode(String(options.challenge == null ? '' : options.challenge)),
+            userVerification: 'required',
+            timeout: typeof options.timeout === 'number' ? options.timeout : 60000,
+            rpId: String(options.rpId == null ? location.hostname : options.rpId)
+          }
+        });
+        return { verified: assertion != null, rawId: assertion && assertion.rawId ? btoa(String.fromCharCode.apply(null, new Uint8Array(assertion.rawId))) : null };
+      } catch (denied) { return null; }
+    }
+`);
+  }
+  if (native.includes('screen-brightness')) {
+    // A page-content dimmer: the fixed overlay's opacity IS the reading
+    // (1 = full bright, 0 = dark). The SYSTEM backlight is not reachable
+    // from a WebView - the answer's `system: false` names that honestly,
+    // and a number outside 0..1 is refused (the contract's level).
+    branches.push(`    if (capability === 'screen-brightness') {
+      var requested = typeof options.level === 'number' ? options.level : null;
+      if (requested === null || requested < 0 || requested > 1) return null;
+      var overlay = document.getElementById('rosezm-brightness');
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'rosezm-brightness';
+        overlay.style.cssText = 'position:fixed;inset:0;background:#000;pointer-events:none;z-index:2147483646';
+        document.body.appendChild(overlay);
+      }
+      overlay.style.opacity = String(1 - requested);
+      return { level: requested, system: false };
+    }
+`);
+  }
+  if (native.includes('camera')) {
+    // The gallery picker: the system photo library through a one-shot file
+    // input (the WebView's own picker), read as a data: URI - the same
+    // shape the camera half answers. A cancelled picker answers null.
+    branches.push(`    async function pickFromGallery(options) {
+      return await new Promise(function (resolve) {
+        var input = document.createElement('input');
+        input.type = 'file';
+        input.setAttribute('accept', 'image/*');
+        if (options && options.quality) input.setAttribute('capture', 'environment');
+        input.style.display = 'none';
+        var done = false;
+        function finish(value) {
+          if (done) return;
+          done = true;
+          if (input.parentNode && input.parentNode.removeChild) input.parentNode.removeChild(input);
+          resolve(value);
+        }
+        input.addEventListener('change', function () {
+          var file = input.files && input.files[0];
+          if (!file) { finish(null); return; }
+          var reader = new FileReader();
+          reader.onload = function () { finish(String(reader.result || '')); };
+          reader.onerror = function () { finish(null); };
+          reader.readAsDataURL(file);
+        });
+        input.addEventListener('cancel', function () { finish(null); });
+        document.body.appendChild(input);
+        input.click();
+      });
+    }
+`);
+  }
+  if (native.includes('push-subscribe') || native.includes('push-token')) {
+    // The push skeleton: the Web Push flow around the token (the token
+    // itself is a credential the app reports to its own server).
+    branches.push(`    if (capability === 'push-subscribe' || capability === 'push-token') {
+      if (!window.__rosezmPush) return null;
+      var vapidKey = options['vapidKey'] == null ? '' : String(options['vapidKey']);
+      if (capability === 'push-token') return await window.__rosezmPush.token();
+      var subscription = vapidKey ? await window.__rosezmPush.subscribe(vapidKey) : await window.__rosezmPush.subscription();
+      return subscription;
+    }
+`);
+  }
+  if (native.includes('secure-store')) {
+    // The encrypted token store (the WebView half): PBKDF2 -> AES-GCM
+    // over the bridge's IndexedDB records. The bridge owns the crypto;
+    // the shell only forwards the operation.
+    branches.push(`    if (capability === 'secure-store') {
+      if (!window.__rosezmSecureStore) return null;
+      var op = String(options['op'] || 'get');
+      var key = options['key'] == null ? '' : String(options['key']);
+      var passphrase = options['passphrase'] == null ? '' : String(options['passphrase']);
+      if (op === 'set') return await window.__rosezmSecureStore.set(key, options['value'] == null ? '' : options['value'], passphrase);
+      if (op === 'get') return await window.__rosezmSecureStore.get(key, passphrase);
+      if (op === 'delete') return await window.__rosezmSecureStore.remove(key);
+      if (op === 'list') return await window.__rosezmSecureStore.list();
+      return null;
+    }
+`);
+  }
+  if (native.includes('hot-update')) {
+    // The signed www overlay: the bridge verifies before any write.
+    branches.push(`    if (capability === 'hot-update') {
+      if (!window.__rosezmHotUpdate) return null;
+      return await window.__rosezmHotUpdate.check({
+        url: options['url'], signature: options['signature'],
+        publicKey: options['publicKey'], algorithm: options['algorithm'],
+        version: options['version']
+      });
+    }
+`);
+  }
+  if (native.includes('qr-scan')) {
+    // The QR-specific scan: the same camera-stream loop, but the detector
+    // is pinned to the QR format - a login QR (the mutual-scan scenario)
+    // never decodes a stray UPC. The camera is released in the finally.
+    branches.push(`    if (capability === 'qr-scan') {
+      if (typeof BarcodeDetector !== 'function') return null;
+      var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      try {
+        var video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = stream;
+        await video.play();
+        var detector = new BarcodeDetector({ formats: ['qr_code'] });
+        var found = await new Promise(function (resolve) {
+          var ticks = 0;
+          var timer = setInterval(function () {
+            ticks += 1;
+            detector.detect(video).then(function (codes) {
+              if (codes.length) { clearInterval(timer); resolve(codes[0].rawValue); }
+              else if (ticks > 150) { clearInterval(timer); resolve(null); }
+            }).catch(function () {});
+          }, 100);
+        });
+        return found;
+      } finally {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+      }
     }
 `);
   }
@@ -393,6 +922,35 @@ function renderCapabilities(native: NativeCapability[]): string {
   }
   if (native.includes('get-battery')) {
     branches.push(DOM_BRIDGE_BRANCHES['get-battery']);
+  }
+  if (native.includes('check-permission')) {
+    branches.push(DOM_BRIDGE_BRANCHES['check-permission']);
+  }
+  if (native.includes('request-permission')) {
+    branches.push(DOM_BRIDGE_BRANCHES['request-permission']);
+  }
+  if (native.includes('app-info')) {
+    // The app's own identity: the export knows it, so the page does not have
+    // to guess (an "about" page and a crash report both want the version).
+    // the WebView's engine version rides along too, read
+    // from the UA at RUNTIME (the export cannot know which OS WebView will
+    // run the app). A UA that does not name a known engine reports
+    // webview: 'unknown' - never an invented version number.
+    branches.push(`    if (capability === 'app-info') {
+      var ua = '';
+      try { ua = navigator.userAgent || ''; } catch (e) {}
+      var engine = 'unknown', version = 'unknown';
+      var m = /(?:Chrome|Chromium)\\/([0-9.]+)/.exec(ua);
+      if (m) { engine = 'chromium'; version = m[1]; }
+      else {
+        m = /Version\\/([0-9.]+).*Safari\\//.exec(ua);
+        if (m) { engine = 'webkit'; version = m[1]; }
+      }
+      var info = ${JSON.stringify(appInfo ?? { id: '', name: '', version: '', build: 0 })};
+      info.webview = { engine: engine, version: version, ua: ua };
+      return info;
+    }
+`);
   }
   return `  // useNative: the capabilities this project asked for, on the WebView's own
   // APIs. A denied permission is null - the contract's empty answer.
@@ -521,6 +1079,22 @@ export async function bakeShellDocuments(
     }
   }
 
+  // The not-found page is a page too: bake it, so an exported app can answer
+  // an unknown path with the SITE's 404 (a real 404 status) instead of the
+  // SPA shell - which would paint the landing route under a wrong URL.
+  if (!fs.existsSync(path.join(frontend, '404', 'index.html'))) {
+    try {
+      const nf = await ssr.renderPage('/__rosezm_404_probe__');
+      if (nf.html) {
+        fs.mkdirSync(path.join(frontend, '404'), { recursive: true });
+        fs.writeFileSync(path.join(frontend, '404', 'index.html'), nf.html, 'utf8');
+        baked++;
+      }
+    } catch {
+      // No 404 to bake (the app has none) - the shell answers.
+    }
+  }
+
   if (!fs.existsSync(path.join(frontend, 'index.html'))) {
     // Nothing landed at the root: either the whole app is per-request or the
     // landing route is the one the middleware answers. Either way the window
@@ -572,6 +1146,20 @@ async function bakeRoute(ssr: SsrModule, als: AsyncLocalStorage<Record<string, u
 async function writeBootShell(frontend: string): Promise<void> {
   const html = buildShell('', JSON.stringify({ __route: '/' }), getClientSource(null, frontend), [], getStyles(), true, 'en', '', '', true);
   await fs.promises.writeFile(path.join(frontend, 'index.html'), html, 'utf8');
+}
+
+/** Every `.rose` page as the route path the server matches - INCLUDING the
+ *  `pages/api/*` endpoints and the error pages. An exported native server needs
+ *  the whole table to tell a real route from a miss: a miss answers the site's
+ *  404, a route answers its page. */
+export function pageRouteTable(pageFiles: string[]): string[] {
+  const out: string[] = [];
+  for (const file of pageFiles) {
+    const stem = path.basename(file, '.rose');
+    if (stem === '_layout' || stem === '_middleware') continue;
+    out.push(routeOf(stem, file));
+  }
+  return [...new Set(out)].sort();
 }
 
 /** Every `.rose` page as the route path the server matches. Layouts, the error

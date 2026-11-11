@@ -31,7 +31,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { scanRoseFiles, scanComponentFiles } from '../compiler/index.js';
 import { writeDeployScaffold } from './deploy-scaffold.js';
-import { appIdentity, type AppIdentity } from './app-identity.js';
+import { keepOnlyExcept } from './fs-util.js';
+import { appBuildNumber, appIdentity, type AppIdentity } from './app-identity.js';
 import { appIcon, icoFromPng, icnsFromPng } from './app-icon.js';
 import { nativeUsage } from './native-api.js';
 import { bakeShellDocuments, pruneServerBundle, stageBuiltSite, shellCapabilityGaps, writeShellBridge } from './desktop-shell.js';
@@ -47,13 +48,16 @@ export async function emitTauri(opts: EmitTauriOptions): Promise<{ pages: string
   const out = path.join(opts.outDir, 'tauri');
   // The store identity, from the project's rosezm.app.json (defaults otherwise).
   const app = appIdentity(opts.projectRoot);
-  await fs.promises.rm(out, { recursive: true, force: true });
+  // Keep Cargo's build cache. src-tauri/target is the Rust equivalent of a
+  // full rebuild on every export - minutes and gigabytes - and the config we
+  // regenerate sits beside it, not on top of it.
+  await keepOnlyExcept(out, ['src-tauri/target']);
   await fs.promises.mkdir(out, { recursive: true });
 
   // Tauri's own tooling reads `build.frontendDist`, which is relative to
   // src-tauri/ - so the built site IS <out>/frontend, not a subdirectory of it.
   const frontend = path.join(out, 'frontend');
-  // R231: the manifest reads these, so an export that reports zero pages looks
+  // The manifest reads these, so an export that reports zero pages looks
   // empty. The same source scan that decides the capability warning.
   const pageFiles = await scanRoseFiles(opts.projectRoot);
   const compFiles = await scanComponentFiles(opts.projectRoot);
@@ -70,17 +74,17 @@ export async function emitTauri(opts: EmitTauriOptions): Promise<{ pages: string
   const native = nativeUsage(await Promise.all([...pageFiles, ...compFiles].map((f) => fs.promises.readFile(f, 'utf8'))));
   // After the site and the documents: the bridge is written INTO the frontend
   // and linked from every HTML document, so it is the first thing the page runs.
-  await writeShellBridge(frontend, opts.apiBase ?? '', native);
+  await writeShellBridge(frontend, opts.apiBase ?? '', native, { id: app.id, name: app.name, version: app.version, build: appBuildNumber(app.version) });
   for (const gap of shellCapabilityGaps(native)) opts.warnings.push(`tauri: useNative('${gap}') has no shell equivalent - the bridge answers the contract's null at runtime`);
 
   const tauriDir = path.join(out, 'src-tauri');
   await fs.promises.mkdir(path.join(tauriDir, 'icons'), { recursive: true });
-  // R456: the Windows bundler asks for an .ico, and a config that lists only a
+  // The Windows bundler asks for an .ico, and a config that lists only a
   // PNG fails at `tauri build` - both ride from the same source image.
   const icon = appIcon(opts.projectRoot, 'tauri', opts.warnings);
   await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.png'), icon);
   await fs.promises.writeFile(path.join(tauriDir, 'icons', 'icon.ico'), icoFromPng(icon));
-  // R459: macOS packages want an .icns. A square power-of-two picture can be
+  // MacOS packages want an .icns. A square power-of-two picture can be
   // wrapped as one entry; any other size needs downsampling, which the README
   // hands to `tauri icon` instead of shipping a wrong picture.
   const icns = icnsFromPng(icon);
