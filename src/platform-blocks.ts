@@ -22,10 +22,10 @@ const PLATFORM_TERMS: Record<string, string[]> = {
 };
 const PLATFORM_NAMES = new Set([
   'weapp', 'qq', 'alipay', 'baidu', 'toutiao', 'flutter', 'android', 'arkts',
-  'xcode', 'electron', 'python', 'dotnet', 'java', 'cpp', 'web',
+  'xcode', 'electron', 'python', 'dotnet', 'java', 'cpp', 'web', 'vue',
 ]);
 
-/** R237: the uni-app spellings, so code migrating from it keeps working - these
+/** The uni-app spellings, so code migrating from it keeps working - these
  *  are the names an author already has in their `// #ifdef MP-WEIXIN` markers. */
 const UNI_APP_ALIASES: Record<string, string> = {
   'mp-weixin': 'weapp', 'mp-qq': 'qq', 'mp-alipay': 'alipay',
@@ -55,7 +55,7 @@ export function resolvePlatformBlocks(src: string, platform = 'web', warnings: s
 }
 
 /**
- * R237: the comment form uni-app made famous, for `<script>` and `<style>`:
+ * The comment form uni-app made famous, for `<script>` and `<style>`:
  *
  *   // #ifdef MP-WEIXIN
  *   ...JS or CSS...

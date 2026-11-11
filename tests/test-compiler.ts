@@ -348,7 +348,7 @@ if (failures) {
   check('F1 bind: non-state target fails at the .rose file', threw.includes('must name a $state declaration'));
   safeRm(tmpBad);
 
-  // R120: component two-way props - the component reports edits out through
+  // Component two-way props - the component reports edits out through
   // on<Prop>Change; the call site passes the setter itself as the callback.
   const tmpComp = pathB.join('.test-compiler-out', 'twoway-comp.rose');
   fsB.writeFileSync(tmpComp, `<script>
@@ -507,7 +507,7 @@ p { color: red; }
   let sfull = $state(['x']);
 </script>
 <div>
-  <p style="color: red" style:color={scolor}>t</p>
+  <p style="color: red" style:color={scolor} style:padding-left="{8 + 16}px">t</p>
   {#each srows as r}<li>{r}</li>{:else}<li class="empty">none</li>{/each}
   {#each sfull as f}<li>{f}</li>{:else}<li>none</li>{/each}
 </div>`, 'utf-8');
@@ -519,6 +519,7 @@ p { color: red; }
   const strip = (h: string) => h.replace(/<!--\u27e6[^>]*\u27e7-->/g, '');
   const htmlS1 = strip(String(await modS2.render([], [], {}, {})));
   check('F2f style:: override appended after static', /style="[^"]*color:\s*red;?\s*color:\s*blue[^"]*"/.test(htmlS1));
+  check('F2f style: a quoted value keeps its unit suffix (style:pad="{n}px")', /style="[^"]*padding-left:\s*24px/.test(htmlS1), htmlS1.slice(0, 500));
   check('F2f each-else: empty list renders the else branch', htmlS1.includes('none') && !htmlS1.includes('<li></li>'));
   const rtS2 = await import('./.test-compiler-tmp/runtime.ts');
   rtS2.setState('srows', ['r1']);
@@ -683,7 +684,7 @@ p { color: red; }
 </Card>`, 'utf-8');
   const outS: any = await compileComponent(pageS, pathS.join(process.cwd(), 'public'), 'slotsnested', false, [], regS);
   const srcS = String(outS.ssr ?? '');
-  check('F21 slot: nested-in-if lifted into named slot closure', srcS.includes('"a": (__s, __c)') && srcS.includes('slotted()') && !srcS.includes('slot="a"'));
+  check('F21 slot: nested-in-if lifted into named slot closure', srcS.includes('"a": (__s, __c, __si)') && srcS.includes('slotted()') && !srcS.includes('slot="a"'));
   check('F21 slot: block gate preserved on the lifted wrapper', srcS.includes('show()'));
   safeRm(cardS);
   safeRm(pageS);
@@ -960,6 +961,16 @@ p { color: red; }
   <li>key: {row.t}</li>
 {/each}
 </ul>
+<ul>
+{#each zRows() as zTab}
+  <li class={"doc-tab" + (zTab === "a" ? " active" : "")}>tab: {zTab}</li>
+{/each}
+</ul>
+<ul>
+{#each zRows() as t}
+  <li class={"count" + (t === "a" ? " hot" : "")}>cnt: {t}</li>
+{/each}
+</ul>
 {#snippet zSnip(zNm)}
   <p>snip: {zNm}</p>
 {/snippet}
@@ -988,7 +999,14 @@ p { color: red; }
   check('F15 each: a destructuring pattern shadows and binds', htmlC3.includes('destr: x') && htmlC3.includes('destr: y'));
   // A keyed each keeps its key (the item is in scope for it) and the body reads the item.
   check('F15 each: a keyed each keeps its key expression', ssrC3.includes('(__s, __i) => (__s.zId)') && htmlC3.includes('key: p') && htmlC3.includes('key: q'));
-  // A snippet parameter shadows; the call passes the value through.
+  // A class LITERAL that contains the item's name must survive the rename:
+  // the item `tab` used to rewrite the class "doc-tab" into "doc-__s", and
+  // the rendered element then matched no CSS rule at all.
+  check('F15 each: a class literal containing the item name is not renamed', !/doc-__s/.test(ssrC3) && /doc-tab/.test(ssrC3));
+  // The item named `t` must not eat the `t` that ENDS a property name
+  // ("count" -> "coun__s"): the rename keeps the word boundary against the
+  // WHOLE source, not against a slice.
+  check('F15 each: a property name ending in the item name survives', !/coun__s/.test(ssrC3) && /"count"/.test(ssrC3));  // A snippet parameter shadows; the call passes the value through.
   check('F15 snippet: a parameter shadows a same-named state', htmlC3.includes('snip: CALLED'));
   // The {:then} variable shadows in its branch body - proven in the source,
   // because the branch renders empty while the promise is pending.
@@ -1130,14 +1148,25 @@ p { color: red; }
   // shadowing const wins over the same-named signal. R278 (BUG.md BE): the
   // handler keys carry the page's module namespace, so two pages can no longer
   // overwrite each other's registry entries.
-  check('F17 handler: the binding reads the const, not the signal', /__h_[\w]+_0: \(\) => \$setState\('zL17', __rvct0\(\)\)/.test(clientI) && /__h_[\w]+_1: \(\) => \$setState\('zL17', __rvct1\(\)\)/.test(clientI));
+  // The inline $setState now rewrites to the component's NAMESPACED
+  // setter (setZL17) - a global setState with a bare key wrote to a
+  // nonexistent signal and the click silently did nothing. The shadowing
+  // const thunk is still what the setter is given.
+  check('F17 handler: the binding reads the const, not the signal', /__h_[\w]+_0: \(\) => setZL17\(__rvct0\(\)\)/.test(clientI) && /__h_[\w]+_1: \(\) => setZL17\(__rvct1\(\)\)/.test(clientI));
+  // R633: the inline $setState fix that landed concurrently. A template
+  // handler's explicit $setState('key', v) MUST become the component's
+  // namespaced setter: left as a global setState with a bare key, the
+  // write landed on a nonexistent signal and the click silently did
+  // nothing. Pin both halves - the setter is used, the literal is gone.
+  check('R633: an inline $setState uses the namespaced setter', /__h_[\w]+_0: \(\) => setZL17\(/.test(clientI) && !/__h_[\w]+_0: \(\) => \$setState\(/.test(clientI));
+  check('R633: no inline handler keeps the global bare-key write', !/__h_[\w]+_\d+: \(\) => \$setState\('zL17'/.test(clientI));
   check('F17 handler: keys are module-namespaced (BUG.md BE)', !clientI.includes('__h0: () =>') && /__h_[\w]+_0:/.test(clientI));
   // A bare-word handler names a script function to CALL; it is left alone.
   check('F17 handler: a bare-word handler is not renamed', clientI.includes('zN17') && !/__h_[\\w]+_2:/.test(clientI));
   // A block-level const is not hoisted - its thunk is emitted inline inside
   // __root - and the handler keeps the bare name: the structural boundary,
   // pinned rather than papered over.
-  check('F17 handler: a block-level const stays out of the handler scope', /__h_[\w]+_3: \(\) => \$setState\('zL17', zI17\)/.test(clientI) && srcI.includes('const __rvct2 = () => (zP17() + 1)') && srcI.indexOf('const __rvct2') > srcI.indexOf('const __root'));
+  check('F17 handler: a block-level const stays out of the handler scope', /__h_[\w]+_3: \(\) => setZL17\(zI17\)/.test(clientI) && srcI.includes('const __rvct2 = () => (zP17() + 1)') && srcI.indexOf('const __rvct2') > srcI.indexOf('const __root'));
 
   // R278/R259 (BUG.md BE): an inline handler that reads an {#each} iteration
   // variable used to be hoisted to the page module where the variable does not
@@ -1491,7 +1520,7 @@ export default [{
   <p>inner: {zX19b}</p>
 {/if}`, 'utf-8');
   const outK3: any = await compileComponent(tmpK3, pathK.join(process.cwd(), 'public'), 'constnestpage', false, [], new Map());
-  check('F19 nested: a handler reads the top-level const, not a same-name block const', String(outK3.client).includes("$setState('zOut19b', __rvct0())"));
+  check('F19 nested: a handler reads the top-level const, not a same-name block const', String(outK3.client).includes('setZOut19b(__rvct0())'));
   safeRm(tmpK3);
 }
 
@@ -1644,6 +1673,15 @@ export default [{
   check('F27b: a comma list pairs each selector with its own self match',
     listOut.includes('[data-rosezm-c="demo"] .x, [data-rosezm-c="demo"].x,[data-rosezm-c="demo"] .y, [data-rosezm-c="demo"].y'),
     listOut);
+  // A LEADING :global() stays bare; only the local remainder carries the
+  // scope attribute. Prefixing the whole selector produced `[data]html[...]`,
+  // an element that cannot exist.
+  const leadOut = scopeCss(":global(html[data-plat='mac']) .tl-zone { display: block }", 'index');
+  check('F27c: a leading :global stays global and the local half is scoped',
+    leadOut.includes("html[data-plat='mac'] [data-rosezm-c=\"index\"].tl-zone, html[data-plat='mac'] [data-rosezm-c=\"index\"] .tl-zone{display:block}"),
+    leadOut);
+  check('F27c: the scope attribute is not glued onto the global html',
+    !leadOut.includes('[data-rosezm-c="index"]html'), leadOut);
 }
 
 // F28: a comment that READS like a declaration used to match DECL_RE, and
@@ -1745,7 +1783,7 @@ export default [{
 
 // F30: a {@const} declared inside a COMPONENT'S CHILDREN belongs to the child
 // scope - compileTemplate compiles those through a recursive call. The
-// upfront id pass (R45) collects the scope's own consts, and a component tag
+// upfront id pass collects the scope's own consts, and a component tag
 // is not a {#block}: without the component-children range it collected the
 // child's const too and rewrote its uses to a thunk THIS scope never emits -
 // `h += __rvct0()` with no declaration, a ReferenceError at render time and
@@ -1954,7 +1992,7 @@ export default [{
   safeRm(tmpQ2);
 }
 
-// R110: an API route that references globalThis.__rosezmAuth raises the same
+// An API route that references globalThis.__rosezmAuth raises the same
 // flag a page does. The auth helpers live in the server entry, so a route that
 // missed the flag got `undefined` at runtime - every hashPassword/verifyPassword
 // call died with a TypeError while the build stayed green.
@@ -1976,7 +2014,7 @@ export default [{
   check('an API route with no auth reference does not raise the flag', unit2.usesrosezmAuth !== true, 'the bundle would lose its edge-loadable shape');
 }
 
-// R111: an attribute whose value is quoted with single quotes (or a backtick)
+// An attribute whose value is quoted with single quotes (or a backtick)
 // and holds an interpolation compiles to attrMark(), exactly like the
 // double-quoted form. rewriteQuotedExprAttrs used to match only "...", so a
 // '...' value fell through to the text path: the textMark() landed INSIDE the
@@ -2014,7 +2052,7 @@ export default [{
   safeRm('.test-compiler-out', { recursive: true });
 }
 
-// R200: the mutation sugar on the web pipeline. A `$state` reads like a value,
+// The mutation sugar on the web pipeline. A `$state` reads like a value,
 // so users write it like one - `count++`, `total += price`, `show = !show`,
 // `on:click={() => count++}`. Before the shared pass each of those either died
 // at click time (the callify pass produced `count()++` on a const thunk) or was
@@ -2045,7 +2083,7 @@ export default [{
   check('sugar: a pre-increment self-assign folds to arithmetic, not ++ of a read', clientS.includes('setZN(zN() + 1)') && !/setZN\(\+\+/.test(clientS));
   check('sugar: an assignment of a negation is a write of the flipped value', clientS.includes('setZShow(!zShow())'));
   check('sugar: a brace-less if body still folds', /if \(zCount\(\) > 2\) setZCount\(zCount\(\) - \(1\)\)/.test(clientS), clientS.split('\n').filter((l: string) => /zCount\(\) > 2/.test(l)).join(' | ').slice(0, 200));
-  check('sugar: an inline arrow handler writes the same way', clientS.includes("$setState('zCount', zCount() + 1)"));
+  check('sugar: an inline arrow handler writes the same way', clientS.includes('setZCount(zCount() + 1)'));
   check('sugar: a loop counter that is not state is left alone', /for \(let i = 0; i < 3; i\+\+\) acc \+= i/.test(clientS), 'a local++ was folded');
   check('sugar: a $derived read still compiles to its thunk', clientS.includes('const zDoubled = () => (zCount() * 2)'));
   safeRm(tmpS);
@@ -2223,6 +2261,148 @@ function pick(btn) {
   check('BI: a state read after a quote-bearing regex is still callified', srcBI.includes('base + q()'), srcBI.slice(0, 400));
   check('BI: the local const that shadows a signal stays a const', srcBI.includes('const mode = ') && !srcBI.includes('const mode()'), srcBI.slice(0, 400));
   safeRm(file);
+}
+
+// Prose is not code: a paragraph reading `flag={flag()}` used to be folded into
+// a `$setState('flag', …)` write by the state-write pass, which ran over the
+// whole template and read the `}` before `flag =` as statement position - the
+// closing brace went with it and the page rendered `n=3 $setState('flag', true`.
+// Only the expressions between braces may hold statements.
+{
+  const dir = path.join(process.cwd(), '.test-compiler-out');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'prose-not-code.rose');
+  fs.writeFileSync(file, `<script>
+let n = $state(3);
+let flag = $state(true);
+function bump() { $setState('n', n() + 1); }
+</script>
+<p>n={n()} flag={flag()}</p>
+<button on:click={() => { flag = false; }}>off</button>
+`, 'utf-8');
+  const outPN: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'pn', false, [], new Map());
+  const ssrPN: string = String(outPN.ssr ?? outPN.client ?? '');
+  check('PN: text that looks like an attribute stays text', ssrPN.includes(' flag=') && !ssrPN.includes("$setState('flag'"), ssrPN.slice(0, 300));
+  check('PN: a real write in an inline handler still folds', /flag\s*=\s*false/.test(ssrPN) || /setFlag\(/.test(String(outPN.client ?? '')), String(outPN.client ?? '').slice(0, 300));
+  safeRm(file);
+}
+
+
+// A page whose code sits in a second `<script lang="ts">` block: the blocks
+// merge into one page script (DodoVim report 2026-11-02). Used to leak into
+// the rendered HTML verbatim - template callify mangled `const mode = ...`
+// into `const mode() = ...` on the way out, and every function the block
+// declared silently vanished from the bundle.
+{
+  const dir = '.test-compiler-shadow';
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'index.rose');
+  fs.writeFileSync(file, `<script>
+  let mode = $state('light');
+</script>
+<button on:click={pick}>pick</button>
+<p>mode: {mode()}</p>
+<script lang="ts">
+  function pick(e: Event) {
+    const btn = e.target as HTMLButtonElement;
+    const mode = btn?.getAttribute('data-mode');
+    $setState('mode', mode ?? 'light');
+  }
+</script>
+`, 'utf-8');
+  const out: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'shadow', false, [], new Map());
+  const ssr: string = String(out.ssr ?? out.client ?? '');
+  const client: string = String(out.client ?? '');
+  check('shadow: the second block\'s function is in the bundle', client.includes('getAttribute'), client.slice(0, 200));
+  check('shadow: no raw script block leaks into the render', !ssr.includes('lang="ts"') && !client.includes('lang="ts"'), ssr.slice(0, 200));
+  check('shadow: the local shadowing a signal is not callified', !/const mode\(\)/.test(client + ssr), client.slice(0, 200));
+  safeRm(dir, { recursive: true });
+}
+
+
+// The state-read rewriter must not touch (a) a block-bodied ARROW's own local
+// declaration and (b) TS type syntax - both shapes used to emit `const mode()
+// =` / `settings()?:` and die in esbuild.
+{
+  const dir = '.test-compiler-tsg';
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'index.rose');
+  fs.writeFileSync(file, `<script>
+  let mode = $state('auto');
+  function settings() { return { cloudSyncMode: 'manual' }; }
+</script>
+<button on:click={() => { const mode = 'manual'; $setState('mode', mode); }}>pick</button>
+<p>{mode()}</p>
+`, 'utf-8');
+  const out: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'tsg', false, [], new Map());
+  const client: string = String(out.client ?? '');
+  check('tsg: an arrow-level local declaration is not callified', !/const mode\(\)/.test(client), client.slice(0, 200));
+  fs.writeFileSync(file, `<script>
+  let settings = $state('x');
+  function load(s: string) {
+    const cfg = JSON.parse(s) as { settings?: unknown; a11y?: unknown };
+    $setState('settings', JSON.stringify(cfg));
+  }
+</script>
+<button on:click={() => load('{}')}>load</button>
+<p>{settings()}</p>
+`, 'utf-8');
+  const out2: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'tsg2', false, [], new Map());
+  const ssr2: string = String(out2.ssr ?? out2.client ?? '');
+  check('tsg: a TS type literal keeps its property names', /settings\?:\s*unknown/.test(ssr2) && !/settings\(\)\?:/.test(ssr2), ssr2.slice(0, 200));
+  fs.writeFileSync(file, `<script>
+  let siteOptions = $state(['a', 'b']);
+  function f(cfg: { siteOptions?: unknown }): string {
+    return String(cfg.siteOptions ?? siteOptions[0]);
+  }
+  let msg = $state(f({}));
+</script>
+<p>{msg()}</p>
+`, 'utf-8');
+  const out3: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'tsg3', false, [], new Map());
+  const both3: string = String(out3.ssr ?? '') + String(out3.client ?? '');
+  check('tsg: an optional property in a param type keeps its name, the signal read does not', /siteOptions\?:\s*unknown/.test(both3) && !/siteOptions\(\)\?:/.test(both3) && /siteOptions\(\)\[0\]/.test(both3), both3.slice(0, 200));
+  // A function DECLARATION with a return type annotation: the shadow range
+  // used to end at the `: void` and the body's shadowing locals were callified
+  // (`const mode() = 'manual'`).
+  fs.writeFileSync(file, `<script>
+  let mode = $state('edit');
+  function setIncognito(on: boolean): void {
+    const mode = 'manual';
+    console.log(mode);
+  }
+  let done = $state('');
+  function finish(step: number): Promise<string> {
+    const on = step > 0;
+    return Promise.resolve(String(on));
+  }
+</script>
+<p>{mode}</p>
+`);
+  const out4: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'tsg4', false, [], new Map());
+  const both4: string = String(out4.ssr ?? '') + String(out4.client ?? '');
+  check('tsg: a typed function declaration keeps its shadowing locals', /const mode = 'manual'/.test(both4) && !/const mode\(\)/.test(both4) && !/const on\(\)/.test(both4) && /const on = step > 0/.test(both4), both4.slice(0, 200));
+  safeRm(dir, { recursive: true });
+}
+
+// Oboext (2026-11-03): a $data signal's chained template read must callify
+// like a $state one - `{p.ts.back}` used to emit `p.ts.back`, a property read
+// off the signal FUNCTION, and the route answered 500 at render time.
+{
+  const dir = fs.mkdtempSync(path.join(process.cwd(), '.tc-data-read-'));
+  const file = path.join(dir, 'pages', 'index.rose');
+  fs.mkdirSync(path.join(dir, 'pages'), { recursive: true });
+  fs.writeFileSync(file, `<script>
+  let p = $data(async () => ({ ts: { back: 'x' } }));
+</script>
+<p>{p.ts.back}</p>
+<p>{p}</p>
+`);
+  const outD: any = await compileComponent(file, path.join(process.cwd(), 'public'), 'tc-data-read', false, [], new Map());
+  const ssrD: string = String(outD.ssr ?? '');
+  check('data: a chained template read calls the signal', ssrD.includes('p().ts.back') && !/\bp\.ts\.back/.test(ssrD), ssrD.slice(0, 200));
+  check('data: a bare template read calls the signal', /textMark\(__c, \(\) => \(p\(\)\)\)/.test(ssrD), ssrD.slice(0, 200));
+  safeRm(dir, { recursive: true });
 }
 
 if (failures > 0) {

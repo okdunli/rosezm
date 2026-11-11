@@ -105,6 +105,50 @@ const COMPOUND = ['+=', '-=', '*=', '/=', '%='];
 /** A line break does not end a statement when the expression plainly continues. */
 const CONTINUES = [/[(,.<>=!&|+\-*/%?:]$/, /(?:&&|\|\||=>|\.\.)$/];
 
+/**
+ * `rewriteStateWrites` over a TEMPLATE rather than a script. The text between
+ * braces is prose, so `flag={flag()}` in a paragraph is not an assignment - but
+ * the pass reads the `}` before `name =` as statement position and folded the
+ * sentence into a `$setState('flag', …)` call, taking the closing brace with it
+ * (the page then rendered `n=3 $setState('flag', true`). Only the expressions
+ * between braces can hold statements, so every `=` outside one is masked while
+ * the pass runs and restored after it.
+ */
+export function rewriteTemplateStateWrites(code: string, isState: (name: string) => boolean): string {
+  if (!code) return code;
+  const mask = (text: string): string => text.replace(/=/g, '\u0001');
+  let masked = '';
+  let i = 0;
+  while (i < code.length) {
+    const open = code.indexOf('{', i);
+    if (open < 0) { masked += mask(code.slice(i)); break; }
+    masked += mask(code.slice(i, open));
+    const end = braceEnd(code, open);
+    if (end < 0) { masked += mask(code.slice(open)); break; }
+    masked += code.slice(open, end);
+    i = end;
+  }
+  return rewriteStateWrites(masked, isState).replace(/\u0001/g, '=');
+}
+
+/** The index just past the `}` matching the `{` at `start`, quotes respected. */
+function braceEnd(src: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      for (i++; i < src.length; i++) {
+        if (src[i] === '\\') i++;
+        else if (src[i] === ch) break;
+      }
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
 export function rewriteStateWrites(
   code: string,
   isState: (name: string) => boolean,
@@ -112,6 +156,12 @@ export function rewriteStateWrites(
 ): string {
   if (!code) return code;
   const DECL = /(?:^|[^\w$])(?:let|const|var|function|class|new|case|import|export|interface|type)\s+$/;
+  // A switch label is a statement position: `case 0: s = 'zero'` is a write,
+  // and the pass left it as a read-only spelling otherwise.
+  // The accumulator strips spaces, so `case 0:` reaches here as `case0:` -
+  // the boundary after `case` cannot be relied on.
+  const LABEL = /(?:^|[^\w$])case[^:;{}]*:\s*$|(?:^|[^\w$])default\s*:\s*$/;
+  const atStatement = (text: string): boolean => DECL.test(text) || LABEL.test(text);
   const identStart = (c: string | undefined): boolean => !!c && /[A-Za-z_$]/.test(c);
   let out = '';
   // Only CODE (never a comment) decides what came before, so a trailing comment
@@ -163,7 +213,9 @@ export function rewriteStateWrites(
       if (c === ';') return j;
       if (c === '\n') {
         const soFar = code.slice(from, j).replace(/\s+$/, '');
-        if (soFar === '' || CONTINUES[0].test(soFar) || CONTINUES[1].test(soFar)) { j++; continue; }
+        // `delegate` spans lines (the WPF timer translation emits
+        // `delegate\n{...}`), so the newline after it is not a statement end.
+        if (soFar === '' || CONTINUES[0].test(soFar) || CONTINUES[1].test(soFar) || /delegate$/.test(soFar)) { j++; continue; }
         return j;
       }
       j++;
@@ -203,7 +255,7 @@ export function rewriteStateWrites(
     const after = code.slice(end + gap);
     const p = prev();
     // name++ / name--
-    if ((after.startsWith('++') || after.startsWith('--')) && !/[\w$.]/.test(after.slice(2, 3)) && ['', ';', '{', '}', '(', ')', ',', '=>'].includes(p)) {
+    if ((after.startsWith('++') || after.startsWith('--')) && !/[\w$.]/.test(after.slice(2, 3)) && (['', ';', '{', '}', '(', ')', ',', '=>'].includes(p) || LABEL.test(src))) {
       take(spell(name, `${name}() ${after.startsWith('--') ? '-' : '+'} 1`), true);
       i = end + gap + 2;
       continue;
@@ -216,7 +268,7 @@ export function rewriteStateWrites(
     // A `)` predecessor is an `if (test) count += 1` / `while (n) total = 0`
     // body without braces - still a statement. Nothing else in the language can
     // put an assignment behind a `)`, because `f(x) = v` is a syntax error.
-    if (isAssign && ['', ';', '{', '}', ')', '=>'].includes(p)) {
+    if (isAssign && (['', ';', '{', '}', ')', '=>'].includes(p) || LABEL.test(src))) {
       const valueStart = end + gap + opLen;
       const stop = rhsEnd(valueStart);
       const rhs = code.slice(valueStart, stop).trim();
