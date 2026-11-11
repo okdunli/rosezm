@@ -91,7 +91,13 @@ const earlyHintLinks: string[] = (() => {
 const ready = createEdgeHandler(dist).then(async (h) => {
   handle = h;
   try {
-    mod = await import(new URL('./server.js', import.meta.url).href);
+    // The ESM server half, or the --cjs twin (a desktop package that keeps its
+    // code inside Electron's asar: the ESM file loader cannot read it).
+    try {
+      mod = await import(new URL('./server.js', import.meta.url).href);
+    } catch {
+      mod = await import(new URL('./server.cjs', import.meta.url).href);
+    }
     warmList = ['/', ...((mod.dynamicRoutes as string[]) || []).filter((r: string) => !r.includes(':'))];
     mod.invalidateRenderCache?.();
   } catch { /* warm list stays just the home route */ }
@@ -110,11 +116,14 @@ if (shouldWarm) ready.then(async (h) => {
     }).__oboeLoaders;
     const extra = await reg?.warmUrls?.();
     if (Array.isArray(extra)) {
-      warmList.push(
+      // the app's own warm list goes first: fixed dynamic routes that answer
+      // 302/404 (walled admin trees) would otherwise spend every slot
+      warmList.splice(1, 0,
         ...extra.filter((u): u is string => typeof u === 'string' && u.startsWith('/')).slice(0, 8),
       );
     }
   } catch { /* registry absent or the lookup failed - fixed routes still warm */ }
+  const bootStatus = new Map<string, number>();
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(4, warmList.length) }, async () => {
     while (next < warmList.length) {
@@ -122,6 +131,7 @@ if (shouldWarm) ready.then(async (h) => {
       try {
         const res = await runIsolated(() => h(new Request('http://localhost' + r)));
         const buf = await res.arrayBuffer();
+        bootStatus.set(r, res.status);
         const suspect = res.status === 200 && res.headers.get('content-type')?.includes('text/html') && buf.byteLength < 2048;
         console.log('[rosezm] warm', r, 'status=' + res.status, 'bytes=' + buf.byteLength, suspect ? 'SUSPECT-EMPTY' : '');
       } catch (e) {
@@ -129,6 +139,8 @@ if (shouldWarm) ready.then(async (h) => {
       }
     }
   }));
+  // a route with nothing to cache (a 302 wall, a 404) never gains from a re-warm
+  warmList = warmList.filter((r) => bootStatus.get(r) === 200);
 }).catch((e) => console.error('[rosezm] warm loop aborted:', (e as Error)?.stack ?? e));
 
 const hotCache = new Map<string, { raw: Buffer; br?: Buffer; gzip?: Buffer; headers: Record<string, string | string[]>; etag: string; fetchedAt: number; status?: number; refreshing?: boolean }>();
@@ -589,21 +601,54 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathna
         // not under this root; try the next one
       }
     }
+    // A --br-only tree carries each document once, as .br: decompress it into
+    // the cache entry so every later step (etag, negotiate, 304) is unchanged.
+    if (!st && pathname.endsWith('.html')) {
+      for (const root of resolveStaticRoots()) {
+        const candidate = path.join(root, pathname + '.br');
+        if (!candidate.startsWith(root)) continue;
+        try {
+          const s = fs.statSync(candidate);
+          if (!s.isFile()) continue;
+          const brBytes = fs.readFileSync(candidate);
+          st = s;
+          entry = {
+            filePath: candidate,
+            raw: zlib.brotliDecompressSync(brBytes),
+            br: brBytes,
+            gzip: undefined,
+            compressed: true,
+            etag: `W/"${brBytes.length}-${s.mtimeMs}"`,
+            mtimeMs: s.mtimeMs,
+            checkedAt: Date.now(),
+          };
+          break;
+        } catch {
+          // try the next root
+        }
+      }
+      if (entry) {
+        fileCache.set(pathname, entry);
+        if (fileCache.size > 500) fileCache.delete(fileCache.keys().next().value as string);
+      }
+    }
     if (!st) return false;
-    const raw = fs.readFileSync(filePath);
-    const compressed = raw.length > 1024 && !NO_COMPRESS_EXT.has(ext);
-    entry = {
-      filePath,
-      raw,
-      br: compressed ? (prebuiltBro(filePath, st.mtimeMs) ?? undefined) : undefined,
-      gzip: undefined,
-      compressed,
-      etag: `W/"${st.size}-${st.mtimeMs}"`,
-      mtimeMs: st.mtimeMs,
-      checkedAt: Date.now(),
-    };
-    fileCache.set(pathname, entry);
-    if (fileCache.size > 500) fileCache.delete(fileCache.keys().next().value as string);
+    if (!entry || entry.raw === undefined) {
+      const raw = fs.readFileSync(filePath);
+      const compressed = raw.length > 1024 && !NO_COMPRESS_EXT.has(ext);
+      entry = {
+        filePath,
+        raw,
+        br: compressed ? (prebuiltBro(filePath, st.mtimeMs) ?? undefined) : undefined,
+        gzip: undefined,
+        compressed,
+        etag: `W/"${st.size}-${st.mtimeMs}"`,
+        mtimeMs: st.mtimeMs,
+        checkedAt: Date.now(),
+      };
+      fileCache.set(pathname, entry);
+      if (fileCache.size > 500) fileCache.delete(fileCache.keys().next().value as string);
+    }
   }
   // Unreachable - the miss path above just built one - but it pins the type
   // for the whole serve half below without a second cache lookup.
@@ -712,14 +757,19 @@ const server = http.createServer(async (req, res) => {
       try { res.writeEarlyHints({ link: earlyHintLinks }); } catch { /* client gone: the render still finishes */ }
     }
     const replayable = req.method === 'GET' || req.method === 'HEAD';
+    // The socket peer rides the request object, not a header: a header is what
+    // the client writes (x-forwarded-for), and getContext().remoteAddress must
+    // be the address the connection really came from.
+    const peer = (req.socket as any)?.remoteAddress ?? (req.connection as any)?.remoteAddress;
+    const withPeer = (r: Request): Request => (peer ? Object.assign(r, { __rosezmPeer: peer }) : r);
     let response: Response;
     try {
-      response = await runIsolated(() => handle!(new Request(url, init)));
+      response = await runIsolated(() => handle!(withPeer(new Request(url, init))));
     } catch (err) {
       if (!replayable) throw err;
       console.warn('[rosezm] render failed, retrying once:', (err as Error)?.message ?? err);
       await new Promise((r) => setTimeout(r, 200));
-      response = await runIsolated(() => handle!(new Request(url, init)));
+      response = await runIsolated(() => handle!(withPeer(new Request(url, init))));
     }
     res.statusCode = response.status;
     // set-cookie is a list header: forEach delivers it per value and setHeader
@@ -791,8 +841,13 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (!process.env.VERCEL) {
-  server.listen(port, () => {
-    console.log(`🌹 rosezm prod server on http://localhost:${port}`);
+  // A bare listen(port) binds EVERY interface: the app (write endpoints
+  // included) answers the whole LAN, not just the machine that started it.
+  // Loopback is the safe default; a real deployment that must serve other
+  // hosts opts in explicitly with ROSEZM_HOST=0.0.0.0 (or a specific IP).
+  const host = process.env.ROSEZM_HOST || '127.0.0.1';
+  server.listen(port, host, () => {
+    console.log(`🌹 rosezm prod server on http://${host}:${port}`);
   });
 
   let stopping = false;

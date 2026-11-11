@@ -165,10 +165,34 @@ export async function createEdgeHandler(
       broken = new Set();
     }
   }
+  // The build bakes the config's CSP extensions (rosezm.config.js csp.connectSrc /
+  // csp.imgSrc) into dist/headers.json's default policy - computed in the build
+  // process, where setExtraCsp was live. This process never ran that build, so
+  // the runtime-computed policy here only ever carries the baseline. The tail
+  // (everything after the script-src clause) is the configured one; the
+  // script-src half stays runtime-computed, because it hashes the exact bytes
+  // THIS handler serves and a stale headers.json must not vouch for them.
+  let cspTailFromBuild = '';
+  if (preloaded && 'cspTail' in preloaded) {
+    cspTailFromBuild = (preloaded as { cspTail?: string }).cspTail ?? '';
+  } else {
+    try {
+      const baked = JSON.parse(await (await import('fs/promises')).readFile(join(outDir, 'headers.json'), 'utf-8')) as { default?: Record<string, string> };
+      const csp = Object.entries(baked.default ?? {}).find(([k]) => k.toLowerCase() === 'content-security-policy')?.[1] ?? '';
+      const semi = csp.indexOf(';');
+      if (semi > 0) cspTailFromBuild = csp.slice(semi + 1).trim();
+    } catch {
+      cspTailFromBuild = '';
+    }
+  }
 
   const pageHeaders = (pathname: string, nonce = ''): Record<string, string> => {
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(securityHeaders(clientFor(pathname), nonce))) headers[k.toLowerCase()] = v;
+    if (cspTailFromBuild && headers['content-security-policy']) {
+      const scriptSrc = headers['content-security-policy'].split(';')[0];
+      headers['content-security-policy'] = `${scriptSrc}; ${cspTailFromBuild}`;
+    }
     if (!headers['cache-control']) headers['cache-control'] = 'no-cache';
     const own = mod.headersFor?.(pathname);
     if (own) for (const [k, v] of Object.entries(own)) headers[k.toLowerCase()] = v;

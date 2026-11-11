@@ -15,6 +15,7 @@ import { assertEmittedJsParseable, buildProject, scanRoseFiles, scanComponentFil
 import { prunePrerendered } from '../compiler/rm-fast.js';
 import { getHtmlShell, getClientSource, getStyles, shellOpen, clientScriptTag, securityHeaders, mintNonce, setBundleMode, setExtraCsp } from './shell.js';
 import { generatePWA, injectPwaHead, type PwaOptions } from '../pwa.js';
+import { beginStageBatch, endStageBatch } from '../export/desktop-shell.js';
 import { AI_PROMPT } from './prompt.js';
 import { createEdgeHandler } from './edge.js';
 import { runShutdownHooks } from './shutdown.js';
@@ -349,10 +350,21 @@ async function build(): Promise<void> {
   // stays out of that mode (a CI parsing it broke when this line landed).
   if (!asJson) {
     const realSrc = (() => { try { return fs.realpathSync(SRC_DIR); } catch { return SRC_DIR; } })();
-    console.log(`rosezm build ${SRC_DIR}${realSrc === SRC_DIR ? '' : ` (realpath ${realSrc})`} -> ${OUT_DIR}`);
+    console.log(`build ${SRC_DIR}${realSrc === SRC_DIR ? '' : ` (realpath ${realSrc})`} -> ${OUT_DIR}`);
   }
   const minify = !devMode && !argv.includes('--no-minify');
-  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode });
+  // --static-routes '/' ,'/admin' : force-bake the named routes even when the
+  // prerender predicates skip them (a middleware wall, per-request state).
+  // --bake-cookie 'session=...' rides the middleware probe, so an app that
+  // handles auth in the packaged shell (Capacitor/WebView) can bake the
+  // document an authenticated visit would see. The caller owns the wall: a
+  // baked gated document ships gated content into static files.
+  const staticRoutes = (argv.find((a) => a.startsWith('--static-routes')) ? (flagArg('--static-routes') ?? '') : '')
+    .split(',').map((x) => x.trim()).filter(Boolean);
+  // `--pages /a,/blog/:id` prunes the tree to a route subset (a desktop
+  // client ships no /admin document and no admin JS).
+  const onlyPages = (flagArg('--pages') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const { routes, bundle, config } = await buildProject(SRC_DIR, OUT_DIR, { minify, incremental: devMode, pages: onlyPages.length ? onlyPages : undefined, cjs: argv.includes('--cjs') });
   // Before anything serves it: every emitted JS file must be JavaScript, not
   // TS that happens to look like it - the server bundle, the client bundle and
   // every split-mode chunk alike.
@@ -369,7 +381,7 @@ async function build(): Promise<void> {
   // to recompile, never re-render every route - the prerender/writeBrotli/analyze
   // passes are pure waste in the edit loop and, here, also dodge a sandbox that
   // blocks .br writes. Production (and --static verification) keeps them.
-  const skipped = devMode ? [] : await prerender(routes);
+  const skipped = devMode ? [] : await prerender(routes, staticRoutes, flagArg('--bake-cookie') ?? '');
   await writeIfChanged(path.join(OUT_DIR, 'broken.json'), JSON.stringify(skipped));
   const ssrModule = await loadServer();
   // Sliced mode: each route's document inlines its OWN bundle, so each route
@@ -395,7 +407,36 @@ async function build(): Promise<void> {
     default: securityHeaders(getClientSource()),
     routes: routeHeaders,
   }));
+  // The document shell, with the three places a baker fills in: the route's
+  // <head> tags, the SSR fragment, and the state script + inline bundle. A
+  // build that never prerendered still leaves this behind, so an Electron
+  // fallback (or any bake-the-document tool) assembles a REAL document from
+  // renderPage's fragment instead of res.end-ing bare markup.
+  await writeIfChanged(path.join(OUT_DIR, 'shell.html'),
+    getHtmlShell('<!--rosezm:app-->', '{}', [], true, 'en', '', '', true, null)
+      .replace('<div id="app"><!--rosezm:app--></div>', '<div id="app">\n    <!--rosezm:app-->\n  </div>')
+      .replace('<script type="application/json" id="__rosezm_state">{}</script>', '<!--rosezm:tail-->')
+      .replace('<title>rosezm</title>', '<title>rosezm</title>\n  <!--rosezm:head-->'));
   if (!devMode) await writeBrotli(OUT_DIR, brotliQuality);
+  // --br-only: a desktop package ships the prerendered documents once, as
+  // their .br sibling (a 2.3MB page + its 476KB copy becomes 476KB). The node
+  // servers decompress a raw-less document from its .br on first read, so
+  // nothing but disk bytes changes; a static host or the Go binary still
+  // needs the raw files, which is why this is opt-in.
+  if (argv.includes('--br-only') && !devMode) {
+    const walk = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...walk(full));
+        else out.push(full);
+      }
+      return out;
+    };
+    for (const f of walk(OUT_DIR)) {
+      if (f.endsWith('.html') && fs.existsSync(f + '.br')) fs.unlinkSync(f);
+    }
+  }
   if (!devMode) await analyze(OUT_DIR, (ssrModule.dynamicRoutes as string[] | undefined) ?? []);
 
   if (config.pwa) {
@@ -422,6 +463,7 @@ async function build(): Promise<void> {
       for (const p of problems) console.error(`  ${p}`);
       console.error('(getContext()/$store()/$query(), csp.nonce, buffer = true, an unbaked /api route, a param route with no export const params, or a route the middleware walled)');
       console.error('drop --static to build the normal dist (the dynamic half renders on demand on Node/edge)');
+      console.error('to bake selected routes anyway, drop --static and pass --static-routes <paths> (optionally --bake-cookie <cookie>)');
       process.exit(1);
     }
     console.log('rosezm: static export verified - every route is a baked file, no server needed');
@@ -609,7 +651,7 @@ async function analyze(outDir: string, dynamic: string[]): Promise<void> {
   };
   await walk(outDir, '');
   const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
-  const lines = ['rosezm build analysis (measured from dist/; br = the precompressed bytes the Go binary serves):'];
+  const lines = ['build analysis (measured from dist/; br = the precompressed bytes the Go binary serves):'];
   for (const r of rows.sort((a, b) => (a.route < b.route ? -1 : 1))) {
     lines.push(`  ${r.route.padEnd(16)}${kb(r.raw).padStart(9)} raw ${kb(r.gzip).padStart(8)} gzip ${kb(r.br).padStart(8)} br   ${r.js ? 'bundle inlined' : 'zero-JS'}`);
   }
@@ -650,7 +692,13 @@ async function runPool(tasks: Array<() => Promise<void>>, limit: number): Promis
   }));
 }
 
-async function prerender(routes: RouteInfo[]): Promise<string[]> {
+/** The value after a `--name value` flag on the build argv, or undefined. */
+function flagArg(name: string): string | undefined {
+  const at = argv.indexOf(name);
+  return at >= 0 ? argv[at + 1] : undefined;
+}
+
+async function prerender(routes: RouteInfo[], forcedRoutes: string[] = [], bakeCookie = ''): Promise<string[]> {
   const ssrModule = await loadServer();
   installContextStore(ssrModule);
   const skipped: string[] = [];
@@ -699,15 +747,24 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
   keep.add(path.join(OUT_DIR, 'package.json'));
   await prunePrerendered(OUT_DIR, keep);
 
-  const write = async (routePath: string, file: string) => {
+  const write = async (routePath: string, file: string, forced = false) => {
     await requestAls.run({}, async () => {
-      const mw = await ssrModule.runMiddleware({ method: 'GET', url: routePath, headers: {} });
+      // The bake cookie rides ONLY a forced route: a normal prerender probes
+      // anonymously, so naming one route never bake-authenticates the others.
+      const mw = await ssrModule.runMiddleware({ method: 'GET', url: routePath, headers: forced && bakeCookie ? { cookie: bakeCookie } : {} });
       if (mw) {
-        console.error(`prerender skipped for ${routePath}: the middleware short-circuits at build time`);
+        if (forced && bakeCookie) {
+          console.error(`prerender skipped for ${routePath}: the middleware still short-circuits with the bake cookie - the gate refuses this document`);
+        } else if (forced) {
+          console.error(`prerender skipped for ${routePath}: the middleware walls this route - supply --bake-cookie '<cookie>' to bake the document an authenticated visit sees`);
+        } else {
+          console.error(`prerender skipped for ${routePath}: the middleware short-circuits at build time`);
+        }
         skipped.push(routePath);
         await fs.promises.rm(file, { force: true });
         return;
       }
+      if (forced) console.log(`forced prerender of ${routePath} (--static-routes): the document is the build-time render - per-request state inside it is frozen`);
       ssrModule.setQuery?.({});
       const page = await ssrModule.renderPage(routePath);
       if (page.status === 500) {
@@ -716,7 +773,7 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
         await fs.promises.rm(file, { force: true });
         return;
       }
-      const html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false, ssrModule.sliceKeyFor?.(routePath) ?? null);
+      const html = getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false, ssrModule.sliceKeyFor?.(routePath) ?? null, (await loadConfig(SRC_DIR)).viewport ?? '');
       let prev: string | null = null;
       try { prev = await fs.promises.readFile(file, 'utf-8'); } catch { /* new file: always write */ }
       if (prev !== html) {
@@ -746,6 +803,41 @@ async function prerender(routes: RouteInfo[]): Promise<string[]> {
     console.error(`prerender skipped for ${routePath}: ${err instanceof Error ? err.message : err}`);
     skipped.push(routePath);
   })), PRERENDER_CONCURRENCY);
+
+  // --static-routes: the caller-named routes, baked even when the predicates
+  // above skipped them (a middleware wall, per-request state). A named route
+  // the planner never planned gets its file computed here; one the planner
+  // planned but the middleware skipped is retried with the bake cookie.
+  if (forcedRoutes.length) {
+    // An api route's body is JSON baked by the route's own `export const
+    // prerender = true`, not a document: forcing one would write an HTML
+    // index.html at the api path.
+    for (const routePath of forcedRoutes.filter((r) => r.startsWith('/api'))) {
+      console.error(`prerender skipped for ${routePath}: an api route bakes through its own 'export const prerender = true', not --static-routes`);
+    }
+    const plannedFiles = new Set(planned.map((p) => p.file));
+    const extra = forcedRoutes
+      .filter((routePath) => !routePath.startsWith('/api'))
+      .map((routePath) => {
+        const file = targetFile(routePath);
+        if (plannedFiles.has(file)) return null;
+        planned.push({ routePath, file });
+        keep.add(file);
+        keep.add(stateFile(file));
+        return { routePath, file };
+      })
+      .filter((entry): entry is { routePath: string; file: string } => entry !== null);
+    const retry = forcedRoutes.filter((routePath) => !routePath.startsWith('/api') && skipped.includes(routePath));
+    await runPool(
+      [
+        ...extra.map(({ routePath, file }) => () => write(routePath, file, true)),
+        ...retry.map((routePath) => () => write(routePath, targetFile(routePath), true)),
+      ].map((task) => () => task().catch((err) => {
+        console.error(`prerender skipped: ${err instanceof Error ? err.message : err}`);
+      })),
+      PRERENDER_CONCURRENCY,
+    );
+  }
 
   await runPool(apiPlanned.map((routePath) => async () => {
     try {
@@ -824,7 +916,7 @@ function revalidateInBackground(routePath: string, filePath: string): void {
         ssrModule.setQuery?.({});
         const page = await ssrModule.renderPage(routePath);
         if (page.status === 200) {
-          await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false, ssrModule.sliceKeyFor?.(routePath) ?? null));
+          await fs.promises.writeFile(filePath, getHtmlShell(page.html, page.state, page.head, page.csr !== false, page.lang, page.dir, '', page.shell !== false, ssrModule.sliceKeyFor?.(routePath) ?? null, (await loadConfig(SRC_DIR)).viewport ?? ''));
           fileCache.delete(filePath);
           console.log(`rosezm: revalidated ${routePath} in the background`);
         }
@@ -1463,6 +1555,50 @@ function serveStatic(dir: string, isr = false, dev = false): (req: any, res: any
       // Dev renders documents on demand, so a stale prerendered file never wins
       // over the freshly-recompiled server. Production still serves from disk.
       const isDocInDev = devMode && path.extname(filePath).toLowerCase() === '.html';
+      // A --br-only tree carries the document once, as .br: decompress it into
+      // the same cache entry so the negotiate/etag path below is unchanged.
+      if (!isDynamic && !isDocInDev && !fs.existsSync(filePath) && filePath.endsWith('.html') && fs.existsSync(filePath + '.br')) {
+        const st = fs.statSync(filePath + '.br');
+        let entry = fileCache.get(filePath);
+        if (!entry || entry.mtimeMs !== st.mtimeMs) {
+          const brBytes = fs.readFileSync(filePath + '.br');
+          entry = {
+            mtimeMs: st.mtimeMs,
+            raw: zlib.brotliDecompressSync(brBytes),
+            br: brBytes,
+            gzip: undefined,
+            compressible: true,
+            etag: `W/"${brBytes.length}-${st.mtimeMs}"`,
+          };
+          fileCache.set(filePath, entry);
+        }
+        const ext2 = path.extname(filePath);
+        const types2: Record<string, string> = { '.html': 'text/html' };
+        const rev2 = ((ssrModule.revalidate as { pattern: string; seconds: number }[]) || [])
+          .find((r) => ssrModule.matchRoute(r.pattern, pathnameOf(req.url)));
+        const headers2: Record<string, string> = {
+          'Content-Type': types2[ext2] || 'application/octet-stream',
+          'Cache-Control': rev2 ? `public, max-age=0, stale-while-revalidate=${rev2.seconds}` : 'public, max-age=3600',
+          'ETag': entry.etag,
+        };
+        Object.assign(headers2, pageHeaders(ssrModule, pathnameOf(req.url)));
+        for (const [k, v] of Object.entries(headers2)) res.setHeader(k, v);
+        addVary(res, 'Accept-Encoding');
+        if (ifNoneMatch(req.headers['if-none-match'], entry.etag)) {
+          res.statusCode = 304;
+          res.end();
+          return;
+        }
+        const enc2 = pickEncoding(req);
+        res.statusCode = 200;
+        if (enc2) {
+          res.setHeader('Content-Encoding', enc2);
+          res.end(enc2 === 'deflate' ? compress('deflate', entry.raw) : encodedFile(entry, enc2));
+        } else {
+          res.end(entry.raw);
+        }
+        return;
+      }
       if (!isDynamic && !isDocInDev && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         const st = fs.statSync(filePath);
         const rev = isAsset ? undefined : ((ssrModule.revalidate as { pattern: string; seconds: number }[]) || [])
@@ -1802,9 +1938,10 @@ async function dev(): Promise<void> {
     // prune/prerender window serves stale documents. node_modules and .git
     // are noise for the same reason.
     if (filename) {
-      // Windows 云盘（BaiduSync 等）回灌的事件 filename 可能带前导反斜杠或混合分隔符
-      // （实测 '\.rosezm\routes.ts'）；先剥前导分隔符再统一归一，否则排除检查漏判，
-      // rebuild 自己写出的 routes.ts 会再次触发 rebuild —— 自触发死循环。
+      // A sync client feeding events back (BaiduSync on Windows did) can hand
+      // over a filename with a leading backslash or mixed separators; strip it
+      // before normalising, or the exclude check misses and the routes.ts this
+      // rebuild itself wrote triggers another rebuild, forever.
       const norm = String(filename).replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
       const segs = norm.split('/').filter(Boolean);
       if (segs.some((s) => s === 'dist' || s === 'node_modules' || s === '.git' || s === '.rosezm' || s === '.rosezm-build' || s === '.rosezm-dev')) return;
@@ -1822,11 +1959,11 @@ async function dev(): Promise<void> {
       } catch {
         // filename can be null (fs.watch omits it when unavailable): path.extname
         // would throw on null, and an uncaught throw in this callback takes the
-        // whole dev server down. statSync 失败还有第三种情况：事件是云盘/编辑器
-        // 对「排除目录」（dist/.rosezm/…）的回灌，文件名带前导分隔符或目录级事件，
-        // stat 找不到文件。这里不做和主路径一样的排除归一检查，delete/rename 的
-        // 回灌事件就会命中 SOURCE_EXT，devDirtyMid 自我延续 —— rebuild 循环的
-        // 另一半根源。
+        // whole dev server down. The third case: the event is a sync client or
+        // editor echoing back an excluded directory (dist/, .rosezm/), with a
+        // leading separator or as a directory-level event, so stat finds
+        // nothing. Without the same normalisation the main path does, an echoed
+        // delete/rename matches SOURCE_EXT and the rebuild loop feeds itself.
         const name = String(filename ?? '');
         const norm = name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
         const segs = norm.split('/').filter(Boolean);
@@ -2318,7 +2455,7 @@ async function check(): Promise<void> {
   }
 
   const nextTo = (rel: string[]) => rel.map((r) => fileURLToPath(new URL(r, import.meta.url))).find((p) => fs.existsSync(p));
-  const typesFile = nextTo(['../types/rosezm.d.ts', '../src/types/rosezm.d.ts']);
+  const typesFile = nextTo(['./types/rosezm.d.ts', '../types/rosezm.d.ts', '../src/types/rosezm.d.ts']);
   if (!typesFile) {
     console.error('rosezm: the type definitions (src/types/rosezm.d.ts) were not found next to the compiler');
     process.exit(1);
@@ -2487,6 +2624,122 @@ function humanBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+async function assetsCmd(): Promise<void> {
+  const projectRoot = path.resolve(process.argv[3] ?? '.');
+  const { emitAssets } = await import('../export/assets.js');
+  const report = await emitAssets(projectRoot);
+  console.log(`🌹 rosezm assets -> ${report.written.length} picture(s) laid out`);
+  for (const w of report.written) console.log(`  wrote ${w}`);
+  for (const nx of report.next) console.log(`  next: ${nx}`);
+}
+
+/** `rosezm doctor`: the toolchain, item by item. Every target names the tools
+ *  it needs; this walks the whole list and says what is missing before an
+ *  export discovers it mid-build. A check that would download something
+ *  (npx-curling a CLI that is not installed) never runs - the shell CLIs are
+ *  only reported when they are installed locally. */
+async function doctorCmd(): Promise<void> {
+  const rows: Array<{ name: string; ok: boolean; note: string }> = [];
+  const probe = (name: string, cmd: string, args: string[], note: string): void => {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 15_000 });
+    const version = (r.stdout || r.stderr || '').split('\n')[0].trim();
+    rows.push({ name, ok: r.status === 0, note: r.status === 0 ? version.slice(0, 60) : note });
+  };
+  const localBin = (name: string, bin: string, note: string): void => {
+    const p = path.join('node_modules', '.bin', process.platform === 'win32' ? `${bin}.cmd` : bin);
+    rows.push({ name, ok: fs.existsSync(p), note: fs.existsSync(p) ? 'installed locally' : `${note} (npm i ${bin === 'cap' ? '@capacitor/cli' : bin} - the export will not download it)` });
+  };
+  rows.push({ name: 'node', ok: true, note: process.version });
+  probe('npm', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version'], 'npm not found');
+  probe('tsc', path.join('node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc'), ['--version'], 'no local typescript (npm i -D typescript) - `rosezm check` needs it');
+  probe('javac', 'javac', ['-version'], 'no JDK - the android gate and its compile check are skipped without it');
+  probe('gradle', 'gradle', ['--version'], 'no gradle - android APK builds need it (or Android Studio)');
+  probe('adb', 'adb', ['version'], 'no adb - --install cannot reach a device without it');
+  probe('flutter', 'flutter', ['--version'], 'no flutter - the flutter target compiles without it');
+  probe('dotnet', 'dotnet', ['--version'], 'no dotnet - the WPF target compiles without it');
+  probe('go', 'go', ['version'], 'no go - the single-binary server builds without it');
+  localBin('cap', 'cap', 'no Capacitor CLI');
+  localBin('cordova', 'cordova', 'no Cordova CLI');
+  localBin('ionic', 'ionic', 'no Ionic CLI');
+  console.log('rosezm doctor:');
+  for (const row of rows) console.log(`  ${row.ok ? '✓' : '·'} ${row.name.padEnd(9)} ${row.note}`);
+  const missing = rows.filter((r) => !r.ok).length;
+  console.log(missing ? `${missing} tool(s) missing - only the targets that need them are affected; the rest export fine` : 'the whole toolchain is present');
+}
+
+/** `rosezm version <major|minor|patch|X.Y.Z> [dir]`: one version number for
+ *  every platform. The webapp's package.json and the app identity read the
+ *  same semver, and the native versionName/versionCode derive from it - so
+ *  the bump writes both files here and the next export carries it. A bare
+ *  `rosezm version` prints what is on record. */
+async function versionCmd(): Promise<void> {
+  // Two spellings: `version <bump> [dir]` and `version [dir] <bump>` - the
+  // bump is whichever argument names an amount, the dir the other one.
+  const isBump = (a?: string) => !!a && /^(major|minor|patch|\d+\.\d+\.\d+)$/.test(a);
+  const bumpArg = process.argv.slice(3).find(isBump);
+  const dirArg = process.argv.slice(3).find((a) => a && !a.startsWith('-') && !isBump(a));
+  const projectRoot = path.resolve(dirArg ?? '.');
+  const bump = bumpArg ?? '';
+  const identityPath = path.join(projectRoot, 'rosezm.app.json');
+  const pkgPath = path.join(projectRoot, 'package.json');
+  const current = (() => {
+    try { return JSON.parse(fs.readFileSync(identityPath, 'utf8')).version as string; } catch { return null; }
+  })();
+  if (!bump) {
+    const pkgVersion = (() => { try { return JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version as string; } catch { return '(no package.json)'; } })();
+    console.log(`app: ${current ?? '(no rosezm.app.json)'}  webapp: ${pkgVersion}`);
+    console.log('usage: rosezm version <major|minor|patch|X.Y.Z> [dir]');
+    return;
+  }
+  if (!current) {
+    console.error('rosezm version: no rosezm.app.json in this project - an app identity is what carries the version to every store');
+    process.exit(1);
+  }
+  const [maj = '0', min = '0', pat = '0'] = current.split('.');
+  let next: string;
+  if (/^\d+\.\d+\.\d+$/.test(bump)) next = bump;
+  else if (bump === 'major') next = `${Number(maj) + 1}.0.0`;
+  else if (bump === 'minor') next = `${maj}.${Number(min) + 1}.0`;
+  else next = `${maj}.${min}.${Number(pat) + 1}`;
+  const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+  identity.version = next;
+  fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2) + '\n', 'utf8');
+  let webapp = '';
+  if (fs.existsSync(pkgPath)) {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    pkg.version = next;
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+    webapp = ' + package.json';
+  }
+  console.log(`🌹 rosezm version: ${current} -> ${next} (rosezm.app.json${webapp})`);
+}
+
+/** `rosezm build --target electron` -> build + export one desktop target.
+ *  exportCmd() reads its target from process.argv[2], so temporarily place
+ *  the target there and restore the original argv afterwards. */
+async function exportCmdWithTarget(target: string): Promise<void> {
+  const saved = process.argv.slice();
+  // Rebuild argv as `rosezm export <target> [projectDir] [flags]`:
+  // drop the original verb (`build`), the --target pair, and any positional
+  // directory that preceded the flags; exportCmd reads target at argv[2].
+  const rest = saved.slice(2);
+  const flags: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--target') { i++; continue; }         // consume its value too
+    if (a.startsWith('-')) { flags.push(a); continue; }
+  }
+  // exportCmd computes rest = argv.slice(2) and reads rest[1] as the target:
+  // rest[0] must stay the command verb, so the synthesized argv is
+  // [node, script, 'export', target, ...flags] -> rest[0]='export', rest[1]=target.
+  process.argv = [saved[0], saved[1], 'export', target, ...flags];
+  try {
+    await exportCmd();
+  } finally {
+    process.argv = saved;
+  }
+}
+
 async function exportCmd(): Promise<void> {
   const { exportProject, treeSize, isTarget, targetList, TARGETS } = await import('../export/index.js');
   // argv[0] is the command itself (`export`), argv[1] the target, argv[2] the dir.
@@ -2501,7 +2754,7 @@ async function exportCmd(): Promise<void> {
     }
     console.log('rosezm export targets:');
     for (const row of rows) console.log(`  ${row.status === 'ready' ? '✓' : '·'} ${row.name.padEnd(10)} ${row.family.padEnd(13)} ${row.summary}`);
-    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--build] [--watch] [--json]');
+    console.log('\nUsage: rosezm export <target|all> [dir] [--api <base>] [--out <dir>] [--kernel <path>] [--build] [--watch] [--install] [--json]');
     return;
   }
   // `export surface` prints what a vendored consumer may key on: the module
@@ -2541,21 +2794,29 @@ async function exportCmd(): Promise<void> {
     const startedAll = Date.now();
     const done: string[] = [];
     const failures: Array<{ target: string; error: string }> = [];
-    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; bytes?: number; files?: number; ms?: number; error?: string }> = [];
+    const allResults: Array<{ target: string; pages: number; components: number; outDir: string; warnings: number; bytes?: number; files?: number; ms?: number; error?: string; kernelChecks?: number }> = [];
     // One target's failure must not hide the other sixteen: a batch command
     // reports everything it did, everything that failed, and exits non-zero
     // only after it has actually finished trying.
+    // ONE cargo target dir for the whole batch: the four kernel targets
+    // (rust-core/web/mobile/native) share the same dependency tree, and a
+    // shared target dir lets cargo compile serde/serde_json/regex once
+    // instead of once per target (~6s of the batch's first run).
+    const manifestRoot = path.resolve(outRootAll ?? path.join(projectRootAll, '.rosezm-export'));
+    process.env.ROSEZM_KERNEL_TARGET_DIR = path.join(manifestRoot, '.rosezm-kernel-target');
+    beginStageBatch(projectRootAll);
+    try {
     for (const info of Object.values(TARGETS)) {
       if (info.status !== 'ready') continue;
       try {
         const at = Date.now();
-        const result = await exportProject(info.name, projectRootAll, { apiBase: apiAll, outRoot: outRootAll, globalCss: readGlobalCss(cssAll), cloud: rest.includes('--cloud') ? true : undefined, cloudEnv: flagAll('--cloud-env') });
+        const result = await exportProject(info.name, projectRootAll, { apiBase: apiAll, outRoot: outRootAll, globalCss: readGlobalCss(cssAll), cloud: rest.includes('--cloud') ? true : undefined, cloudEnv: flagAll('--cloud-env'), force: rest.includes('--force'), clean: rest.includes('--clean') });
         // What the tree costs on disk, and what it took: the two numbers a team
         // shipping seventeen targets actually argues about.
         const size = await treeSize(result.outDir);
         const ms = Date.now() - at;
-        allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length, bytes: size.bytes, files: size.files, ms });
-        if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) ${humanBytes(size.bytes).padStart(9)} ${String(ms).padStart(5)}ms -> ${result.outDir}`);
+        allResults.push({ target: info.name, pages: result.pages.length, components: result.components.length, outDir: result.outDir, warnings: result.warnings.length, bytes: size.bytes, files: size.files, ms, kernelChecks: result.kernelChecks });
+        if (!asJson) console.log(`  ${info.name.padEnd(10)} ${String(result.pages.length).padStart(3)} page(s) ${humanBytes(size.bytes).padStart(9)} ${String(ms).padStart(5)}ms gate:${result.kernelChecks ?? '-'} -> ${result.outDir}`);
         done.push(info.name);
       } catch (err) {
         allResults.push({ target: info.name, pages: 0, components: 0, outDir: '', warnings: 0, error: err instanceof Error ? err.message : String(err) });
@@ -2563,11 +2824,21 @@ async function exportCmd(): Promise<void> {
         if (!asJson) console.log(`  ${info.name.padEnd(10)} FAILED - ${err instanceof Error ? err.message.split(String.fromCharCode(10))[0] : String(err)}`);
       }
     }
+    } finally {
+      endStageBatch();
+      delete process.env.ROSEZM_KERNEL_TARGET_DIR;
+    }
     // One file a CI can read: `export all` writes seventeen trees, and this is
     // the index that says where each one landed.
-    const manifestRoot = path.resolve(outRootAll ?? path.join(projectRootAll, '.rosezm-export'));
     try {
       await fs.promises.mkdir(manifestRoot, { recursive: true });
+      // The batch's shared cargo cache must not ride into the first commit.
+      const giPath = path.join(manifestRoot, '.gitignore');
+      const giLine = '.rosezm-kernel-target/';
+      const gi = await fs.promises.readFile(giPath, 'utf8').catch(() => '');
+      if (!gi.split(/\r?\n/).includes(giLine)) {
+        await fs.promises.writeFile(giPath, gi + (gi === '' || gi.endsWith('\n') ? '' : '\n') + giLine + '\n', 'utf8');
+      }
       await fs.promises.writeFile(path.join(manifestRoot, 'rosezm-export-all.json'), JSON.stringify({
         framework: 'rosezm',
         generatedBy: 'rosezm export all',
@@ -2609,6 +2880,8 @@ async function exportCmd(): Promise<void> {
   };
   const apiBase = flag('--api');
   const outRoot = flag('--out');
+  const kernelPath = flag('--kernel');
+  const kernelRoot = flag('--kernel-root');
   const info = TARGETS[target];
   if (info.status !== 'ready') {
     console.error(`rosezm export: "${target}" (${info.summary}) is planned, not implemented yet.\nShipping targets today:\n${targetList()}`);
@@ -2619,6 +2892,9 @@ async function exportCmd(): Promise<void> {
   // a stale first frame. Running the project's own build first (as a child, so
   // it sees the same command a user would type) keeps the two in step.
   const withBuild = rest.includes('--build');
+  // --install only means something for a target with a device build; the other
+  // targets ignore it rather than pretending.
+  const withInstall = rest.includes('--install') && (target === 'android' || target === 'capacitor' || target === 'cordova' || target === 'ionic');
   const runProjectBuild = (): boolean => {
     // Inside the project, so its dist/ lands next to its own sources - the
     // export bakes from THAT tree, never from wherever the shell happened to be.
@@ -2637,13 +2913,34 @@ async function exportCmd(): Promise<void> {
   }
   const cloudMode = rest.includes("--cloud");
   const cloudEnvRaw = flag("--cloud-env");
+  // Say "watching" BEFORE the first export: it can take longer than a
+  // consumer's startup timeout when a build lock is held elsewhere. The
+  // loop keeps watching either way, so this line is true from here on.
+  let watchStartedAt = 0;
+  if (rest.includes('--watch')) {
+    const srcRootEarly = path.join(projectRoot, 'src');
+    if (fs.existsSync(srcRootEarly)) {
+      console.log(`  watching ${path.relative(process.cwd(), srcRootEarly)} - Ctrl+C to stop`);
+      // An edit made while the first export runs would be invisible to the
+      // fs.watch set up below; the timestamp lets the loop catch it.
+      watchStartedAt = Date.now();
+    }
+  }
   const result = await exportProject(target, projectRoot, {
     apiBase,
+    force: rest.includes('--force'),
+    clean: rest.includes('--clean'),
     outRoot: outRoot ? path.resolve(outRoot) : undefined,
+    kernelPath: kernelPath ? path.resolve(kernelPath) : undefined,
+    kernelRoot: kernelRoot ?? undefined,
     cloud: cloudMode ? true : undefined,
     cloudEnv: cloudEnvRaw,
+    webview: target === 'arkts' && rest.includes('--webview') ? true : undefined,
     globalCss: readGlobalCss(flag('--css')),
   });
+  // BUG 71: the re-export loop closes itself - www is new, the native dirs
+  // may be old. The quiet form keeps the --json envelope clean.
+  if (target === 'capacitor' || target === 'cordova' || target === 'ionic') syncWebViewShell(target, result.outDir, asJson);
   if (asJson) {
     process.stdout.write(`${JSON.stringify({
       ok: true,
@@ -2658,7 +2955,7 @@ async function exportCmd(): Promise<void> {
   }
   const rel = path.relative(process.cwd(), result.outDir) || result.outDir;
   console.log(`🌹 rosezm v${version()} export ${target} -> ${rel}`);
-  console.log(`  ${result.pages.length} page(s), ${result.components.length} component(s) in ${Date.now() - started}ms`);
+  console.log(`  ${result.pages.length} page(s), ${result.components.length} component(s) in ${Date.now() - started}ms${result.kernelChecks !== undefined ? `, gate ran ${result.kernelChecks} cargo check(s)` : ''}`);
   {
     // What it costs on disk: the number a team shipping a native app asks for
     // first, and the one nobody could answer before.
@@ -2674,6 +2971,10 @@ async function exportCmd(): Promise<void> {
     }
   }
   if (result.pages.length) console.log(`  pages: ${result.pages.join(', ')}`);
+  if (withInstall) {
+    if (target === 'android') installAndroid(result.outDir);
+    else installWebViewShell(target, result.outDir);
+  }
   // Warnings grouped by kind: 38 one-line notes from one page is noise, not
   // information. --json keeps the full list for a tool.
   const grouped = new Map<string, number>();
@@ -2719,7 +3020,16 @@ async function exportCmd(): Promise<void> {
           cloudEnv: cloudEnvRaw,
           globalCss: readGlobalCss(flag('--css')),
         });
-        console.log(`↻ ${next.pages.length} page(s), ${next.components.length} component(s) in ${Date.now() - at}ms${next.warnings.length ? ` - ${next.warnings.length} warning(s)` : ''}`);
+        console.log(`↻ ${next.pages.length} page(s), ${next.components.length} component(s) in ${Date.now() - at}ms${next.warnings.length ? ` - ${next.warnings.length} warning(s)` : ''}${next.kernelChecks !== undefined ? `, gate ${next.kernelChecks}` : ''}`);
+        // BUG 73: the watch loop for a WebView shell needs the sync - www is
+        // new, the native project still holds the old copy until the shell's
+        // own CLI copies it. The install (when asked) runs after it, so the
+        // device gets the new www, not the old one.
+        if (target === 'capacitor' || target === 'cordova' || target === 'ionic') syncWebViewShell(target, next.outDir, true);
+        if (withInstall) {
+          if (target === 'android') installAndroid(next.outDir);
+          else installWebViewShell(target, next.outDir);
+        }
       } catch (err) {
         // The tree on disk is the last good one; the page that broke it is the
         // user's next edit.
@@ -2732,11 +3042,93 @@ async function exportCmd(): Promise<void> {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => { void again(); }, 120);
     });
-    // Printed AFTER the watch is armed: a save made the instant this line shows
-    // up used to land in the gap before fs.watch existed and was lost - the
-    // watcher then sat there until the next edit.
-    console.log(`  watching ${path.relative(process.cwd(), srcRoot)} - Ctrl+C to stop`);
+    // Catch edits the watcher could not see (they landed during the first
+    // export). One stat walk is cheaper than losing the change.
+    const newest = (dir: string): number => {
+      let best = 0;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) best = Math.max(best, newest(full));
+        else if (/\.(rose|json|css)$/.test(e.name)) best = Math.max(best, fs.statSync(full).mtimeMs);
+      }
+      return best;
+    };
+    if (watchStartedAt && newest(srcRoot) > watchStartedAt) void again();
   }
+}
+
+/** The WebView shells deploy through their own CLI: `cap run android` /
+ *  `cordova run android` build the native project on first run (npx fetches
+ *  the CLI if the shell does not pin it) and install on the attached device.
+ *  A missing CLI or phone is a named note, never a failed export. */
+/** BUG 71: a re-export must not rely on the developer remembering `cap sync`.
+ *  When the native platform dirs are already there (a previous `cap add`) AND
+ *  the shell's own CLI is installed locally in the export, run the sync right
+ *  after the export writes www. Anything else - a first export, a missing CLI
+ *  (a surprise download is worse than a printed command) - stays a no-op: the
+ *  deploy manual's steps still own the first run. */
+function syncWebViewShell(target: string, outDir: string, quiet = false): void {
+  const hasPlatform = fs.existsSync(path.join(outDir, 'android')) || fs.existsSync(path.join(outDir, 'ios'));
+  if (!hasPlatform) return;
+  const name = target === 'cordova' ? 'cordova' : target === 'ionic' ? 'ionic' : 'cap';
+  const bin = path.join(outDir, 'node_modules', '.bin', process.platform === 'win32' ? `${name}.cmd` : name);
+  if (!fs.existsSync(bin)) return;
+  const args = target === 'cordova' ? ['prepare'] : target === 'ionic' ? ['capacitor', 'sync'] : ['sync'];
+  const run = spawnSync(bin, args, { cwd: outDir, stdio: quiet ? ['ignore', 'ignore', 'inherit'] : 'inherit' });
+  if (run.status !== 0) {
+    console.error(`  sync skipped - \`${name} ${args.join(' ')}\` did not finish (run it by hand to see why)`);
+    return;
+  }
+  // stderr even on success: in --json mode stdout is the envelope, and a
+  // progress line is human output no matter the mode. The quiet form (the
+  // watch loop) says nothing - one line per rebuild is already the news.
+  if (!quiet) console.error(`  synced the native projects (${name} ${args.join(' ')})`);
+}
+
+function installWebViewShell(target: string, outDir: string): void {
+  const cmd = target === 'cordova' ? 'cordova' : target === 'ionic' ? 'ionic' : 'cap';
+  const args = ['run', 'android'];
+  // The export's own CLI first, then whatever the PATH carries, and npx --
+  // which downloads from the registry when it finds neither - only as the
+  // last resort. npm 11's npx no longer consults the PATH, so the direct
+  // spawns are what make a stubbed CI check (and an offline box) work.
+  const local = path.join(outDir, 'node_modules', '.bin', process.platform === 'win32' ? `${cmd}.cmd` : cmd);
+  let run = fs.existsSync(local)
+    ? spawnSync(local, args, { cwd: outDir, stdio: 'inherit' })
+    : spawnSync(cmd, args, { cwd: outDir, stdio: 'inherit' });
+  if (run.status === null || run.error) {
+    run = spawnSync('npx', ['--yes', cmd, ...args], { cwd: outDir, stdio: 'inherit' });
+  }
+  if (run.status !== 0) {
+    console.error(`  install skipped - \`${cmd} run android\` did not finish (is a device attached, and the Android SDK on PATH?)`);
+    return;
+  }
+  console.log(`  installed on the connected device (${cmd} run android)`);
+}
+
+/** `--install`: put the freshly exported Android tree on the attached device.
+ *  The native half of the "save, see it run" loop the web dev server already
+ *  gives. A missing SDK or an unplugged phone is a named note, never a failed
+ *  export - the tree on disk is still the truth. */
+function installAndroid(outDir: string): void {
+  const gradlew = path.join(outDir, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
+  const cmd = fs.existsSync(gradlew) ? gradlew : 'gradle';
+  const r = spawnSync(cmd, ['installDebug', '--console=plain'], { cwd: outDir, stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error(`  install skipped - \`${cmd} installDebug\` did not finish (is a device attached, and the Android SDK on PATH?)`);
+    return;
+  }
+  console.log('  installed on the connected device (gradle installDebug)');
+  // Installing replaces the APK; only a launch shows the change. The activity
+  // lives in the framework's fixed package, the app id is the project's own.
+  const gradleFile = path.join(outDir, 'app', 'build.gradle.kts');
+  const appId = (() => {
+    try { return /applicationId\s*=\s*"([^"]+)"/.exec(fs.readFileSync(gradleFile, 'utf8'))?.[1] ?? ''; } catch { return ''; }
+  })();
+  if (!appId) return;
+  const launch = spawnSync('adb', ['shell', 'am', 'start', '-n', `${appId}/dev.rosezm.app.MainActivity`], { stdio: 'inherit' });
+  if (launch.status === 0) console.log(`  launched ${appId} on the device`);
+  else console.error('  installed, but the launch was skipped - is `adb` on PATH?');
 }
 
 const argv = process.argv.slice(2);
@@ -2765,11 +3157,25 @@ function reportFailure(err: unknown): never {
 }
 
 if (cmd === 'dev') void dev().catch(reportFailure);
+else if (cmd === 'build' && argv.includes('--target')) {
+  // `rosezm build --target electron` is the documented desktop workflow:
+  // build the web bundle from source first, then emit the Electron shell.
+  // (buildProject inside emitElectron does its own from-source build too,
+  // so this never trusts a stale dist/.)
+  const t = flagArg('--target');
+  if (t !== 'electron') reportFailure(new Error(`rosezm build --target: unknown target '${t}' (supported: electron)`));
+  else void build()
+    .then(() => exportCmdWithTarget('electron'))
+    .catch(reportFailure);
+}
 else if (cmd === 'build') void build().catch(reportFailure);
 else if (cmd === 'preview') void preview().catch(reportFailure);
 else if (cmd === 'serve') void serve().catch(reportFailure);
 else if (cmd === 'new') void scaffold().catch(reportFailure);
 else if (cmd === 'check') void check().catch(reportFailure);
 else if (cmd === 'export') void exportCmd().catch(reportFailure);
+else if (cmd === 'assets') void assetsCmd().catch(reportFailure);
+else if (cmd === 'version') void versionCmd().catch(reportFailure);
+else if (cmd === 'doctor') void doctorCmd().catch(reportFailure);
 else if (cmd === 'prompt') console.log(AI_PROMPT);
-else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud] [--build] [--watch]` compiles the same pages to 5 mini programs, 4 native mobile targets, 1 store-ready WebView shell and 8 desktop/server runtimes - 18 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');
+else console.log('Usage: rosezm dev|build|preview|serve|new|check|export|prompt [dir] [--json] [--static] [--no-minify] [--strict-port] [--static-routes <paths>] [--bake-cookie <cookie>]   (dir defaults to the current directory; dist/ is written there; --json prints build failures as machine-readable JSON; --static verifies the build is deployable with no server at all; --static-routes force-bakes the named routes even when a wall or per-request state skips them; --no-minify keeps server.js/prod.mjs unminified for debugging; --strict-port binds the asked port or exits instead of hopping; `new <name> [--template blog|api|admin|site]` scaffolds a project; `export <target|all> [dir] [--api <base>] [--out <dir>] [--css <file|dir>] [--cloud] [--webview] [--build] [--watch] [--install] [--force] [--clean]` compiles the same pages to 5 mini programs, 4 native mobile targets, 3 store-ready WebView shells and 8 desktop/server runtimes, 5 Rust targets (a std-only static server, a native wry/tao desktop shell, a full-stack web server, a mobile FFI kernel, and a standalone rust-ts kernel crate) and a Vue 3/Vite shell - 27 targets, one source tree; `export surface [--json]` prints the public API surface a vendored gate can pin)');

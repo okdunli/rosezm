@@ -548,15 +548,20 @@ export function clientScriptTag(client: string | null, nonce = ''): string {
  * docAttrs). The streaming path flushes this string BEFORE the render, so
  * the browser gets the language metadata in the first byte.
  */
-export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', shell = true): string {
+export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', shell = true, viewport = ''): string {
   const styleTag = styles ? `\n  <style>${styles}</style>` : '';
-  const demoStyles = shell ? `\n  <style>${STYLES_MIN}</style>` : '';
+  // The scaffold demo CSS (body padding: 2rem, pink links, rh/rb/rn classes)
+  // is for bare pages with NO app stylesheet. Mixing it into a real app that
+  // ships a _layout.rose global stylesheet pushes every edge 32px inward -
+  // a desktop app can never be flush to the window (dodovim-desktop
+  // 2026-11-04). Only ship it when the app has no styles of its own.
+  const demoStyles = shell && !styleTag ? `\n  <style>${STYLES_MIN}</style>` : '';
   const appOpen = shell ? `\n  <div id="app">` : '';
   return `<!DOCTYPE html>
 <html lang="${lang}"${dir ? ` dir="${dir}"` : ''}>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="${viewport || 'width=device-width, initial-scale=1.0'}">
   <title>rosezm</title>${demoStyles}${styleTag}
   ${FAVICON}
 </head>
@@ -564,7 +569,7 @@ export function shellOpen(styles: string = getStyles(), lang = 'en', dir = '', s
 }
 
 /** Build the document from an explicit client source (edge runtimes have no fs). */
-export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = '', shell = true): string {
+export function buildShell(ssrHtml: string, stateJson: string, client: string | null, head: string[] = [], styles: string = getStyles(), js = true, lang = 'en', dir = '', nonce = '', shell = true, viewport = ''): string {
   const mergedHead = mergeHeadBlocks(head);
   const headStamped = nonce
     ? mergedHead.replace(/<script\b([^>]*)>/gi, (m, attrs: string) => (/\bnonce=/.test(attrs) ? m : `<script${attrs} nonce="${nonce}">`))
@@ -590,13 +595,13 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
     : '';
   const open = js && shell ? '<div id="app">' : '';
   const close = js && shell ? '</div>' : '';
-  const shellStyles = js && shell ? `\n  <style>${STYLES_MIN}</style>` : '';
+  const shellStyles = js && shell && !styleTag ? `\n  <style>${STYLES_MIN}</style>` : '';
 
   return `<!DOCTYPE html>
 <html${htmlAttrs}>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">${headTags}${iconTag}
+  <meta name="viewport" content="${viewport || 'width=device-width, initial-scale=1.0'}">${headTags}${iconTag}
   ${titleTag}${shellStyles}${styleTag}
 </head>
 <body${bodyAttrs}>
@@ -606,8 +611,8 @@ export function buildShell(ssrHtml: string, stateJson: string, client: string | 
 }
 
 /** Node entry: reads dist/client.js from disk (mtime-cached). */
-export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = '', nonce = '', shell = true, routeKey: string | null = null): string {
+export function getHtmlShell(ssrHtml: string, stateJson: string, head: string[] = [], js = true, lang = 'en', dir = '', nonce = '', shell = true, routeKey: string | null = null, viewport = ''): string {
   // Sliced mode: routeKey names the route's own inline bundle (the server's
   // sliceKeyFor); null keeps the runtime-only core.
-  return buildShell(ssrHtml, stateJson, getClientSource(routeKey), head, getStyles(), js, lang, dir, nonce, shell);
+  return buildShell(ssrHtml, stateJson, getClientSource(routeKey), head, getStyles(), js, lang, dir, nonce, shell, viewport);
 }
