@@ -1,0 +1,41 @@
+# rosezm - Capacitor APK build (GitHub Actions).
+#
+# `rosezm export capacitor` copies this file into the export tree as
+# .github/workflows/capacitor.yml. The native android/ directory is generated
+# by `cap add` here (the export ships the web half; the native half is
+# Capacitor's, not the framework's), then gradle builds the APK.
+
+name: Capacitor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: npm ci
+        run: npm ci
+
+      # First run generates android/; later runs keep it (cap add refuses to
+      # overwrite, so the guard makes the workflow idempotent).
+      - name: cap add android
+        run: test -d android || npx cap add android
+
+      - name: cap sync
+        run: npx cap sync android
+
+      - name: gradle assembleDebug
+        run: android/gradlew -p android assembleDebug

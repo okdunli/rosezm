@@ -1,0 +1,38 @@
+# rosezm - Ionic Capacitor APK build (GitHub Actions).
+#
+# `rosezm export ionic` copies this file into the export tree as
+# .github/workflows/ionic.yml. The Ionic shell is Capacitor underneath, so the
+# flow is `ionic capacitor add android` once, then sync + gradle.
+
+name: Ionic
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: npm ci
+        run: npm ci
+
+      - name: ionic capacitor add android
+        run: test -d android || npx ionic capacitor add android
+
+      - name: ionic capacitor sync
+        run: npx ionic capacitor sync android
+
+      - name: gradle assembleDebug
+        run: android/gradlew -p android assembleDebug

@@ -1,0 +1,37 @@
+# rosezm - Cordova APK build (GitHub Actions).
+#
+# `rosezm export cordova` copies this file into the export tree as
+# .github/workflows/cordova.yml. Cordova generates the native platform here
+# (`cordova platform add android`), then builds through its own CLI.
+
+name: Cordova
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: npm ci
+        run: npm ci
+
+      # Idempotent: the platform dir survives between runs only if committed;
+      # `add` refuses an existing platform, so guard it.
+      - name: cordova platform add android
+        run: test -d platforms/android || npx cordova platform add android
+
+      - name: cordova build android
+        run: npx cordova build android

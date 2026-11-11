@@ -21,17 +21,22 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig' | 'electron';
+export type NativeScaffoldTarget = 'android' | 'xcode' | 'flutter' | 'wails' | 'tauri' | 'zig' | 'vue' | 'rust' | 'electron' | 'capacitor' | 'cordova' | 'ionic';
 
 /** One workflow per target, keyed by the export target name. */
 const TEMPLATES: Record<NativeScaffoldTarget, { workflow: string; label: string }> = {
   wails: { workflow: 'wails.yml', label: 'wails' },
   tauri: { workflow: 'tauri.yml', label: 'tauri' },
   zig: { workflow: 'zig.yml', label: 'zig' },
+  vue: { workflow: 'vue.yml', label: 'vue' },
+  rust: { workflow: 'rust.yml', label: 'rust' },
   android: { workflow: 'android.yml', label: 'android' },
   xcode: { workflow: 'ios.yml', label: 'xcode' },
   flutter: { workflow: 'flutter.yml', label: 'flutter' },
   electron: { workflow: 'electron.yml', label: 'electron' },
+  capacitor: { workflow: 'capacitor.yml', label: 'capacitor' },
+  cordova: { workflow: 'cordova.yml', label: 'cordova' },
+  ionic: { workflow: 'ionic.yml', label: 'ionic' },
 };
 
 /**
@@ -86,9 +91,9 @@ export async function writeDeployScaffold(
     written.push(path.relative(exportRoot, dest).replace(/\\/g, '/'));
   };
 
-  // The Flutter workflow and manual create the platform runners with the
-  // project's own store identity (org + package name); a hardcoded pair would
-  // make every export collide on `dev.rosezm.rosezm_app`.
+  // The Flutter workflow creates the platform runners with the project's own
+  // store identity (org + package name); a hardcoded pair would make every
+  // export collide on `dev.rosezm.rosezm_app`.
   const fill = (text: string): string => text
     .replaceAll('__ROSEZM_ORG__', vars.org ?? 'dev.rosezm')
     .replaceAll('__ROSEZM_PROJECT__', vars.project ?? 'rosezm_app');

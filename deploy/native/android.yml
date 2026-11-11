@@ -38,6 +38,19 @@ jobs:
       - name: gradle assembleRelease
         run: gradle assembleRelease
 
+      # BUG 66: the store bundle. An .aab is what Play actually accepts; the
+      # unsigned bundle still builds here, so a signing misstep fails the
+      # build, not the upload.
+      - name: gradle bundleRelease
+        run: gradle bundleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            app/build/outputs/apk/release/app-release-unsigned.apk
+            app/build/outputs/bundle/release/app-release-unsigned.aab
+
       - uses: actions/upload-artifact@v4
         with:
           name: rosezm-android-release
