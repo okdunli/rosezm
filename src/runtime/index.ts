@@ -119,9 +119,66 @@ export function state<T>(key: string, initial: T): [() => T, (v: T) => void] {
       
 }
 
-export function hasState(key: string): boolean {
-  return renderMaps().signals.has(key);
+export function hasState(key: string): boolean {  return renderMaps().signals.has(key);
       /* a stale cleanup must not kill the route */
+}
+
+/**
+ * A two-way binding on an {#each} ROW FIELD: `bind:checked={item.done}`.
+ *
+ * The write replaces the OWNING ARRAY with a copy that swaps the row by
+ * REFERENCE - the render closure's item IS the array element, so an identity
+ * find locates the row however the list reordered (a keyed each's state
+ * follows its key). The field itself is applied through setPath, so nested
+ * row paths (`item.meta.done`) copy each level on the way down.
+ */
+export function writeRowField(
+  setter: (v: unknown) => void,
+  items: unknown[],
+  row: unknown,
+  path: string[],
+  value: unknown,
+): void {
+  if (!Array.isArray(items)) return;
+  let hit = false;
+  const next = items.map((r) => {
+    if (r !== row) return r;
+    hit = true;
+    return setPath(r, path, value);
+  });
+  // The row left the list between the render and the event: nothing to
+  // write back, and nothing to say.
+  if (hit) setter(next);
+}
+
+/**
+ * A two-way binding on a MEMBER PATH: `bind:value={form.name}` writes
+ * `form.name` back into the state that owns it.
+ *
+ * The write is IMMUTABLE - the path's owner is replaced with a copy that
+ * carries the new value - so the signal's value changes identity and the
+ * fine-grained patch fires, exactly like `form = { ...form, name: v }`
+ * written by hand. A mutation in place (`form.name = v`) would leave the
+ * signal's value identical and nothing would re-render.
+ *
+ * The path's first segment names the owner: a `$state` holding an object.
+ * A deeper path walks into nested objects, copying each level on the way.
+ */
+export function setPath(owner: unknown, path: string[], value: unknown): unknown {
+  if (!path.length) return value;
+  const [head, ...rest] = path;
+  if (Array.isArray(owner)) {
+    const idx = Number(head);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= owner.length) return owner;
+    const next = owner.slice();
+    next[idx] = setPath(next[idx], rest, value);
+    return next;
+  }
+  if (!owner || typeof owner !== 'object') return owner;
+  const src = owner as Record<string, unknown>;
+  const next = { ...src };
+  next[head] = rest.length ? setPath(src[head], rest, value) : value;
+  return next;
 }
 
 // === Per-RENDER $data seeding === The compiled `$data(() => loader())` prologue is const __seeded = isSeeded("k"); const [get.
@@ -236,17 +293,42 @@ export function resetContainerFx(container: object): void {
 }
 
 export function effect(fn: () => void): Cleanup {
-  const wrapped: Subscriber = () => {
+  type Eff = Subscriber & { __deps?: Set<SignalEntry> };
+  const wrapped: Eff = () => {
+    if (wrapped.__deps) {
+      for (const e of wrapped.__deps) e.subs.delete(wrapped);
+      wrapped.__deps.clear();
+    }
+    const prev = currentEffect;
+    const prevTracking = trackingDeps;
+    const own: Set<SignalEntry> = new Set();
+    wrapped.__deps = own;
+    trackingDeps = own;
+    currentEffect = wrapped;
     try {
       fn();
     } catch {
+      /* a throwing effect must not kill the route */
+    } finally {
+      currentEffect = prev;
+      trackingDeps = prevTracking;
     }
   };
   const prev = currentEffect;
+  const prevTracking = trackingDeps;
+  const init: Set<SignalEntry> = new Set();
+  wrapped.__deps = init;
+  trackingDeps = init;
   currentEffect = wrapped;
-  fn();
-  currentEffect = prev;
+  try {
+    fn();
+  } catch {
+  } finally {
+    currentEffect = prev;
+    trackingDeps = prevTracking;
+  }
   const cleanup: Cleanup = () => {
+    if (wrapped.__deps) for (const e of wrapped.__deps) e.subs.delete(wrapped);
     renderMaps().signals.forEach((e: { subs: Set<Subscriber> }) => e.subs.delete(wrapped));
     // $store() boxes live in a separate map: detach them too, or a live store
     // patch keeps re-running an unmounted effect (stale render + leak).
@@ -257,7 +339,6 @@ export function effect(fn: () => void): Cleanup {
   return cleanup;
 }
 
-// F43: `$effect(fn)` - the reactive effect rune. Client-only (SSR: a no-op, fn never fires).
 export function $effect(fn: () => void | (() => void)): Cleanup {
   if (typeof document === 'undefined') return () => {};
   // SSR: no DOM, nothing changes
@@ -468,14 +549,15 @@ export function rawMark(closes: Close[], fn: Close, arg?: unknown): string {
  */
 export function slotBlockMark(
   closes: Close[],
-  hit: { o: Record<string, unknown>; fn: (o: unknown, c: Close[]) => unknown } | null
+  hit: { o: Record<string, unknown>; fn: (o: unknown, c: Close[], si?: string) => unknown } | null,
+  suffix?: string
 ): string {
   if (!hit) return '';
   const i = closes.push(() => {
     if (!hit) return null;
-    return { html: String(untrack(() => hit.fn(hit.o, closes))), closes, scope: hit.o };
+    return { html: String(untrack(() => hit.fn(hit.o, closes, suffix))), closes, scope: hit.o };
   }) - 1;
-  return `<!--\u27e6i:${i}\u27e7-->` + String(untrack(() => hit.fn(hit.o, closes))) + `<!--\u27e6/i:${i}\u27e7-->`;
+  return `<!--\u27e6i:${i}\u27e7-->` + String(untrack(() => hit.fn(hit.o, closes, suffix))) + `<!--\u27e6/i:${i}\u27e7-->`;
 }
 
 const MARK_RE = /^\u27e6([milh]):(\d+)\u27e7$/;
@@ -604,7 +686,7 @@ export function applyHead(html: string): void {
     }
     if (seen.has(managed)) continue;
     seen.add(managed);
-    // AQ (R345): an entry the head ALREADY carries - the SSR render put it
+    // AQ : an entry the head ALREADY carries - the SSR render put it
     // there and the state re-shipped the same string - must not be inserted
     // twice (a 72 KB inline style arrived twice and doubled the page's CSS).
     // Same id: identical content adopts the existing node in place; different
@@ -945,7 +1027,7 @@ export function wire(root: Node, closes: Array<unknown>, scope?: unknown): Clean
         b.end.remove();
       }
     }
-    // BH (R492): a route with no head markers does NOT clear here. On the
+    // BH : a route with no head markers does NOT clear here. On the
     // first paint the document head is the server's, and a dynamically
     // rendered page ships its <style data-rosezm-head> in <head> with no
     // body marker to rebuild it from - clearing wiped every style. The
@@ -1637,16 +1719,16 @@ export async function isolateRender<T>(fn: () => Promise<T>): Promise<T> {
 const renderMutexCell = sharedCell<Promise<void>>('__rosezm_renderMutex', Promise.resolve());
 
 let requestQuery: Record<string, string> = {};
-/** R248: the request-scoped query slot in the context-store bag. */
+/** The request-scoped query slot in the context-store bag. */
 const REQUEST_QUERY = Symbol('requestQuery');
-/** R249: the in-flight prefetch's query, beside it in the same bag. */
+/** The in-flight prefetch's query, beside it in the same bag. */
 const PREFETCH_OVERRIDE = Symbol('prefetchOverride');
 let prefetchOverride: Record<string, string> | null = null;
 
 export function $query(): Record<string, string> {
   const prefetch = getPrefetchOverride();
   if (prefetch) return prefetch;
-  // R248: server-side reads the request-scoped bag, not the module-level one.
+  // Server-side reads the request-scoped bag, not the module-level one.
   if (typeof location === 'undefined') return getRequestQuery();
   const q: Record<string, string> = {};
   new URLSearchParams(location.search).forEach((v, k) => { q[k] = v; });
@@ -1654,7 +1736,7 @@ export function $query(): Record<string, string> {
 }
 
 /** The per-request query object - the servers call this before every render.
- *  R248: under a context store it lives IN that request's scope. It used to be a
+ * under a context store it lives IN that request's scope. It used to be a
  *  module-level bag, so two concurrent requests in one process read each other's
  *  query - `/api/slow?say=a` and `?say=f` both saw `f`. That is a real cross-user
  *  leak (a search term or a token in the query string), not a cosmetic one. */
@@ -1681,7 +1763,7 @@ export function getRequestQuery(): Record<string, string> {
 }
 
 /** The query of the route a prefetch is rendering, or null outside one.
- *  R249: request-scoped for the same reason as the query itself. This used to be
+ * request-scoped for the same reason as the query itself. This used to be
  *  a module-level variable set before an `await` and cleared after, so two
  *  concurrent prefetches overwrote each other: the `?q=cats` render read
  *  `undefined` because the `?q=dogs` render had already nulled it. The HTML that
@@ -1775,6 +1857,37 @@ export function installContextStore(store: ContextStore | null): void {
 export function getContext(): Record<string, unknown> {
   const scoped = contextStore?.getStore();
   return scoped ?? requestContext;
+}
+
+/**
+ * The address the request really came from.
+ *
+ * A Node host knows its socket peer, and that peer is the truth: `x-forwarded-for`
+ * is a header any client can write, so trusting it by default let a direct
+ * deployment's rate limit be bypassed with one line of curl. Behind a proxy the
+ * peer is the proxy itself, so an operator lists it - `ROSEZM_TRUSTED_PROXIES`
+ * (comma-separated IPs, or `*`) - and only then does the header name the visitor.
+ * An edge runtime has no socket at all: the platform strips spoofed headers
+ * before the worker sees the request, so the header is what is left.
+ */
+export function clientAddress(raw: any): string | null {
+  if (!raw) return null;
+  const header = (name: string): string => {
+    const h = raw.headers;
+    if (!h) return '';
+    const v = typeof h.get === 'function' ? h.get(name) : h[name] ?? h[name.toLowerCase()];
+    return v == null ? '' : String(v);
+  };
+  // A proxy chain names the client first; a dual-stack socket spells an IPv4
+  // peer as ::ffff:1.2.3.4, which no allow-list would match.
+  const first = (v: string): string => v.split(',')[0].trim().replace(/^::ffff:/i, '');
+  const forwarded = first(header('cf-connecting-ip')) || first(header('x-real-ip')) || first(header('x-forwarded-for'));
+  const socket = String(raw.__rosezmPeer ?? raw.socket?.remoteAddress ?? raw.connection?.remoteAddress ?? '').trim().replace(/^::ffff:/i, '');
+  if (!socket) return forwarded || null;
+  const env = (globalThis as any).process?.env ?? {};
+  const trust = String(env.ROSEZM_TRUSTED_PROXIES ?? '').split(',').map((s: string) => s.trim()).filter(Boolean);
+  const proxied = trust.includes('*') || trust.includes(socket);
+  return proxied && forwarded ? forwarded : socket;
 }
 
 /**
@@ -2969,6 +3082,26 @@ export function $cookies(request?: Request): Record<string, string> {
     if (k) out[k] = decodeURIComponent(part.slice(eq + 1).trim());
   }
   return out;
+}
+
+/**
+ * True when the request came to a LOOPBACK name: `localhost`, `*.localhost`,
+ * `127.0.0.1`...`127.255.255.255`, or `[::1]`. A desktop shell that serves the
+ * app to itself (Electron/Tauri/Wails webview) can gate convenience switches
+ * on this - `?auth=off` for a ready probe, a debug branch - so the switch is
+ * reachable only from the machine that runs the app, never from the LAN. The
+ * host comes from the Host header, which only a local process can claim.
+ */
+export function $isLocal(request?: Request): boolean {
+  let host = '';
+  if (request) {
+    try { host = new URL(request.url).hostname; } catch { host = ''; }
+  } else if (typeof location !== 'undefined') {
+    host = location.hostname;
+  }
+  host = host.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host.endsWith('.localhost') || host === '::1'
+    || /^127\.(?:\d{1,3}\.){2}\d{1,3}$/.test(host);
 }
 
 /**

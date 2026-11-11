@@ -68,6 +68,10 @@ declare function $sessionCookie(
   opts?: { path?: string; maxAge?: number; sameSite?: 'Strict' | 'Lax' | 'None'; secure?: boolean; httpOnly?: boolean }
 ): string;
 
+/** True when the request reached a loopback name (localhost/127.x/[::1]) -
+ *  the gate a desktop shell puts in front of a convenience switch. */
+declare function $isLocal(request?: Request): boolean;
+
 /** Run once after the client has adopted the server's DOM. */
 declare function onMount(fn: () => void): void;
 
@@ -81,6 +85,19 @@ declare function refresh(): Promise<void>;
 
 /** HTML-escape a value into a string (the same escape the template markers use). */
 declare function esc(v: unknown): string;
+
+/**
+ * The one cross-platform system-capability call: `useNative('clipboard-write', { text })`,
+ * `useNative('fs-read', { path })`, `useNative('window-open', { route: '/ai' })`...
+ * The wired targets rewrite it into their platform's own API; an unimplemented
+ * pair answers `null` (the contract's "empty answer", never a crash). The full
+ * capability table and each capability's return shape live in the export
+ * surface (`rosezm export surface`).
+ */
+declare function useNative(
+  capability: string,
+  options?: Record<string, unknown>,
+): Promise<unknown>;
 
 /** Call a server action by name; the response is adopted in place. */
 declare function $action(name: string, e?: Event): Promise<void>;
