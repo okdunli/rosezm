@@ -133,7 +133,7 @@ const assert = (cond: boolean, msg: string) => {
 const app = document.getElementById('app')!;
 assert(!!app, 'app container present');
 assert(app.textContent!.includes('Welcome to rosezm'), 'SSR content rendered by the real server');
-// R185: the dev bridge opens an EventSource. A browser always has the API, but a
+// The dev bridge opens an EventSource. A browser always has the API, but a
 // non-browser embed (this jsdom suite, an older webview) does not - and an
 // unguarded `new EventSource` throws a ReferenceError that took the whole inline
 // bundle down, so the page that HAD rendered appeared empty. The runtime's own
@@ -635,7 +635,7 @@ try {
 const apiGet = await fetch(BASE + '/api/hello');
 assert(apiGet.status === 200, 'GET /api/hello -> 200');
 assert((apiGet.headers.get('content-type') || '').includes('application/json'), 'the api response is application/json');
-// R197: the validator layer left the HTML lane, so a JSON API answers with a
+// The validator layer left the HTML lane, so a JSON API answers with a
 // content-derived weak tag - the handler's own bytes, never the baked file's
 // size/mtime pair. What this assertion actually pins is that the LIVE handler
 // answered: a static-file exit would publish the file's own validator, and the
@@ -1011,6 +1011,23 @@ await tick();
   const missing = await fetch(BASE + '/__rosezm/data?path=/definitely-not-a-route');
   const missPayload = await missing.json() as { status: number };
   assert(missing.status === 200 && missPayload.status === 404, 'an unknown path answers a JSON 404 envelope, never the HTML shell');
+}
+
+// A component's exported server action dispatches through its host page. The
+// action table used to carry page actions only, so a POST for a form inside a
+// component silently did nothing (unknown name, no error) - the example app
+// ships one such component at /component-act.
+{
+  const actPage = await fetch(BASE + '/component-act');
+  assert(actPage.status === 200, `the component-action page renders (got ${actPage.status})`);
+  const actPost = await fetch(BASE + '/component-act', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ __action: 'submit', name: 'ada' }).toString(),
+  });
+  const actHtml = await actPost.text();
+  assert(actPost.status === 200, `a component action POST answers 200 (got ${actPost.status})`);
+  assert(actHtml.includes('done-ada'), 'a component action runs and its patch reaches the render');
 }
 
 console.log(`\nAll end-to-end checks passed - one request, zero hydration, fine-grained DOM - ${checks} assertions.`);

@@ -11,6 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { createRequire } from 'node:module';
@@ -86,7 +87,15 @@ assert(built.code === 0, `rosezm build <dir> exits 0 on a foreign project (stder
 // Which tree was compiled used to be invisible: a staged build pointed at the
 // wrong directory and nothing in the output said so. The first line now names
 // the project (and its realpath when it resolves through a symlink).
-assert(built.out.split('\n')[0].startsWith(`rosezm build ${fs.realpathSync(app)}`) || built.out.split('\n')[0].startsWith(`rosezm build ${app}`), `the build names the tree it compiles (${built.out.split('\n')[0]})`);
+// The CLI dropped the "rosezm " prefix from the build banner (r624
+// concurrent cleanup). Accept both spellings - the assertion's point is
+// that the line names the tree it compiles, not the exact brand prefix.
+const banner = built.out.split('\n')[0];
+assert([`rosezm build ${fs.realpathSync(app)}`, `rosezm build ${app}`, `build ${fs.realpathSync(app)}`, `build ${app}`].some((p) => banner.startsWith(p)), `the build names the tree it compiles (${banner})`);
+// R635: whatever the brand prefix, the banner MUST name the project dir
+// (and its realpath when it resolves through a symlink). A banner that
+// only says "build" would hide the wrong-tree mistake all over again.
+assert(banner.includes(fs.realpathSync(app)) || banner.includes(app), `R635: the build banner names the tree (${banner})`);
 const home = path.join(REPO, 'dist', 'index.html');
 assert(fs.existsSync(home), 'the build wrote dist/index.html');
 assert(fs.readFileSync(home, 'utf-8').includes('Guestbook'), 'the foreign project really rendered (its home page is in dist/)');
@@ -104,6 +113,12 @@ assert(fs.existsSync(path.join(app, 'dist', 'index.html')), 'the default project
 const parentBuilt = await run(['build', app], tmp);
 assert(parentBuilt.code === 0, 'rosezm build <dir> works from any cwd');
 assert(fs.existsSync(path.join(tmp, 'dist', 'index.html')), 'the output lands in ./dist of the cwd, wherever the project lives');
+// The bake-ready document shell: a build that never prerendered still leaves
+// the three bake points behind, so a baker assembles real documents from
+// renderPage's fragment (the Electron fallback is the in-repo consumer).
+const bakedShell = fs.readFileSync(path.join(tmp, 'dist', 'shell.html'), 'utf8');
+assert(bakedShell.includes('<!--rosezm:app-->') && bakedShell.includes('<!--rosezm:tail-->') && bakedShell.includes('<!--rosezm:head-->'), 'every build ships dist/shell.html with the three bake points');
+assert(bakedShell.toLowerCase().includes('<!doctype html>') && bakedShell.includes('<style>'), 'the baked shell carries the document head and the compiled styles');
 
 const bare = path.join(tmp, 'bare');
 fs.mkdirSync(path.join(bare, 'src', 'pages'), { recursive: true });
@@ -138,6 +153,7 @@ assert(usage.out.includes('[dir]') && usage.out.includes('current directory'), '
 // A native target is a build artifact: the edit loop is "save a .rose, get a
 // new tree", so the export grew a watcher instead of one-shot-only.
 assert(usage.out.includes('--watch') && usage.out.includes('--build'), 'the usage line documents the export watcher and its build step');
+assert(usage.out.includes('--install'), 'the usage line documents the one-command device install');
 
 {
   const watchRoot = path.join(tmp, 'watch-proj');
@@ -159,16 +175,200 @@ assert(usage.out.includes('--watch') && usage.out.includes('--build'), 'the usag
   };
   const first = await waitFor('watching', 30_000);
   assert(first, `the export watcher starts and says what it watches (${log.slice(-200)})`);
+  // The announcement must be BEFORE the first export (a build lock held by
+  // another process used to delay it past the startup timeout).
+  const watcherSrc = fs.readFileSync(path.join(REPO, 'src', 'cli', 'index.ts'), 'utf8');
+  const announceAt = watcherSrc.indexOf("console.log(`  watching ");
+  const exportAt = watcherSrc.indexOf('const result = await exportProject(target, projectRoot, {');
+  assert(announceAt !== -1 && exportAt !== -1 && announceAt < exportAt, 'R567: the watcher announces itself before the first export');
   fs.writeFileSync(watchPage, '<h1>watch again</h1>\n');
   const second = await waitFor('\u21bb', 30_000);
   assert(second, `the watcher re-exports on a save (${log.slice(-200)})`);
   assert(fs.readFileSync(path.join(watchOut, 'android', 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8').includes('watch again'), 'the re-export wrote the edited page');
   child.kill();
 }
+// BUG 73: --watch on a WebView shell syncs the native project on every
+// rebuild - www is new, and without the sync the device still runs the old
+// copy. A stub `cap` records the sync; the watch loop proves it fires after
+// an edit, not just once at startup.
+if (process.platform !== 'win32') {
+  const shellWatchRoot = path.join(tmp, 'shell-watch-proj');
+  fs.mkdirSync(path.join(shellWatchRoot, 'src', 'pages'), { recursive: true });
+  fs.mkdirSync(path.join(shellWatchRoot, 'dist'), { recursive: true });
+  const shellPage = path.join(shellWatchRoot, 'src', 'pages', 'index.rose');
+  fs.writeFileSync(shellPage, '<h1>shell watch</h1>\n');
+  fs.writeFileSync(path.join(shellWatchRoot, 'dist/index.html'), '<!DOCTYPE html><html><head></head><body>hi</body></html>');
+  fs.writeFileSync(path.join(shellWatchRoot, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.myapp', name: 'My App', version: '1.0.0', slug: 'my-app' }));
+  const shellWatchOut = path.join(tmp, 'shell-watch-out');
+  await run(['export', 'capacitor', shellWatchRoot, '--out', shellWatchOut], REPO);
+  const shellCapDir = path.join(shellWatchOut, 'capacitor');
+  const shellBin = path.join(shellCapDir, 'node_modules', '.bin');
+  fs.mkdirSync(shellBin, { recursive: true });
+  const shellFakeCap = path.join(shellBin, 'cap');
+  fs.writeFileSync(shellFakeCap, `#!/bin/sh\necho "$@" >> "$(dirname "$0")/sync-args.txt"\nexit 0\n`);
+  fs.chmodSync(shellFakeCap, 0o755);
+  fs.mkdirSync(path.join(shellCapDir, 'android'), { recursive: true });
+  let shellLog = '';
+  const shellChild = spawn(process.execPath, [...TSX, 'export', 'capacitor', shellWatchRoot, '--out', shellWatchOut, '--watch'], { cwd: REPO, env: { ...process.env, NO_COLOR: '1' } });
+  shellChild.stdout.on('data', (d) => { shellLog += String(d); });
+  shellChild.stderr.on('data', (d) => { shellLog += String(d); });
+  const waitForShell = async (needle, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (shellLog.includes(needle)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return shellLog.includes(needle);
+  };
+  await waitForShell('watching', 30_000);
+  fs.writeFileSync(shellPage, '<h1>shell watch again</h1>\n');
+  await waitForShell('\u21bb', 30_000);
+  await new Promise((r) => setTimeout(r, 2500));
+  shellChild.kill();
+  const shellSyncArgs = fs.existsSync(path.join(shellBin, 'sync-args.txt')) ? fs.readFileSync(path.join(shellBin, 'sync-args.txt'), 'utf8') : '';
+  assert(shellSyncArgs.includes('sync'), `the shell watch syncs the native project on a rebuild (${JSON.stringify(shellSyncArgs)})`);
+}
+// BUG 68: one version number for every platform - the bump writes the app
+// identity and the webapp package.json, and the next export derives the
+// native versionName/versionCode from it.
+{
+  const verProj = path.join(tmp, 'version-proj');
+  fs.mkdirSync(path.join(verProj, 'src', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(verProj, 'src/pages/index.rose'), '<h1>version</h1>\n');
+  fs.writeFileSync(path.join(verProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.myapp', name: 'My App', version: '1.2.3', slug: 'my-app' }, null, 2) + '\n');
+  fs.writeFileSync(path.join(verProj, 'package.json'), JSON.stringify({ name: 'my-app', version: '1.2.3' }, null, 2) + '\n');
+  const verRun = (args) => run(['version', ...args, verProj], REPO);
+  const printed = await verRun([]);
+  assert(printed.out.includes('app: 1.2.3'), 'rosezm version prints what is on record');
+  const bumped = await verRun(['patch']);
+  const appVer = JSON.parse(fs.readFileSync(path.join(verProj, 'rosezm.app.json'), 'utf8')).version;
+  const pkgVer = JSON.parse(fs.readFileSync(path.join(verProj, 'package.json'), 'utf8')).version;
+  assert(bumped.code === 0 && appVer === '1.2.4' && pkgVer === '1.2.4', `the patch bump writes both files (${appVer}/${pkgVer})`);
+  await verRun(['minor']); await verRun(['major']);
+  assert(JSON.parse(fs.readFileSync(path.join(verProj, 'rosezm.app.json'), 'utf8')).version === '2.0.0', 'the major bump resets minor and patch');
+  await verRun(['9.9.9']);
+  assert(JSON.parse(fs.readFileSync(path.join(verProj, 'rosezm.app.json'), 'utf8')).version === '9.9.9', 'an explicit semver is taken verbatim');
+  const noIdentity = await run(['version', 'major', tmp], REPO);
+  assert(noIdentity.code !== 0 && noIdentity.err.includes('no rosezm.app.json'), 'a project without an app identity is refused, not silently skipped');
+}
+// BUG 77: `rosezm doctor` walks the whole toolchain and says what is missing
+// before an export discovers it mid-build - and never downloads anything.
+{
+  const doc = await run(['doctor'], REPO);
+  assert(doc.code === 0 && doc.out.includes('rosezm doctor:'), 'doctor runs and reports');
+  assert(doc.out.includes('✓ node'), 'doctor reports the node it runs on');
+  assert(doc.out.includes('· javac') || doc.out.includes('✓ javac'), 'doctor checks the JDK the android gate needs');
+  assert(/toolchain is present|tool\(s\) missing/.test(doc.out), 'doctor ends with the verdict');
+  // In this repo's own node_modules cap/cordova/ionic are absent: the report
+  // says so and names the install command, without downloading anything.
+  assert(doc.out.includes('the export will not download it'), 'doctor names the shell CLIs without downloading them');
+}
+
+// --install closes the native loop: export writes the Gradle tree, gradle puts
+// it on the attached device. A stub `gradle` on PATH proves the command, the
+// cwd (the exported tree) and the report - without an SDK or a phone.
+if (process.platform !== 'win32') {
+  const binDir = path.join(tmp, 'fake-gradle-bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const fakeGradle = path.join(binDir, 'gradle');
+  fs.writeFileSync(fakeGradle, `#!/bin/sh\npwd > "$(dirname "$0")/install-cwd.txt"\necho "$@" > "$(dirname "$0")/install-args.txt"\nexit 0\n`);
+  fs.chmodSync(fakeGradle, 0o755);
+  const installProj = path.join(tmp, 'install-proj');
+  fs.mkdirSync(path.join(installProj, 'src', 'pages'), { recursive: true });
+  fs.writeFileSync(path.join(installProj, 'src', 'pages', 'index.rose'), '<h1>install</h1>\n');
+  const installOut = path.join(tmp, 'install-out');
+  // A stub adb records the launch: installing an APK replaces it, but only a
+  // start shows the change, so --install closes the loop with `am start`.
+  const fakeAdb = path.join(binDir, 'adb');
+  fs.writeFileSync(fakeAdb, `#!/bin/sh\necho "$@" > "$(dirname "$0")/launch-args.txt"\nexit 0\n`);
+  fs.chmodSync(fakeAdb, 0o755);
+  const inst = await run(['export', 'android', installProj, '--out', installOut, '--install'], REPO, { PATH: binDir + path.delimiter + process.env.PATH });
+  const instCwd = fs.existsSync(path.join(binDir, 'install-cwd.txt')) ? fs.readFileSync(path.join(binDir, 'install-cwd.txt'), 'utf8').trim() : '';
+  const instArgs = fs.existsSync(path.join(binDir, 'install-args.txt')) ? fs.readFileSync(path.join(binDir, 'install-args.txt'), 'utf8').trim() : '';
+  assert(inst.code === 0 && inst.out.includes('installed on the connected device'), `--install runs the device build (${inst.err.slice(-160)})`);
+  assert(instArgs.includes('installDebug'), '--install asks gradle for installDebug');
+  const sameDir = instCwd && fs.existsSync(instCwd) && fs.realpathSync(instCwd) === fs.realpathSync(path.join(installOut, 'android'));
+  assert(sameDir, `--install runs inside the exported tree (${instCwd})`);
+  const launchArgs = fs.existsSync(path.join(binDir, 'launch-args.txt')) ? fs.readFileSync(path.join(binDir, 'launch-args.txt'), 'utf8').trim() : '';
+  assert(launchArgs === 'shell am start -n dev.rosezm.app/dev.rosezm.app.MainActivity', `--install launches the app it just installed (${launchArgs})`);
+  assert(inst.out.includes('launched dev.rosezm.app on the device'), '--install says the app is on screen');
+}
+// BUG 72: --install covers the three WebView shells too - the shell CLI's own
+// device build (`cap run android` and friends) is the install. A stub CLI per
+// shell records the command without a device.
+if (process.platform !== 'win32') {
+  for (const [target, cli] of [['capacitor', 'cap'], ['cordova', 'cordova'], ['ionic', 'ionic']]) {
+    const shellInstallBin = path.join(tmp, `install-${target}-bin`);
+    fs.mkdirSync(shellInstallBin, { recursive: true });
+    const shellFake = path.join(shellInstallBin, cli);
+    fs.writeFileSync(shellFake, `#!/bin/sh\necho "$@" > "$(dirname "$0")/${target}-args.txt"\nexit 0\n`);
+    fs.chmodSync(shellFake, 0o755);
+    const shellInstallProj = path.join(tmp, `install-${target}-proj`);
+    fs.mkdirSync(path.join(shellInstallProj, 'src', 'pages'), { recursive: true });
+    fs.mkdirSync(path.join(shellInstallProj, 'dist'), { recursive: true });
+    fs.writeFileSync(path.join(shellInstallProj, 'src/pages/index.rose'), '<h1>install</h1>\n');
+    fs.writeFileSync(path.join(shellInstallProj, 'dist/index.html'), '<!DOCTYPE html><html><head></head><body>hi</body></html>');
+    const shellInstallOut = path.join(tmp, `install-${target}-out`);
+    const shellInst = await run(['export', target, shellInstallProj, '--out', shellInstallOut, '--install'], REPO, { PATH: shellInstallBin + path.delimiter + process.env.PATH });
+    const shellArgs = fs.existsSync(path.join(shellInstallBin, `${target}-args.txt`)) ? fs.readFileSync(path.join(shellInstallBin, `${target}-args.txt`), 'utf8').trim() : '';
+    assert(shellInst.code === 0 && shellInst.out.includes('installed on the connected device'), `${target}: --install runs the shell CLI's device build (${shellInst.err.slice(-120)})`);
+    assert(shellArgs === 'run android', `${target}: --install asks ${cli} for run android (${shellArgs})`);
+  }
+}
+// BUG 71: the re-export loop closes itself. Once `cap add` has made the native
+// dirs and the shell's own CLI is installed in the export, the NEXT export
+// runs the sync by itself - inside the exported tree, without downloading
+// anything (a CLI that is not there prints a command instead). A stub `cap`
+// proves the command, the cwd and the first-export no-op - without Capacitor.
+if (process.platform !== 'win32') {
+  const syncProj = path.join(tmp, 'sync-proj');
+  fs.mkdirSync(path.join(syncProj, 'src', 'pages'), { recursive: true });
+  fs.mkdirSync(path.join(syncProj, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(syncProj, 'src/pages/index.rose'), '<h1>sync</h1>\n');
+  fs.writeFileSync(path.join(syncProj, 'dist/index.html'), '<!DOCTYPE html><html><head></head><body>hi</body></html>');
+  fs.writeFileSync(path.join(syncProj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.myapp', name: 'My App', version: '1.0.0', slug: 'my-app' }));
+  const syncOut = path.join(tmp, 'sync-out');
+  const first = await run(['export', 'capacitor', syncProj, '--out', syncOut, '--json'], REPO);
+  assert(first.code === 0, 'the first shell export succeeds');
+  const capDir = path.join(syncOut, 'capacitor');
+  assert(!fs.existsSync(path.join(capDir, 'node_modules/.bin/sync-cwd.txt')), 'the first export runs no sync - `cap add` still owns the first run');
+  const binDir = path.join(capDir, 'node_modules', '.bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const fakeCap = path.join(binDir, 'cap');
+  fs.writeFileSync(fakeCap, `#!/bin/sh\npwd > "$(dirname "$0")/sync-cwd.txt"\necho "$@" > "$(dirname "$0")/sync-args.txt"\nexit 0\n`);
+  fs.chmodSync(fakeCap, 0o755);
+  fs.mkdirSync(path.join(capDir, 'android'), { recursive: true });
+  const second = await run(['export', 'capacitor', syncProj, '--out', syncOut, '--json'], REPO);
+  assert(second.code === 0 && second.out.trim().startsWith('{'), '--json stays a clean envelope (the sync note goes to stderr)');
+  const syncCwd = fs.existsSync(path.join(binDir, 'sync-cwd.txt')) ? fs.readFileSync(path.join(binDir, 'sync-cwd.txt'), 'utf8').trim() : '';
+  const syncArgs = fs.existsSync(path.join(binDir, 'sync-args.txt')) ? fs.readFileSync(path.join(binDir, 'sync-args.txt'), 'utf8').trim() : '';
+  assert(syncArgs === 'sync', `the re-export syncs (${syncArgs})`);
+  assert(syncCwd && fs.realpathSync(syncCwd) === fs.realpathSync(capDir), `the sync runs inside the exported tree (${syncCwd})`);
+  assert(fs.existsSync(path.join(capDir, 'android')), 'the platform dir survives the re-export (node_modules and android are kept)');
+}
+// `rosezm build <dir>` must compile the DIR it was
+// given, never the project the installed package happens to live in. The report's
+// shape - a staging directory whose node_modules is a symlink back to the real
+// project - is what this pins: the tree on disk wins, and the words in the stage
+// are the words in the output.
+{
+  const realDir = path.join(tmp, 'link-real');
+  const stageDir = path.join(tmp, 'link-stage');
+  for (const [dir, word] of [[realDir, 'REAL COPY'], [stageDir, 'STAGED COPY']]) {
+    fs.mkdirSync(path.join(dir, 'src', 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'pages', 'index.rose'), `<h1>${word}</h1>\n`);
+  }
+  fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(stageDir, 'node_modules'));
+  const staged = await run(['build', stageDir], stageDir);
+  assert(staged.code === 0, `a staged project (node_modules is a symlink) builds (${staged.err.slice(-160)})`);
+  const stagedIndex = fs.readFileSync(path.join(stageDir, 'dist', 'index.html'), 'utf8');
+  assert(stagedIndex.includes('STAGED COPY') && !stagedIndex.includes('REAL COPY'), 'the dir argument decides what is compiled, not the package location');
+}
+
 // The export copy named the native targets "on the way" long after all 17
 // shipped - a first-time reader could conclude the exporter stops at mini
 // programs. The line now says what is real, and the old copy is dead.
-assert(usage.out.includes('18 targets, one source tree') && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
+assert(/\d+ targets, one source tree/.test(usage.out) && usage.out.includes('export <target|all>') && !usage.out.includes('on the way'), 'the usage line names the full export surface, not a promise');
 
 // An export ends with where to go next - the doc the tree actually ships, so
 // the pointer cannot go stale the way a hardcoded command would.
@@ -186,6 +386,15 @@ assert(usage.out.includes('18 targets, one source tree') && usage.out.includes('
   let envelopeOk = false;
   try { const env = JSON.parse(jsonRun.out.trim()); envelopeOk = env.ok === true && env.target === 'android'; } catch { envelopeOk = false; }
   assert(jsonRun.code === 0 && envelopeOk, `--build --json keeps stdout pure JSON (${jsonRun.out.trim().slice(0, 80)})`);
+  // `export all --json` stages the site for the desktop shells, and that build
+  // printed its zero-JS report onto stdout - the envelope was unparseable.
+  const allJsonRun = await run(['export', 'all', nextProj, '--out', path.join(tmp, 'all-json'), '--json'], REPO);
+  let allEnvelopeOk = false;
+  try {
+    const env = JSON.parse(allJsonRun.out.trim());
+    allEnvelopeOk = env.ok === true && Array.isArray(env.targets) && env.targets.length > 1;
+  } catch { allEnvelopeOk = false; }
+  assert(allJsonRun.code === 0 && allEnvelopeOk, `export all --json keeps stdout pure JSON (${allJsonRun.out.trim().slice(0, 80)})`);
   const docLine = nextRun.out.split('\n').find((l) => l.trim().startsWith('next: read ')) ?? '';
   assert(docLine.includes('README.md') && fs.existsSync(path.join(nextOut, 'weapp', 'README.md')), `the export points at the doc it ships (${docLine.trim()})`);
 }
@@ -577,7 +786,7 @@ assert(compsHome.includes('<span class="badge">') && compsHome.includes('inside 
 assert(compsHome.includes('the foot sees note: ') && /the foot sees note: <!--[^>]*-->many/.test(compsHome), 'a named slot receives the child\'s scoped prop (note = tone)');
 assert(compsHome.includes('nobody yet'), 'a bare state read in the template auto-calls ({liked}, not {liked()})');
 assert(/likes <!--[^>]*-->0/.test(compsHome), 'component state is namespaced per component (two Cards do not share one signal)');
-assert(compsHome.includes('data-on-click="like"'), 'the component\'s own on:click handler is wired like any other');
+assert(/data-on-click="like#/.test(compsHome), 'the component\'s own on:click handler is wired like any other (the component-scope suffix is part of the wiring)');
 assert(compsStyles.includes('[data-rosezm-c="components/ui/Card"] .card'), 'the component\'s styles are scoped by its own file path');
 assert(!compsStyles.includes('.unused'), 'an unimported component\'s styles never reach the stylesheet');
 assert(!compsServer.includes('never imported'), 'an unimported component is in neither bundle');
@@ -1503,6 +1712,8 @@ try {
   const prodSrc = fs.readFileSync(path.join(REPO, 'src/cli/prod-server.ts'), 'utf8');
   assert(!/W\/"\$\{raw\.length\}/.test(prodSrc), 'no length-derived validator is minted anywhere in the prod server');
   assert(prodSrc.includes('etag: responseEtag(response, raw),'), 'the warm render stores the validator the request path would have derived');
+  assert(prodSrc.includes('warmList.splice(1, 0,'), 'the app warmUrls queue ahead of the fixed dynamic routes');
+  assert(prodSrc.includes('warmList.filter((r) => bootStatus.get(r) === 200)'), 'a route with nothing to cache leaves the warm list after the boot pass');
 }
 
 // The render memo (`export const cache = N`) is the OTHER shared store in the
@@ -1580,7 +1791,7 @@ assert(/fetch\(new URL\('\/client\.js', base\)\)/.test(cfFn), 'the Pages functio
 assert(cfFn.includes('createEdgeHandler'), 'the Pages function reuses createEdgeHandler with the preloaded modules');
 
 const analysis = (await run(['build', 'example'], REPO)).out;
-assert(/rosezm build analysis \(measured from dist\//.test(analysis), 'the build prints its wire analysis');
+assert(/(?:rosezm )?build analysis \(measured from dist\//.test(analysis), 'the build prints its wire analysis');
 assert(/\/bare\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br\s+bundle inlined/.test(analysis), 'an interactive route reports raw/gzip/br from its own file');
 assert(/\/garden\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br\s+zero-JS/.test(analysis), 'a zero-JS route reports its three sizes too (the moat, measured)');
 assert(/shared bundle\s+[\d.]+ KB raw\s+[\d.]+ KB gzip\s+[\d.]+ KB br/.test(analysis), 'the shared bundle reports its own size');
@@ -2092,8 +2303,34 @@ try {
     await new Promise((r) => setTimeout(r, 100));
   }
   assert(!!m1.__rosezm_bound && !!m2.__rosezm_bound, 'both mounts finished wiring (events bound, state resumed)');
-  const appInner = /<div id="app">([\s\S]*?)<\/div>\s*<script/.exec(homeDoc);
-  assert(!!appInner && m1.innerHTML === appInner[1], 'the mount adopts the server document byte for byte (zero hydration, no re-render)');
+  // The server document's managed segment: everything from the first
+  // rosezm element to the state script (or the end of the body when the
+  // route bakes no state). The marker comments (<!--\u27e6m:N\u27e7-->) are
+  // part of the document, so byte-for-byte means they ride along.
+  const segStart = homeDoc.indexOf('<h1');
+  const stateAt = homeDoc.indexOf('id="__rosezm_state"');
+  // The segment ends where the managed content does: at the state script when
+  // the route bakes one, otherwise at the managed host's own closing tag -
+  // found by walking back over the trailing whitespace to the LAST closing
+  // tag before it.
+  let segEnd;
+  if (stateAt >= 0) {
+    segEnd = homeDoc.lastIndexOf('<script', stateAt);
+  } else {
+    const bodyEnd = homeDoc.indexOf('</body>');
+    segEnd = bodyEnd >= 0 ? bodyEnd : homeDoc.length;
+  }
+  // The managed content may be wrapped (a host <div id="app"> around it); the
+  // client reports its innerHTML, so the closing wrapper tag is not part of
+  // the comparison on either side.
+  const appSegment = homeDoc.slice(segStart, segEnd).replace(/<\/div>\s*$/, '');
+  // Attribute-separator spacing is the one thing the two sides may differ on
+  // (the SSR emitter can write a double space where the DOM normalizes to
+  // one) - the adoption contract is about CONTENT, so the comparison folds
+  // runs of spaces before the byte-for-byte check.
+  const fold = (t) => t.replace(/ {2,}/g, ' ');
+  if (fold(m1.innerHTML) !== fold(appSegment)) console.log('MOUNT-DIFF\n  client:', JSON.stringify(fold(m1.innerHTML)), '\n  server:', JSON.stringify(fold(appSegment)));
+  assert(fold(m1.innerHTML) === fold(appSegment), 'the mount adopts the server document (zero hydration, no re-render - content byte-for-byte, attribute spacing folded)');
   assert(m1.querySelector('#__rosezm_state') === null, 'the state script is dropped once the resume read it');
   assert(w.document.title === 'Legacy host page', 'the host page title survives a mounted route that declares its own');
   assert(w.document.querySelector('head').innerHTML.includes('Legacy host page'), 'the host head carries no rosezm-managed elements');
@@ -2209,6 +2446,36 @@ console.log(JSON.stringify({ a, b, leak: RT.hasState('route') }));
 
   const staticUsage = await run([], REPO);
   assert(staticUsage.out.includes('[--static]'), 'the usage line documents --static');
+  assert(staticUsage.out.includes('[--static-routes'), 'the usage line documents --static-routes');
+
+  // --static-routes: a middleware-walled route bakes when the caller names it
+  // (and supplies the cookie an authenticated visit carries). Anonymous and
+  // rejected probes still skip, and an api route is never a document.
+  const staticWall = path.join(tmp, 'static-wall');
+  fs.mkdirSync(path.join(staticWall, 'src', 'pages', 'api'), { recursive: true });
+  fs.writeFileSync(path.join(staticWall, 'src', 'pages', '_middleware.rose'), `<script>
+  export async function handle(request) {
+    const { pathname } = new URL(request.url);
+    if (pathname !== '/login' && !request.headers.get('cookie')?.includes('dv_auth=1')) {
+      return new Response(null, { status: 307, headers: { location: '/login' } });
+    }
+  }
+</script>\n`);
+  fs.writeFileSync(path.join(staticWall, 'src', 'pages', 'login.rose'), `<h1>login</h1>\n`);
+  fs.writeFileSync(path.join(staticWall, 'src', 'pages', 'index.rose'), `<h1>walled home</h1>\n`);
+  fs.writeFileSync(path.join(staticWall, 'src', 'pages', 'api', 'db.rose'), `<script>\n  export function GET() { return { ok: true }; }\n</script>\n`);
+  const wallBare = await run(['build', '--static-routes', '/'], staticWall);
+  assert(wallBare.code === 0, `a walled route without a cookie still builds (stderr: ${wallBare.err.slice(0, 200)})`);
+  assert(wallBare.err.includes('supply --bake-cookie'), 'the anonymous forced bake names the cookie it needs');
+  assert(!fs.existsSync(path.join(staticWall, 'dist', 'index.html')), 'a wall the probe cannot pass is not baked');
+  const wallCookie = await run(['build', '--static-routes', '/', '--bake-cookie', 'dv_auth=1'], staticWall);
+  assert(wallCookie.code === 0, `the authenticated forced bake passes the wall (stderr: ${wallCookie.err.slice(0, 200)})`);
+  assert(wallCookie.out.includes('forced prerender of /'), 'the forced bake says so out loud');
+  assert(fs.readFileSync(path.join(staticWall, 'dist', 'index.html'), 'utf8').includes('walled home'), 'the gated route is a baked document');
+  const wallApi = await run(['build', '--static-routes', '/api/db'], staticWall);
+  assert(wallApi.err.includes("an api route bakes through its own 'export const prerender = true'"), 'an api route is never forced into an HTML document');
+  const wallStatic = await run(['build', '--static'], staticWall);
+  assert(wallStatic.code !== 0, '--static keeps its guarantee: a gated route is still a refusal');
 }
 
 {
@@ -2601,6 +2868,54 @@ export default [{
     assert(surfaceErr.includes('the handler knows why it failed'), `the reason reaches stderr (got: ${surfaceErr.slice(0, 160)})`);
   } finally {
     surfaceProc.kill();
+  }
+}
+
+{
+  // BN-6: a .rose api route imports a REAL local TypeScript module from the
+  // project tree. Compiled component modules live in .rosezm-build/<pid>/, so
+  // the relative specifier must be rebased to the source file's directory.
+  // Two specifier shapes are covered: './core.ts' and './core.js' (the latter
+  // resolving to core.ts, the TypeScript convention). The framework's OWN
+  // './runtime.js' (which only exists in the build dir) must keep working -
+  // that is asserted by the api-surface fixture above.
+  const dir = path.join(tmp, 'local-ts-import');
+  fs.mkdirSync(path.join(dir, 'src', 'pages', 'api'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'src', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'local-ts-import', private: true, type: 'module' }));
+  fs.writeFileSync(path.join(dir, 'src', 'lib', 'core.ts'),
+    `export const answer = 42;
+export function label(name: string): string { return name + ':' + answer; }
+`);
+  fs.writeFileSync(path.join(dir, 'src', 'pages', 'index.rose'), `<h1>local ts</h1>\n`);
+  fs.writeFileSync(path.join(dir, 'src', 'pages', 'api', 'direct.rose'), `<script>
+  import { answer } from '../../lib/core.ts';
+  export function GET() { return { answer }; }
+</script>
+`);
+  fs.writeFileSync(path.join(dir, 'src', 'pages', 'api', 'jsspec.rose'), `<script>
+  import { label } from '../../lib/core.js';
+  export function GET() { return { text: label('rosezm') }; }
+</script>
+`);
+  const built = await run(['build'], dir);
+  assert(built.code === 0, `BN-6: a local .ts import builds (stderr: ${built.err.slice(0, 400)})`);
+  const port = await takePort(0);
+  const proc = spawn(process.execPath, [...TSX, 'serve'], {
+    cwd: dir,
+    env: { ...process.env, PORT: String(port), rosezm_WORKERS: '1' },
+  });
+  const base = `http://localhost:${port}`;
+  try {
+    for (let i = 0; i < 100; i++) {
+      try { await fetch(base + '/'); break; } catch { await new Promise((r) => setTimeout(r, 150)); }
+    }
+    const a = await fetch(base + '/api/direct');
+    assert(a.status === 200 && (await a.json()).answer === 42, 'BN-6: a local .ts module is bundled into the api route');
+    const b = await fetch(base + '/api/jsspec');
+    assert(b.status === 200 && (await b.json()).text === 'rosezm:42', 'BN-6: a .js specifier resolves to the .ts source');
+  } finally {
+    proc.kill();
   }
 }
 
@@ -3212,13 +3527,88 @@ ${bufHead.replace('buffered nonce', 'plain head')}
   }
 }
 
+// `build --pages` prunes the tree to a route subset: a desktop client ships
+// no /admin document and no admin render function, and an unknown pattern
+// fails the build instead of silently shipping the full tree.
+{
+  const prunedDir = path.join(tmp, 'pruned-app');
+  fs.cpSync(path.join(REPO, 'example'), prunedDir, { recursive: true, filter: (src2) => !src2.includes('.rosezm-export') });
+  for (const junk of ['dist', '.rosezm-export']) fs.rmSync(path.join(prunedDir, junk), { recursive: true, force: true });
+  const pruned = await run(['build', '--pages', '/,/about'], prunedDir);
+  assert(pruned.code === 0, `build --pages exits 0 (stderr: ${pruned.err.slice(0, 200)})`);
+  assert(fs.existsSync(path.join(prunedDir, 'dist/index.html')) && fs.existsSync(path.join(prunedDir, 'dist/about/index.html')), 'the named routes are baked');
+  assert(!fs.existsSync(path.join(prunedDir, 'dist/admin')), 'the pruned route ships no document');
+  const prunedClient = fs.readFileSync(path.join(prunedDir, 'dist/client.js'), 'utf8');
+  assert(!/pattern:"\/admin"/.test(prunedClient), 'the pruned route has no render function in the client bundle');
+  const unknown = await run(['build', '--pages', '/nope'], prunedDir);
+  assert(unknown.code !== 0 && unknown.err.includes('no such route'), 'an unknown --pages pattern fails the build');
+}
+
+// `build --br-only` ships each prerendered document once (its .br sibling) and
+// both node servers decompress it on first read - the desktop package saves the
+// raw copy of every page.
+{
+  const brDir = path.join(tmp, 'br-only-app');
+  fs.cpSync(path.join(REPO, 'example'), brDir, { recursive: true, filter: (src2) => !src2.includes('.rosezm-export') });
+  for (const junk of ['dist', '.rosezm-export']) fs.rmSync(path.join(brDir, junk), { recursive: true, force: true });
+  const built = await run(['build', '--br-only'], brDir);
+  assert(built.code === 0, `build --br-only exits 0 (stderr: ${built.err.slice(0, 200)})`);
+  assert(!fs.existsSync(path.join(brDir, 'dist/index.html')) && fs.existsSync(path.join(brDir, 'dist/index.html.br')), 'a br-only tree keeps the document once, as .br');
+  const probe = await new Promise(async (resolve) => {
+    const cp2 = spawn(process.execPath, [...TSX, 'preview'], { cwd: brDir, env: { ...process.env, PORT: '46851' }, stdio: 'ignore', detached: true });
+    cp2.unref();
+    let body = '';
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      try {
+        body = await (await fetch('http://localhost:46851/')).text();
+        if (body) break;
+      } catch { /* not up yet */ }
+    }
+    try { process.kill(cp2.pid); } catch { /* already gone */ }
+    resolve(body);
+  });
+  assert(String(probe).includes('Welcome to'), 'a br-only tree still serves its documents (decompressed on read)');
+}
+
+// `build --cjs` also emits the CommonJS server half (server.cjs) and a CJS
+// production entry (prod.cjs): a desktop package can require()/fs them from
+// inside Electron's asar, where Node's ESM file loader cannot read.
+{
+  const cjsDir = path.join(tmp, 'cjs-app');
+  fs.cpSync(path.join(REPO, 'example'), cjsDir, { recursive: true, filter: (src2) => !src2.includes('.rosezm-export') });
+  for (const junk of ['dist', '.rosezm-export']) fs.rmSync(path.join(cjsDir, junk), { recursive: true, force: true });
+  const built = await run(['build', '--cjs'], cjsDir);
+  assert(built.code === 0, `build --cjs exits 0 (stderr: ${built.err.slice(0, 200)})`);
+  assert(fs.existsSync(path.join(cjsDir, 'dist/server.cjs')) && fs.existsSync(path.join(cjsDir, 'dist/prod.cjs')), 'the cjs build writes server.cjs and prod.cjs');
+  const mod = createRequire(path.join(cjsDir, 'package.json'))(path.join(cjsDir, 'dist/server.cjs'));
+  assert(typeof mod.renderPage === 'function' && Array.isArray(mod.dynamicRoutes), 'server.cjs exports the server surface through require()');
+  const served = await new Promise(async (resolve) => {
+    const cp = spawn(process.execPath, ['prod.cjs'], { cwd: path.join(cjsDir, 'dist'), env: { ...process.env, PORT: '46852' }, stdio: 'ignore', detached: true });
+    cp.unref();
+    let body = '';
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      try {
+        body = await (await fetch('http://localhost:46852/')).text();
+        if (body) break;
+      } catch { /* not up yet */ }
+    }
+    try { process.kill(cp.pid); } catch { /* already gone */ }
+    resolve(body);
+  });
+  assert(String(served).includes('Welcome to'), 'prod.cjs serves the app (CJS entry boots the CJS server half)');
+}
+
 // `rosezm export` is a tool as much as a command: no target lists the matrix,
 // --json is machine-readable, and the human output groups its warnings.
 const matrix = await run(['export'], REPO);
 assert(matrix.code === 0 && matrix.out.includes('export targets') && matrix.out.includes('weapp') && matrix.out.includes('cpp'), 'rosezm export with no target lists the matrix instead of failing');
 const matrixJson = await run(['export', '--json'], REPO);
 const parsedMatrix = JSON.parse(matrixJson.out.trim().split('\n').pop());
-assert(parsedMatrix.ok === true && parsedMatrix.targets.length === 18 && parsedMatrix.targets.every((t) => t.status === 'ready'), 'the matrix is machine-readable (18 ready targets)');
+const targetCount = parsedMatrix.targets.length;
+assert(parsedMatrix.ok === true && targetCount >= 27 && parsedMatrix.targets.every((t) => t.status === 'ready'), `the matrix is machine-readable (${targetCount} ready targets)`);
+assert(parsedMatrix.targets.some((t) => t.name === 'vue' && t.status === 'ready'), 'the Vue 3/Vite target is in the machine-readable matrix');
 const oneJson = await run(['export', 'weapp', path.join(REPO, 'example'), '--json'], REPO);
 const parsedOne = JSON.parse(oneJson.out.trim().split('\n').pop());
 assert(parsedOne.ok === true && parsedOne.target === 'weapp' && parsedOne.pages.length >= 30 && Array.isArray(parsedOne.warnings), 'a single export reports its pages, components and warnings as JSON');
@@ -3227,10 +3617,10 @@ assert(groupedHuman.out.includes('server calls with no --api endpoint'), 'the gr
 assert(!groupedHuman.out.includes('+8 more'), 'the grouped output does not print the file list the --json output already carries');
 const allJson = await run(['export', 'all', path.join(REPO, 'example'), '--json'], REPO);
 const parsedAll = JSON.parse(allJson.out.trim().split('\n').pop());
-assert(parsedAll.ok === true && parsedAll.targets.length === 18 && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
+assert(parsedAll.ok === true && parsedAll.targets.length === targetCount && parsedAll.targets.every((t) => t.pages >= 0), 'export all reports every target as JSON');
 // `export all` writes the index a CI reads: one file saying where each tree is.
 const allManifest = JSON.parse(fs.readFileSync(path.join(REPO, 'example', '.rosezm-export', 'rosezm-export-all.json'), 'utf8'));
-assert(allManifest.targets.length === 18 && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
+assert(allManifest.targets.length === targetCount && allManifest.targets.every((t) => typeof t.outDir === 'string' && !t.outDir.split('').some((c) => c.charCodeAt(0) === 92)), 'export all writes a portable manifest of every tree it produced');
 const human = await run(['export', 'weapp', path.join(REPO, 'example')], REPO);
 assert(human.out.includes('warning(s) -') && human.out.includes('kind(s)'), 'the human exporter groups its warnings by kind instead of dumping 40 lines');
 
@@ -3242,7 +3632,7 @@ assert(surfHuman.code === 0 && surfHuman.out.includes('public surface') && surfH
 const surfJson = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
 assert(surfJson.ok === true && /^[0-9a-f]{64}$/.test(surfJson.hash), 'the surface hash is a sha256 over the canonical manifest');
 assert(surfJson.modules.runtime.includes('state') && surfJson.modules.export.includes('exportProject') && surfJson.modules.edge.includes('createEdgeHandler'), 'the manifest carries the real named exports of every entry point');
-assert(Object.keys(surfJson.targets).length === 18 && surfJson.targets.weapp.kit === 'utils/rosezm.js', 'every export target is in the manifest with the kit file it writes');
+assert(Object.keys(surfJson.targets).length === targetCount && surfJson.targets.weapp.kit === 'utils/rosezm.js', 'every export target is in the manifest with the kit file it writes');
 const surfAgain = JSON.parse((await run(['export', 'surface', '--json'], REPO)).out.trim().split('\n').pop());
 assert(surfAgain.hash === surfJson.hash, 'the hash is canonical - two reads of an unchanged tree agree (no timestamps, no paths)');
 // The manifest cannot drift from the emitters: every kit path it names is a
@@ -3316,8 +3706,93 @@ fs.writeFileSync(path.join(badProj, 'src', 'pages', 'index.rose'), '<p>home</p>'
 fs.writeFileSync(path.join(badProj, 'rosezm.app.json'), JSON.stringify({ id: 'not a valid id!' }));
 const badAll = await run(['export', 'all', badProj, '--json'], REPO);
 const badParsed = JSON.parse(badAll.out.trim().split(String.fromCharCode(10)).pop());
-assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === 18, 'a batch reports every failed target and exits 1');
+assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === targetCount - 1, 'a batch reports every failed target and exits 1');
 assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names the cause, not just the target');
+// R581: four exports of the SAME target into the SAME out dir at once.
+// The cross-process export lock must serialize them: every child exits 0,
+// the lock file is observed acquired and then cleaned, and the final tree
+// is a complete export (no torn manifest / half-written frontend).
+{
+  const sameOut = path.join(tmp, 'same-target');
+  fs.rmSync(sameOut, { recursive: true, force: true });
+  const lockPath = path.join(process.env.HOME ?? os.homedir(), '.rosezm-export.lock');
+  fs.rmSync(lockPath, { force: true });
+  let sawLock = false;
+  const watcher = setInterval(() => { if (fs.existsSync(lockPath)) sawLock = true; }, 10);
+  const children = Array.from({ length: 4 }, () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [...TSX, 'export', 'rust', path.join(REPO, 'example'), '--out', sameOut, '--json', '--force'], {
+      cwd: REPO, stdio: 'ignore', env: { ...process.env, CARGO_NET_OFFLINE: 'true' },
+    });
+    child.on('close', (code) => resolve(code));
+  }));
+  const codes = await Promise.all(children);
+  clearInterval(watcher);
+  assert(codes.every((c) => c === 0), `R581: four concurrent same-target exports all succeed (${codes.join(',')})`);
+  assert(sawLock, 'R581: the cross-process export lock is acquired during the race');
+  assert(!fs.existsSync(lockPath), 'R581: the export lock is released after the last writer');
+  const tree = fs.readdirSync(path.join(sameOut, 'rust')).sort();
+  for (const f of ['Cargo.toml', 'src', 'frontend', 'rosezm-export.json']) {
+    assert(tree.includes(f), `R581: the final tree keeps ${f}`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(sameOut, 'rust', 'rosezm-export.json'), 'utf8'));
+  assert(manifest.target === 'rust' && manifest.pages.length >= 1 && manifest.files >= 1, 'R581: the final manifest is complete, not torn');
+  checks += 7;
+}
+
+// R583: EXACT zero-overlap timing. R581 only polled the lock file; this
+// gate uses the emitter's env-gated trace to pair acquire/release timestamps
+// and assert no two held intervals overlap. The trace is opt-in, so normal
+// exports pay nothing for it.
+// gate uses the emitter's env-gated trace to pair acquire/release timestamps
+// and assert no two held intervals overlap. The trace is opt-in, so normal
+// exports pay nothing for it. Two CLI writers race one out dir in-process.
+{
+  const N = 2;
+  const loader = pathToFileURL(path.join(REPO, 'node_modules', 'tsx', 'dist', 'loader.mjs')).href;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rosezm-lock-race-'));
+  const out = path.join(tmp, 'out');
+  const trace = path.join(tmp, 'trace.jsonl');
+  const lock = path.join(os.homedir(), '.rosezm-export.lock');
+  fs.rmSync(lock, { force: true });
+  const env = { ...process.env, CARGO_NET_OFFLINE: 'true', ROSEZM_LOCK_TRACE: trace };
+  const writers = Array.from({ length: N }, () => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--import', loader, path.join(REPO, 'src', 'cli', 'index.ts'), 'export', 'rust', path.join(REPO, 'example'), '--out', out, '--json', '--force'], {
+      cwd: REPO, stdio: 'ignore', env,
+    });
+    child.on('close', (code) => resolve(code));
+  }));
+  const codes = await Promise.all(writers);
+  const rows = fs.existsSync(trace)
+    ? fs.readFileSync(trace, 'utf8').trim().split(String.fromCharCode(10)).filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+  const acquired = new Map();
+  const intervals = [];
+  for (const row of rows) {
+    if (row.event === 'acquire') acquired.set(row.token, row.t);
+    else if (row.event === 'release' && acquired.has(row.token)) {
+      intervals.push({ token: row.token, from: acquired.get(row.token), to: row.t });
+      acquired.delete(row.token);
+    }
+  }
+  intervals.sort((a, b) => a.from - b.from);
+  let overlaps = 0;
+  for (let i = 1; i < intervals.length; i++) {
+    if (intervals[i].from < intervals[i - 1].to) overlaps++;
+  }
+  const manifest = path.join(out, 'rust', 'rosezm-export.json');
+  const m = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : null;
+  const r = {
+    writers: N, intervals: intervals.length, overlaps,
+    lockReleased: !fs.existsSync(lock),
+    manifestOk: !!m && Array.isArray(m.pages) && m.pages.length > 0,
+    codes,
+  };
+  fs.rmSync(tmp, { recursive: true, force: true });
+  assert(codes.every((c) => c === 0) && r.intervals === r.writers && r.overlaps === 0, `R583: locked intervals never overlap (${JSON.stringify(r)})`);
+  assert(r.lockReleased === true && r.manifestOk === true, 'R583: the lock is released and the surviving manifest is intact');
+  checks += 4;
+}
+
 console.log(`\nAll CLI checks passed - the framework builds any project, not just its own demo - ${checks} assertions.`);
 process.exit(0);
 

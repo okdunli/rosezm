@@ -257,7 +257,7 @@ await bindMounted.click('input[value="pro"]');
 assert(bindMounted.text('#app').includes('Plan: pro'), 'bind:group (radio) holds the selected value');
 await bindMounted.click('input[value="red"]');
 assert(bindMounted.text('#app').includes('Colors: red'), 'bind:group (checkbox) accumulates an ARRAY of the checked values');
-// R120: the same three edits through a COMPONENT's own inputs - the value
+// The same three edits through a COMPONENT's own inputs - the value
 // rides in through the prop, the edit rides out through on<Prop>Change.
 bindMounted.fill('.bind-demo input[placeholder="through the component"]', 'Grace');
 assert(bindMounted.text('#app').includes('Hello Grace'), 'a component input rendering value={prop} reports its edit back to the parent state');

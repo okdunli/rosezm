@@ -6,7 +6,7 @@
  * Run: npx tsx tests/test-edge.ts   (after npm run build)
  */
 
-import { readFileSync, mkdtempSync, rmSync } from 'fs';
+import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
@@ -292,7 +292,7 @@ await likePass({ origin: 'http://localhost' }, "a same-origin POST (the browser'
 await likePass({ 'sec-fetch-site': 'same-origin' }, 'a same-origin Sec-Fetch-Site passes');
 await likePass({}, 'a POST with neither Origin nor Sec-Fetch-Site passes (not CSRF-attackable)');
 
-// --- R53: concurrent requests must not read each other's query ---
+// --- concurrent requests must not read each other's query ---
 // The edge runtime has no async-local store, so setQuery writes a module-level
 // variable; the runtime's render mutex only starts INSIDE the render. The
 // handler therefore serializes the whole unit (setQuery through response) -
@@ -325,6 +325,37 @@ await likePass({}, 'a POST with neither Origin nor Sec-Fetch-Site passes (not CS
   const redirected = await handle(new Request('http://localhost/goto'));
   assert(redirected.status === 302, `a redirect() page 302s at the edge (got ${redirected.status})`);
   assert(redirected.headers.get('location') === '/about', 'the edge redirect names its target');
+}
+
+// --- BUG-014: the edge applies the config's CSP extensions ---
+// rosezm.config.js `csp.connectSrc` was baked into dist/headers.json's default
+// policy by the build (where setExtraCsp was live) - but the edge adapter
+// computed its policy from the baseline constants and never read that file, so
+// an app deployed through api/rosezm.ts lost every configured connect-src.
+// The edge now takes the policy tail from the build's headers.json (same dist,
+// so the hash half stays runtime-computed over the bytes it actually serves).
+{
+  const cfgProj = join(scratch, 'csp-config-proj');
+  mkdirSync(join(scratch, 'cfgbuild'), { recursive: true });
+  mkdirSync(join(cfgProj, 'src/pages'), { recursive: true });
+  writeFileSync(join(cfgProj, 'rosezm.config.js'), `export default [{ name: 'noop', transform: (c) => c }];
+export const csp = { connectSrc: 'http: https://models.local', imgSrc: 'https://img.local' };`);
+  writeFileSync(join(cfgProj, 'src/pages/index.rose'), `<script>
+  export const csp = { nonce: true };
+  let n = $state(0);
+</script>
+<p>n={n()}</p>`);
+  execFileSync(process.execPath, ['--import', tsxLoader, cli, 'build', cfgProj], { cwd: join(scratch, 'cfgbuild'), stdio: 'pipe' });
+  const cfgHandle = await createEdgeHandler(join(scratch, 'cfgbuild', 'dist'));
+  const cfgRes = await cfgHandle(new Request('http://localhost/'));
+  const cfgCsp = cfgRes.headers.get('content-security-policy') ?? '';
+  assert(cfgCsp.includes("connect-src 'self' http: https://models.local"), 'the edge serves the config csp connectSrc extensions');
+  assert(cfgCsp.includes("img-src 'self' data: https://fastly.picsum.photos https://img.local"), 'the edge serves the config csp imgSrc extensions');
+  assert(cfgCsp.includes("script-src 'nonce-") && cfgCsp.includes("'strict-dynamic'"), 'the edge policy still carries its script-src clause (a nonce route keeps its nonce form)');
+  // The demo (no config csp) keeps the baseline - the file read must not
+  // widen a policy that was never configured.
+  const baseCsp = (await handle(new Request('http://localhost/'))).headers.get('content-security-policy') ?? '';
+  assert(baseCsp.includes("connect-src 'self'") && !baseCsp.includes('models.local'), 'a project without config csp keeps the baseline policy');
 }
 
 console.log(`\nAll edge adapter checks passed - Web-standard handler, one request, zero hydration - ${checks} assertions.`);

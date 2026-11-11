@@ -14,7 +14,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
-import { renderPage, renderPageStream, canStream, shellOff, handleApi, isApi, apiPrerender, localeList, defaultLocale } from '../dist/server.js';
+
 import { buildShell, getHtmlShell, shellOpen, securityHeaders } from '../src/cli/shell.js';
 
 // The suite drives the BUILT bundle in dist/ - and the cli suite builds the
@@ -22,6 +22,12 @@ import { buildShell, getHtmlShell, shellOpen, securityHeaders } from '../src/cli
 // leftover bundle renders the wrong project's home and every assertion reads
 // like a compiler bug. Build the example here: ~5s, and the suite never
 // inherits another project's server.
+
+// The suite drives the BUILT bundle in dist/ - and the suite that ran last
+// (the cli suite builds example VARIANTS) may have left a different app in
+// it. The build below must run BEFORE the import: a static import would
+// hoist above it and load whatever the previous suite left in dist/ (the
+// "SSR renders home page content" flake - a variant's home answering /).
 {
   const repo = new URL('..', import.meta.url);
   const build = spawnSync(process.execPath, ['node_modules/tsx/dist/cli.mjs', 'src/cli/index.ts', 'build', 'example'], { cwd: fileURLToPath(repo) });
@@ -30,6 +36,7 @@ import { buildShell, getHtmlShell, shellOpen, securityHeaders } from '../src/cli
     process.exit(1);
   }
 }
+const { renderPage, renderPageStream, canStream, shellOff, handleApi, isApi, apiPrerender, localeList, defaultLocale } = await import('../dist/server.js');
 
 const dom = new JSDOM('<!DOCTYPE html><html><body><div id="app"></div></body></html>');
 (globalThis as any).document = dom.window.document;
@@ -75,7 +82,7 @@ const assert = (cond: boolean, msg: string) => {
   console.log(`ok - ${msg}`);
 };
 
-// BUG.md AQ (R345): a head entry the document ALREADY carries (the SSR render
+// a head entry the document ALREADY carries (the SSR render
 // put it there; the state re-shipped the same string) must not be inserted
 // twice - a 72 KB inline style arrived twice and doubled the page's CSS.
 {
@@ -93,7 +100,7 @@ const assert = (cond: boolean, msg: string) => {
   assert(!document.head.querySelector('#aq-theme'), 'AQ: clearHead still removes the adopted node');
 }
 
-// BUG.md BH (R492): a page that went dynamic - its middleware short-circuits at
+// a page that went dynamic - its middleware short-circuits at
 // build time - ships its <style data-rosezm-head> in the server's <head> with no
 // body marker to rebuild it from. The first wire() must leave that head alone;
 // only a navigation, where the head provably belongs to the route being left,
@@ -157,6 +164,37 @@ const ulBefore = appEl.querySelector('ul')!;
 await tick();
 assert(appEl.querySelector('ul') === ulBefore, '{#each} container identity preserved');
 assert(ulBefore.children.length === 4, 'list grew to 4 items after addItem');
+
+// two instances of one component must own two disjoint $state
+// scopes and two handler entries - the old build keyed both to
+// `components/Panel:open`, so one click opened both panels.
+const panelPage = await renderPage('/panel-demo');
+const panelKeys = Object.keys(JSON.parse(panelPage.state)).filter((k) => k.startsWith('components/Panel:open#'));
+assert(panelKeys.length === 2, `P1: SSR serializes one state entry PER component instance (got ${panelKeys.length}: ${panelKeys.join(', ')})`);
+await start(appEl, '/panel-demo', false);
+assert(appEl.textContent!.includes('one: closed') && appEl.textContent!.includes('two: closed'), 'P1: both panels rendered');
+const panelBtns = [...appEl.querySelectorAll('button')].filter((b) => /: (open|closed)$/.test(b.textContent ?? ''));
+assert(panelBtns.length === 2, 'P1: two panel buttons found');
+(panelBtns[0] as any).click();
+await tick();
+assert((panelBtns[0] as HTMLElement).textContent!.includes('one: open'), 'P1: instance one toggled');
+assert((panelBtns[1] as HTMLElement).textContent!.includes('two: closed'), 'P1: instance two did NOT move (was the bug: both opened)');
+
+// inside a keyed {#each}, a component instance binds to its ROW -
+// removing a row must not slide another row's state onto it.
+await start(appEl, '/panel-loop', false);
+const loopBtns = () => [...appEl.querySelectorAll('button')].filter((b) => /: (open|closed)$/.test(b.textContent ?? ''));
+assert(loopBtns().length === 3, 'P1: the loop rendered one panel per row');
+(loopBtns()[1] as any).click();
+await tick();
+assert((loopBtns()[1] as HTMLElement).textContent!.includes('b: open'), 'P1: the middle row toggled');
+assert((loopBtns()[0] as HTMLElement).textContent!.includes('a: closed'), 'P1: the first row did not move');
+assert((loopBtns()[2] as HTMLElement).textContent!.includes('c: closed'), 'P1: the last row did not move');
+(appEl.querySelector('[data-on-click="drop"]')! as any).click();
+await tick();
+assert(loopBtns().length === 2, 'P1: the dropped row is gone');
+assert((loopBtns()[0] as HTMLElement).textContent!.includes('b: open'), 'P1: row b KEEPS its own state after the row above it is removed (was the bug: b would inherit a\'s)');
+assert((loopBtns()[1] as HTMLElement).textContent!.includes('c: closed'), 'P1: row c is untouched by the removal');
 
 await start(appEl, '/blog/2', false);
 assert(appEl.textContent!.includes('Blog Post #2'), 'client-side nav renders dynamic route');
@@ -669,6 +707,20 @@ assert(!clientSrc.includes('api/hello'), 'the api route never enters the client 
 const lifeAbout = await renderPage('/about');
 assert(JSON.parse(lifeAbout.state).ticks === 0, 'the server render never mounts (ticks stay 0)');
 assert(lifeAbout.html.includes('mount ticks'), 'the about page renders the lifecycle demo');
+{
+  // $isLocal is the gate a desktop shell puts in front of convenience switches
+  // (?auth=off): reachable from the machine that runs the app, never the LAN.
+  const { $isLocal } = await import('../src/runtime/index.js');
+  const at = (host: string) => new Request('http://' + host + '/?auth=off');
+  if (!$isLocal(at('localhost:43111'))) throw new Error('$isLocal: localhost must pass');
+  if (!$isLocal(at('app.localhost'))) throw new Error('$isLocal: *.localhost must pass');
+  if (!$isLocal(at('127.0.0.1:43111'))) throw new Error('$isLocal: 127.0.0.1 must pass');
+  if (!$isLocal(at('[::1]:43111'))) throw new Error('$isLocal: [::1] must pass');
+  if ($isLocal(at('192.168.1.50:43111'))) throw new Error('$isLocal: a LAN address must fail');
+  if ($isLocal(at('example.com'))) throw new Error('$isLocal: a public name must fail');
+  console.log('ok - $isLocal admits loopback names only');
+}
+
 const rt = await import('../src/runtime/index.js');
 const order: string[] = [];
 rt.onMount(() => order.push('a'));
@@ -735,6 +787,22 @@ assert(allowed.status === 200 && allowed.html.includes('Hello, rose'), 'a sessio
 await (serverMod as any).runMiddleware(nodeReq('/admin', 'tulip'));
 const other = await renderPage('/admin');
 assert(other.html.includes('Hello, tulip'), 'the context is per-request (no leakage between requests)');
+// a direct deployment had no real client address -
+// getContext() only ever saw what the app derived from x-forwarded-for, which a
+// client writes itself, so IP-keyed rate limits were silently bypassed.
+assert(typeof (serverMod as any).clientAddress === 'function', 'the server bundle exposes the client-address resolver');
+const sockReq = (peer: string, extra: Record<string, string> = {}) => ({ method: 'GET', url: '/', headers: { host: 'localhost', ...extra }, socket: { remoteAddress: peer } });
+assert((serverMod as any).clientAddress(sockReq('::ffff:203.0.113.9')) === '203.0.113.9', 'the socket peer is the address (an IPv4 peer inside a dual-stack socket reads as IPv4)');
+assert((serverMod as any).clientAddress(sockReq('203.0.113.9', { 'x-forwarded-for': '198.51.100.7' })) === '203.0.113.9', 'an untrusted x-forwarded-for cannot spoof the address');
+process.env.ROSEZM_TRUSTED_PROXIES = '203.0.113.9';
+assert((serverMod as any).clientAddress(sockReq('203.0.113.9', { 'x-forwarded-for': '198.51.100.7, 203.0.113.9' })) === '198.51.100.7', "a trusted proxy's forwarded header names the visitor");
+delete process.env.ROSEZM_TRUSTED_PROXIES;
+assert((serverMod as any).clientAddress(new Request('http://localhost/', { headers: { 'cf-connecting-ip': '2001:db8::1' } })) === '2001:db8::1', 'an edge request has no socket: the platform header answers');
+// The Node server hands its socket peer over on the request object, so the
+// Web-standard Request the middleware sees still knows the connection.
+assert((serverMod as any).clientAddress(Object.assign(new Request('http://localhost/', { headers: { host: 'localhost' } }), { __rosezmPeer: '203.0.113.9' })) === '203.0.113.9', 'the Node server stamps its socket peer on the request');
+await (serverMod as any).runMiddleware({ ...nodeReq('/admin', 'rose'), socket: { remoteAddress: '203.0.113.9' } });
+assert((serverMod as any).getContext().remoteAddress === '203.0.113.9', 'the middleware context carries the real address');
 await (serverMod as any).runMiddleware(nodeReq('/'));
 const homeCtx = await renderPage('/');
 assert(homeCtx.status === 200 && homeCtx.html.includes('Welcome to'), 'the middleware passes normal routes through');
@@ -1244,7 +1312,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(appEl.textContent!.includes('inside the default slot'), 'the adopted default slot carries the nested component');
   assert(appEl.textContent!.includes('the foot sees note: many'), 'the adopted named slot carries the child-scoped prop');
   assert(!appEl.textContent!.includes('\u27e6'), 'every marker inside a component resolved to its value');
-  const likeBtn = appEl.querySelector('[data-on-click="like"]')! as any;
+  const likeBtn = appEl.querySelector('[data-on-click^="like#"]')! as any;
   likeBtn.click();
   await tick();
   assert(appEl.querySelector('.card p')!.textContent === 'tone: many - likes 1', 'the component\'s own $state patches only its own node');
@@ -1254,10 +1322,111 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert(appEl.querySelectorAll('.card').length === 2, 'client-side navigation renders one component per {#each} row');
   assert(appEl.textContent!.includes('one') && appEl.textContent!.includes('two'), 'each row passed its own prop value');
   assert(appEl.textContent!.includes('row 1') && appEl.textContent!.includes('row 2'), 'the loop item resolves inside the component\'s slot content');
-  (appEl.querySelector('[data-on-click="like"]')! as any).click();
+  (appEl.querySelector('[data-on-click^="like#"]')! as any).click();
   await tick();
   assert(appEl.querySelector('.card p')!.textContent === 'tone: calm - likes 1', 'the navigated-to components keep their own state and handlers');
 }
+
+// `bind:checked={item.done}` inside a keyed {#each}
+// writes the field back through the items state, by row reference.
+{
+  const { writeFileSync, mkdirSync, rmSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const { pathToFileURL } = await import('url');
+  const { buildProject } = await import('../src/compiler/index.js');
+  const rbRoot = join(tmpdir(), 'rosezm-rowbind');
+  rmSync(rbRoot, { recursive: true, force: true });
+  mkdirSync(join(rbRoot, 'src', 'pages'), { recursive: true });
+  writeFileSync(join(rbRoot, 'src', 'pages', 'index.rose'), `<script>
+  let items = $state([{ id: 1, text: 'a', done: false }, { id: 2, text: 'b', done: false }]);
+</script>
+
+{#each items() as item (item.id)}
+  <div class="row"><input class="cb" type="checkbox" bind:checked={item.done} /><span>{item.text}: {item.done ? 'done' : 'todo'}</span></div>
+{/each}
+`);
+  const rbOut = join(tmpdir(), 'rosezm-rowbind-dist');
+  rmSync(rbOut, { recursive: true, force: true });
+  await buildProject(rbRoot, rbOut);
+  location.pathname = '/';
+  document.getElementById('__rosezm_state')?.remove();
+  const rbServer = await import(pathToFileURL(join(rbOut, 'server.js')).href);
+  const rbPage = await rbServer.renderPage('/');
+  const rbState = document.createElement('script');
+  rbState.id = '__rosezm_state';
+  rbState.textContent = rbPage.state;
+  document.body.appendChild(rbState);
+  appEl.innerHTML = rbPage.html;
+  const rbClient = await import(pathToFileURL(join(rbOut, 'client.js')).href);
+  await rbClient.start(appEl, '/', true);
+  const rowSpans = () => [...appEl.querySelectorAll('.row span')];
+  const rowCbs = () => [...appEl.querySelectorAll('.cb') as unknown as HTMLInputElement[]];
+  assert(rowSpans().length === 2 && rowSpans()[0].textContent!.includes('a: todo'), 'row bind: both rows render');
+  (rowCbs()[1] as any).click();
+  await tick();
+  assert(rowSpans()[1].textContent!.includes('b: done'), 'row bind: clicking row b checks it');
+  assert(rowSpans()[0].textContent!.includes('a: todo'), 'row bind: row a did not move');
+  (rowCbs()[1] as any).click();
+  await tick();
+  assert(rowSpans()[1].textContent!.includes('b: todo'), 'row bind: clicking again unchecks it');
+}
+
+// Two-way bindings on member paths: `bind:value={form.name}` writes the field
+// back immutably (the owner is replaced by a copy, so the signal fires).
+{
+  const { writeFileSync, mkdirSync, rmSync } = await import('fs');
+  const { tmpdir } = await import('os');
+  const { join } = await import('path');
+  const { pathToFileURL } = await import('url');
+  const { buildProject } = await import('../src/compiler/index.js');
+  const bpRoot = join(tmpdir(), 'rosezm-bindpath');
+  rmSync(bpRoot, { recursive: true, force: true });
+  mkdirSync(join(bpRoot, 'src', 'pages'), { recursive: true });
+  writeFileSync(join(bpRoot, 'src', 'pages', 'index.rose'), `<script>
+  let form = $state({ name: 'x', nested: { deep: 1 } });
+  let agree = $state(false);
+</script>
+
+<input id="bp-name" bind:value={form.name} />
+<input id="bp-deep" bind:value={form.nested.deep} />
+<input id="bp-agree" type="checkbox" bind:checked={agree} />
+<p id="bp-out">name: {form.name} deep: {form.nested.deep} agree: {agree ? 'yes' : 'no'}</p>
+`);
+  const bpOut = join(tmpdir(), 'rosezm-bindpath-dist');
+  rmSync(bpOut, { recursive: true, force: true });
+  await buildProject(bpRoot, bpOut);
+  location.pathname = '/';
+  document.getElementById('__rosezm_state')?.remove();
+  const bpServer = await import(pathToFileURL(join(bpOut, 'server.js')).href);
+  const bpPage = await bpServer.renderPage('/');
+  const bpState = document.createElement('script');
+  bpState.id = '__rosezm_state';
+  bpState.textContent = bpPage.state;
+  document.body.appendChild(bpState);
+  appEl.innerHTML = bpPage.html;
+  const bpClient = await import(pathToFileURL(join(bpOut, 'client.js')).href);
+  await bpClient.start(appEl, '/', true);
+  const bpName = appEl.querySelector('#bp-name') as HTMLInputElement;
+  const bpDeep = appEl.querySelector('#bp-deep') as HTMLInputElement;
+  const bpAgree = appEl.querySelector('#bp-agree') as HTMLInputElement;
+  const bpOutP = appEl.querySelector('#bp-out')!;
+  assert(bpOutP.textContent!.includes('name: x'), 'bind path: the SSR value renders');
+  bpName.value = 'hello';
+  bpName.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  assert(bpOutP.textContent!.includes('name: hello'), 'bind path: an edit writes the field back (form.name)');
+  bpDeep.value = '7';
+  bpDeep.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  await tick();
+  assert(bpOutP.textContent!.includes('deep: 7'), 'bind path: a NESTED path writes back (form.nested.deep)');
+  bpAgree.checked = true;
+  bpAgree.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  await tick();
+  assert(bpOutP.textContent!.includes('agree: yes'), 'bind path: bind:checked still works beside the path bindings');
+  assert(appEl.querySelector('#bp-name') === bpName, 'bind path: the input node identity survived the patch');
+}
+
 
 {
   const { writeFileSync, mkdirSync, rmSync } = await import('fs');
@@ -1456,23 +1625,23 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   (boxes[0] as any).dispatchEvent(new (dom.window as any).Event('change', { bubbles: true }));
   await tick();
   assert(appEl.textContent!.includes('Colors: green'), 'F1: uncheck filters the array');
-  // R120: component two-way props - the same three edits through the
+  // Component two-way props - the same three edits through the
   // component's own inputs, reporting out through on<Prop>Change.
   const cfVal = appEl.querySelector('.bind-demo input[placeholder="through the component"]')! as any;
   cfVal.value = 'Grace';
   cfVal.dispatchEvent(new (dom.window as any).Event('input', { bubbles: true }));
   await tick();
-  assert(appEl.textContent!.includes('Hello Grace!'), 'R120: a component input rendering value={prop} reports its edit back');
+  assert(appEl.textContent!.includes('Hello Grace!'), 'a component input rendering value={prop} reports its edit back');
   const cfOn = appEl.querySelector('.check-field input.cf-on')! as any;
   cfOn.checked = false;
   cfOn.dispatchEvent(new (dom.window as any).Event('change', { bubbles: true }));
   await tick();
-  assert(appEl.textContent!.includes('Not subscribed'), 'R120: bind:checked through a component prop flips the parent state');
+  assert(appEl.textContent!.includes('Not subscribed'), 'bind:checked through a component prop flips the parent state');
   const cfRed = appEl.querySelector('.check-field input.cf-red')! as any;
   cfRed.checked = true;
   cfRed.dispatchEvent(new (dom.window as any).Event('change', { bubbles: true }));
   await tick();
-  assert(appEl.textContent!.includes('Colors: green, red'), 'R120: bind:group through a component prop merges into the parent array (green survives)');
+  assert(appEl.textContent!.includes('Colors: green, red'), 'bind:group through a component prop merges into the parent array (green survives)');
 }
 
 {
@@ -1643,7 +1812,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   assert((appEl.querySelector('.eff-mirror') as HTMLElement)?.textContent === '14', 'F43: a fresh $effect registers on route re-entry (2*7=14)');
 }
 
-// --- R51: two separately-bundled runtime copies must share one state ---
+// --- two separately-bundled runtime copies must share one state ---
 // This is the property route-scoped inlining rests on: every per-page bundle
 // carries its own copy of the runtime, and the tables those copies index (the
 // one document, the one signal-key space, the one store namespace) are shared.
@@ -1703,7 +1872,7 @@ assert(shell.status === 200 && shell.html.includes('Please sign in'), 'without a
   }
 }
 
-// --- R52: without an async-local store, overlapping renders must serialise ---
+// --- without an async-local store, overlapping renders must serialise ---
 // isolateRender's fallback path (edge, client - no AsyncLocalStorage) swaps the
 // FIELDS of the one shared render-maps object, which is only sound while one
 // render runs at a time. Two overlapping renders used to interleave their

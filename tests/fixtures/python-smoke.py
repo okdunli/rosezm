@@ -199,7 +199,7 @@ try:
     result["param"] = params_state.get("id")
     result["param_data_call"] = ["data", "/blog/1"] in calls
 
-    # R213: navigation keeps a back-stack the way the web and a phone do. A link
+    # Navigation keeps a back-stack the way the web and a phone do. A link
     # follows with push=True, so showing the home page from /blog/1 remembers it
     # and back() returns. Back at the floor is a no-op, never an error.
     application.navigate("/")
@@ -248,7 +248,7 @@ try:
     # The fired callback re-rendered once, which must NOT arm another timer.
     result["defer_arm_after_fire"] = len(Widget.scheduled)
 
-    # R201/R202: on the desktop the build pass IS the recompute pass. /deftest
+    # R201/on the desktop the build pass IS the recompute pass. /deftest
     # carries a $derived (sq = n * n), an $effect that maintains mirror = n * 7
     # and an object class shorthand. Before R202 a bare read there raised
     # NameError inside rose_text - and rose_text catches every exception, so the
