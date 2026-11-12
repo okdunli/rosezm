@@ -361,16 +361,16 @@ if (failures) {
 </div>`, 'utf-8');
   const outComp: any = await compileComponent(tmpComp, pathB.join(process.cwd(), 'public'), 'twowaycomp', false, [], new Map());
   const srcComp: string = String(outComp.client ?? '');
-  check('R120 component bind:checked wires __p.onCheckedChange', srcComp.includes('__p.onCheckedChange?.(e.target.checked)'));
-  check('R120 component bind:group wires __p.onGroupChange with the array merge', srcComp.includes("__p.onGroupChange?.(e.target.checked ? [...__rvlive('group', group)"));
-  check('R120 component bind:group reads the live group for checked markers', srcComp.includes("__rvlive('checked', checked)") && srcComp.includes("__rvlive('group', group).includes("));
+  check('component bind:checked wires __p.onCheckedChange', srcComp.includes('__p.onCheckedChange?.(e.target.checked)'));
+  check('component bind:group wires __p.onGroupChange with the array merge', srcComp.includes("__p.onGroupChange?.(e.target.checked ? [...__rvlive('group', group)"));
+  check('component bind:group reads the live group for checked markers', srcComp.includes("__rvlive('checked', checked)") && srcComp.includes("__rvlive('group', group).includes("));
   safeRm(tmpComp);
 
   const tmpTv = pathB.join('.test-compiler-out', 'twoway-value.rose');
   fsB.writeFileSync(tmpTv, `<script>export let value = '';</script>\n<input value={value} placeholder="x">`, 'utf-8');
   const outTv: any = await compileComponent(tmpTv, pathB.join(process.cwd(), 'public'), 'twowayvalue', false, [], new Map());
   const srcTv: string = String(outTv.client ?? '');
-  check('R120 a plain value={prop} input becomes two-way (the export contract on web)', srcTv.includes('__p.onValueChange?.(') && srcTv.includes('data-on-input='));
+  check('a plain value={prop} input becomes two-way (the export contract on web)', srcTv.includes('__p.onValueChange?.(') && srcTv.includes('data-on-input='));
   safeRm(tmpTv);
 
   const tmpPage = pathB.join('.test-compiler-out', 'twoway-page.rose');
@@ -380,7 +380,7 @@ if (failures) {
   const regT: any = new Map([[pathB.resolve(pathB.dirname(tmpPage), 'TwowayBox.rose'), { index: 0, scopeKey: 'twowaybox', slots: [] }]]);
   const outPg: any = await compileComponent(tmpPage, pathB.join(process.cwd(), 'public'), 'twowaypage', false, [], regT);
   const srcPg: string = String(outPg.client ?? '');
-  check('R120 the call site passes the setter itself as onCheckedChange (no arrow - a `>` would truncate the tag scan)', srcPg.includes('"onCheckedChange": (setFlag)'));
+  check('the call site passes the setter itself as onCheckedChange (no arrow - a `>` would truncate the tag scan)', srcPg.includes('"onCheckedChange": (setFlag)'));
   safeRm(tmpPage);
   safeRm(tmpBox);
 
@@ -451,7 +451,7 @@ if (failures) {
   safeRm(path.join(HERE, '.test-compiler-tmp'), { recursive: true });
 }
 
-// BUG.md BZ: class:/style: expressions containing `>` - the quote-aware-only
+// class:/style: expressions containing `>` - the quote-aware-only
 // tag regex used to cut the tag at that `>` and the inner brace scan then
 // threw "missing its closing brace". The brace-aware scanRoseTag resolves it.
 {
@@ -474,7 +474,7 @@ if (failures) {
   fs.rmSync(tmpBZ, { force: true });
 }
 
-// BUG.md AY: an inline arrow handler with an object-literal argument, inside a
+// an inline arrow handler with an object-literal argument, inside a
 // file that carries a <style> (which is what turns the scope-attr pass on).
 // The quote-aware-only tag scan used to end the tag at the `>` of `=>` and the
 // client bundle came out as `() = data-rosezm-c="..."> ...`.
@@ -1145,7 +1145,7 @@ p { color: red; }
   const clientThunkAt = clientI.indexOf('const __rvct0');
   check('F17 handler: the thunk lands in the render() scope', thunkAt >= 0 && thunkAt < rootAt && clientThunkAt >= 0 && clientThunkAt < regAt && regAt < clientI.indexOf('const __root'));
   // The handler expressions are rewritten to the internal names - the
-  // shadowing const wins over the same-named signal. R278 (BUG.md BE): the
+ // shadowing const wins over the same-named signal. the earlier pass: the
   // handler keys carry the page's module namespace, so two pages can no longer
   // overwrite each other's registry entries.
   // The inline $setState now rewrites to the component's NAMESPACED
@@ -1153,14 +1153,14 @@ p { color: red; }
   // nonexistent signal and the click silently did nothing. The shadowing
   // const thunk is still what the setter is given.
   check('F17 handler: the binding reads the const, not the signal', /__h_[\w]+_0: \(\) => setZL17\(__rvct0\(\)\)/.test(clientI) && /__h_[\w]+_1: \(\) => setZL17\(__rvct1\(\)\)/.test(clientI));
-  // R633: the inline $setState fix that landed concurrently. A template
+  // the inline $setState fix that landed concurrently. A template
   // handler's explicit $setState('key', v) MUST become the component's
   // namespaced setter: left as a global setState with a bare key, the
   // write landed on a nonexistent signal and the click silently did
   // nothing. Pin both halves - the setter is used, the literal is gone.
-  check('R633: an inline $setState uses the namespaced setter', /__h_[\w]+_0: \(\) => setZL17\(/.test(clientI) && !/__h_[\w]+_0: \(\) => \$setState\(/.test(clientI));
-  check('R633: no inline handler keeps the global bare-key write', !/__h_[\w]+_\d+: \(\) => \$setState\('zL17'/.test(clientI));
-  check('F17 handler: keys are module-namespaced (BUG.md BE)', !clientI.includes('__h0: () =>') && /__h_[\w]+_0:/.test(clientI));
+  check('an inline $setState uses the namespaced setter', /__h_[\w]+_0: \(\) => setZL17\(/.test(clientI) && !/__h_[\w]+_0: \(\) => \$setState\(/.test(clientI));
+  check('no inline handler keeps the global bare-key write', !/__h_[\w]+_\d+: \(\) => \$setState\('zL17'/.test(clientI));
+ check('F17 handler: keys are module-namespaced', !clientI.includes('__h0:  =>') && /__h_[\w]+_0:/.test(clientI));
   // A bare-word handler names a script function to CALL; it is left alone.
   check('F17 handler: a bare-word handler is not renamed', clientI.includes('zN17') && !/__h_[\\w]+_2:/.test(clientI));
   // A block-level const is not hoisted - its thunk is emitted inline inside
@@ -1168,10 +1168,10 @@ p { color: red; }
   // pinned rather than papered over.
   check('F17 handler: a block-level const stays out of the handler scope', /__h_[\w]+_3: \(\) => setZL17\(zI17\)/.test(clientI) && srcI.includes('const __rvct2 = () => (zP17() + 1)') && srcI.indexOf('const __rvct2') > srcI.indexOf('const __root'));
 
-  // R278/R259 (BUG.md BE): an inline handler that reads an {#each} iteration
+ // the earlier pass: an inline handler that reads an {#each} iteration
   // variable used to be hoisted to the page module where the variable does not
   // exist - the click threw a swallowed ReferenceError (a button that silently
-  // does nothing). R259 makes the SAFE position work: a handler inside the
+  // does nothing). the earlier pass makes the SAFE position work: a handler inside the
   // each stays in the render closure, so the arrow captures the row. The
   // refusal remains for a position that cannot be proven safe (an arrow
   // OUTSIDE the each reading the variable).
@@ -1193,7 +1193,7 @@ p { color: red; }
       await compileComponent(pathBE2.resolve(rootBE2, 'handler-eachvar-ok.rose'), pathBE2.join(process.cwd(), 'public'), 'handlereachok', false, [], new Map());
       okCompiled = 'compiled';
     } catch (e) { okErr = String((e as { message?: string }).message ?? e); }
-    check('F17b BE: an each-variable arrow handler inside the each now compiles (R259)', okCompiled === 'compiled', okCompiled || okErr);
+    check('F17b BE: an each-variable arrow handler inside the each now compiles (the earlier pass)', okCompiled === 'compiled', okCompiled || okErr);
   }
   {
     const fsBE = await import('fs');
@@ -1226,7 +1226,7 @@ p { color: red; }
     check('F17b BE: the refusal is an E-TEMPLATE with a named-handler hint', refusedCode === 'E-TEMPLATE' && refusedHint.includes('name the handler in the script block'), refusedCode + ' | ' + refusedHint);
   }
 
-  // R279 (BUG.md AT): `$state('sort')`'s automatic setter `setSort` collided
+ // `$state('sort')`'s automatic setter `setSort` collided
   // with a user function of the same name - both landed in the module, and
   // esbuild refused the generated artifact with "already been declared",
   // pointing at the intermediate file instead of the .rose line. The build
@@ -1268,7 +1268,7 @@ p { color: red; }
     check('F17c AT: a renamed user function compiles clean', renamed === 'COMPILED', renamed);
   }
 
-  // BF (BUG.md, 2026-10-31): a $state named like a runtime export
+ // a $state named like a runtime export
   // (`let state = $state(...)`) made esbuild alias the import to the same
   // short name as the local destructuring - `let[n,i]=n(...)`, a TDZ
   // self-reference that 500s SSR renders on some pages only. The build now
@@ -1309,7 +1309,7 @@ p { color: red; }
     check('BF: a non-colliding name still compiles', okOut.includes('status') || okOut === 'COMPILED', okOut.slice(0, 80));
   }
 
-  // R280 (BUG.md AV): a comment in the template carrying a literal
+ // a comment in the template carrying a literal
   // `<script>`/`</script>` must not confuse the script extraction - the lazy
   // COMPONENT_RE used to grab from the first open tag it saw, so a JS comment
   // mentioning `<script>` plus the real block produced three openers and one
@@ -1341,7 +1341,7 @@ p { color: red; }
     }
   }
 
-  // R281 (BUG.md AU): a plain top-level const (`const FAQS = [...]`, not a
+ // a plain top-level const (`const FAQS = [...]`, not a
   // $state signal) reached an {#each} source bare and was callified into
   // `FAQS()` - a runtime "FAQS is not a function" with no hint. autoCall now
   // leaves the page's plain-const names bare (the eachMark wrapper supplies
@@ -1376,7 +1376,7 @@ p { color: red; }
     check('F27e AU: the source is not callified (no FAQS() in the emitted js)', !/FAQS\(\)/.test(src + String(r.client ?? '')), 'FAQS() leaked');
   }
 
-  // R282 (BUG.md BB): a plugin that injects a file's contents at compile time
+ // a plugin that injects a file's contents at compile time
   // used to be memoized on the .rose mtime alone - editing the injected file
   // served stale CSS until the source was touched. A transform may now return
   // `{ code, deps }`; each dep's mtime joins the memo key, so editing a dep
@@ -1658,7 +1658,7 @@ export default [{
     '.card :global(.md) { color: red }\n:global(body) { margin: 0 }\n.plain { color: blue }',
     'demo',
   );
-  // R277 (BUG.md BD): every scoped selector now emits two alternatives - the
+ // every scoped selector now emits two alternatives - the
   // subtree match and the self match - so the component's own ROOT element
   // receives its scoped rule. The assertions pin both halves.
   check('F27: mixed :global keeps the owning half scoped, the rest unscoped', out.includes('[data-rosezm-c="demo"] .card .md, [data-rosezm-c="demo"].card .md{color:red}'), out);
@@ -1666,7 +1666,7 @@ export default [{
   check('F27: plain selectors still scope', out.includes('[data-rosezm-c="demo"] .plain, [data-rosezm-c="demo"].plain{color:blue}'), out);
   // BD itself: the component root's own layout rule must be matchable.
   const rootOut = scopeCss('.admin-shell { display: flex }', 'admin/_layout');
-  check('F27b: a root-element rule carries the self match (BUG.md BD)', rootOut.includes('[data-rosezm-c="admin/_layout"].admin-shell{display:flex}'), rootOut);
+ check('F27b: a root-element rule carries the self match', rootOut.includes('[data-rosezm-c="admin/_layout"].admin-shell{display:flex}'), rootOut);
   check('F27b: the descendant half survives too', rootOut.includes('[data-rosezm-c="admin/_layout"] .admin-shell'), rootOut);
   // A comma list emits one self match per selector, never a merged one.
   const listOut = scopeCss('.x, .y { padding: 1px }', 'demo');
@@ -1877,7 +1877,7 @@ export default [{
 // a full prefix copy plus an end-anchored run that tries every start position,
 // quadratic. Every `</tag>` (a slash after a word character) and every `/` in
 // a `<script>` paid it: a 200KB static chunk took 10.8s to compile, a 56KB
-// script with 2500 divisions 0.7s (R44 snapshot A/B). The sizes below are
+// script with 2500 divisions 0.7s (the earlier round snapshot A/B). The sizes below are
 // chosen so the bad shape misses the bound by ~5x while the fixed shape beats
 // it by ~100x, so the guard is decisive without being machine-sensitive.
 {
@@ -2122,7 +2122,7 @@ export default [{
   safeRm('.test-compiler-out', { recursive: true });
 }
 
-// BUG.md AZ: consecutive top-level $derived declarations with braces inside
+// consecutive top-level $derived declarations with braces inside
 // string literals / comments / object shapes used to trip the top-level check
 // ("must be a top-level declaration") - the depth counter read literal braces.
 {
@@ -2143,7 +2143,7 @@ export default [{
   fs.rmSync(tmpAZ, { force: true });
 }
 
-// BUG.md BY: <head><style> interiors evaluate {@html expr} - the raw path used
+// <head><style> interiors evaluate {@html expr} - the raw path used
 // to ship the literal marker verbatim, so the browser dropped the whole block
 // and every injected rule (KaTeX fonts and the like) silently vanished.
 {
@@ -2161,7 +2161,7 @@ export default [{
   fs.rmSync(tmpH, { force: true });
 }
 
-// BUG.md CD: <svelte:window|body|head> used to pass through as an unknown
+// <svelte:window|body|head> used to pass through as an unknown
 // element - the build stayed green and the handler silently never bound. The
 // framework's own form is a modifier on any host element: on:keydown|window.
 {
@@ -2190,7 +2190,7 @@ function onKey(e) { console.log(e.key); }
   fs.rmSync(tmpOK, { force: true });
 }
 
-// BUG.md BC: $data may fetch('/api/...') with a RELATIVE url on the server.
+// $data may fetch('/api/...') with a RELATIVE url on the server.
 // Node's fetch used to throw on it and pushed every page into middleware
 // workarounds. The server bundle now routes the relative call to its own
 // handleApi - same process, the calling request's context, zero network.
@@ -2232,7 +2232,7 @@ let echoed = $data(async () => {
   safeRm(proj, { recursive: true });
 }
 
-// BUG.md BI: a regex literal containing a quote inside its character class must
+// a regex literal containing a quote inside its character class must
 // not flip the scanner's string state - the scanner swallowed the rest of the
 // function, so a state read after the regex shipped un-called (dead reactivity),
 // and a later local const could come out callified.

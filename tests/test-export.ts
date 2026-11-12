@@ -334,9 +334,9 @@ try {
   assert(wxml.includes('bindtap="__a0"'), 'a click handler is bound through a generated adapter');
   assert(!/bindtap="increment"/.test(wxml), 'a handler is never bound raw (it would get the mini-program event shape)');
   assert(wxml.includes('form-type="submit"'), 'a submit button carries form-type="submit"');
-  // R144/a native <form method="GET" action="/search"> has no mini-program
-  // equivalent - the attributes never appear in the WXML. R144 made the message
-  // honest ("dropped", not "kept as text"); R157 went further and made the form
+  // a native <form method="GET" action="/search"> has no mini-program
+  // equivalent - the attributes never appear in the WXML. the earlier pass made the message
+  // honest ("dropped", not "kept as text"); the earlier pass went further and made the form
   // actually work, so the attributes are now *translated* into a submit binding
   // rather than dropped, and no warning fires for them at all.
   const searchWxml = read('pages/search/search.wxml');
@@ -364,7 +364,7 @@ try {
   assert(/let body = '__action=' \+ encodeURIComponent\(name\)/.test(signFormJs), 'the action POST body is built');
   assert(/for \((?:var|const) k in fields\)/.test(signFormJs) && /encodeURIComponent\(String\(fields\[k\]\)\)/.test(signFormJs), 'the form fields ride in the action POST body');
   assert(/(?:var|const) fields = \(extra && extra\.detail && extra\.detail\.value\) \|\| \{\}/.test(signFormJs), 'the submit event supplies the form fields');
-  // R216/media elements map to native mini-program tags with their source.
+  // the media elements map to native mini-program tags with their source.
   const mediaWxml = read('pages/mediaprobe/mediaprobe.wxml');
   assert(mediaWxml.includes('<progress') && mediaWxml.includes('<video src="/media/demo.mp4"') && mediaWxml.includes('<audio src="/media/demo.mp3"'), 'progress/video/audio map to native WeChat tags with their source');
   // WXML's own components pass through verbatim: <progress value max> is a
@@ -379,7 +379,7 @@ try {
   // a kv list and evaluated at load, memoized for its TTL in wx storage, so the
   // page shows a real stamp instead of a permanent null.
   assert(/kv: \[\{ name: "stamp", fn: function \(\) \{ return \(\(\(\) => Date\.now\(\)\)\(\)\); \}, ttl: 60 \}\]/.test(read('pages/kvdemo/kvdemo.js')), 'the $kv compute expression is carried for the load-time seed');
-  // R159, at runtime: the mini-program kit is executable, so the seed is proven
+  // , at runtime: the mini-program kit is executable, so the seed is proven
   // by running it - the field is filled from the compute expression and the
   // value is memoized in storage for the TTL.
   {
@@ -606,7 +606,7 @@ try {
     assert(xApp.includes('struct RoseAlertView') && xApp.includes('UIAlertController') && xApp.includes('RoseKit.roseModalTitle'), 'xcode: the modal rides an alert cover wired to the kit options');
     assert(xApp.includes('fullScreenCover(isPresented: Binding(get: { RoseKit.roseScanRequested }') && xApp.includes('struct RoseScannerView') && xApp.includes('DataScannerViewController'), 'xcode: the app presents the DataScanner cover and the kit ships the scanner view');
     assert(xKit.includes('RoseKit.roseScanRequested = true'), 'xcode: the scan bridge flips the request flag the app observes');
-  // R-AF: the exported Swing tree must actually COMPILE. The shape gate above
+  // the exported Swing tree must actually COMPILE. The shape gate above
   // reads the tree; this one hands it to a real javac when the machine has one
   // (a JDK is not a dependency of the framework, so the check is skipped where
   // java is absent rather than failing the suite on a machine without it).
@@ -629,7 +629,7 @@ try {
       assert(jc.status === 0, `java: the exported Swing tree compiles with javac (${files.length} files)${jc.status === 0 ? '' : ': ' + (jc.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`);
     }
   }
-  // R-AF: the exported Flutter tree must actually ANALYZE clean. Same rule as
+  // the exported Flutter tree must actually ANALYZE clean. Same rule as
   // the Swing and WPF gates: a real toolchain when the machine has one.
   {
     const flutterOk = (() => {
@@ -644,7 +644,7 @@ try {
       assert(fa.status === 0, `flutter: the exported app analyzes clean${fa.status === 0 ? '' : ': ' + errs}`);
     }
   }
-  // R-AF: the exported WPF tree must actually BUILD. Same rule as the Swing
+  // the exported WPF tree must actually BUILD. Same rule as the Swing
   // gate: a real toolchain when the machine has one, skipped when it does not.
   {
     const dotnetOk = (() => {
@@ -891,7 +891,7 @@ try {
       const c9p = readFileSync(join(c9.outDir, 'src', 'pages', 'IndexPage.cpp'), 'utf8');
       assert(c9p.includes('std::floor(') && c9p.includes('std::pow(') && !/Math\./.test(c9p), 'cpp: Math.* is the cmath family, in the template too');
     }
-    // R10-R14: the shapes the later probe rounds found. One page per family,
+    // the shapes the later probe rounds found. One page per family,
     // one assertion per target - the regression guard for the whole batch.
     {
       const r14 = join(scratch, 'round-14');
@@ -929,7 +929,7 @@ try {
       const inChk = await exportProject('java', r14, { apiBase: 'x', outRoot: join(scratch, 'round-14-in') });
       const inChkP = readFileSync(join(inChk.outDir, 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'pages', 'IndexPage.java'), 'utf8');
       assert(inChkP.includes('RoseTheme.containsKey('), 'java: the in-check rides the kit membership test');
-    // R15: the shapes that combined (nested template + a string local +
+    // the shapes that combined (nested template + a string local +
     // Math.trunc) stubbed on flutter - the per-literal loop, the strLocals
     // coercion and the self-refusing `${` check interacted.
     {
@@ -952,7 +952,7 @@ try {
       assert(f15p.includes('outer $inner') || f15p.includes('outer \$inner'), 'flutter: the nested template interpolates natively');
       assert(!f15p.includes('Math.trunc'), 'flutter: Math.trunc does not survive raw');
     }
-    // R16: Number()/parseInt() on the kits that spell them.
+    // Number()/parseInt() on the kits that spell them.
     {
       const r16 = join(scratch, 'round-16');
       mkdirSync(join(r16, 'src', 'pages'), { recursive: true });
@@ -1575,7 +1575,7 @@ try {
       const compAxml = readFileSync(join(cai.outDir, 'components/ActForm/ActForm.axml'), 'utf8');
       assert(/onSubmit="submit"/.test(compAxml) && !/onSubmit="submit"[^>]*onSubmit/.test(compAxml), 'alipay: the form binds submit exactly once');
     }
-    // R22: the number family reaches the last two kits - Number/parseInt/
+    // the number family reaches the last two kits - Number/parseInt/
     // parseFloat/toFixed used to reach the .cpp and .py verbatim (no Qt
     // compiler locally, so nothing failed the build; the page just died at
     // runtime). A numeric-literal receiver (`3.14159.toFixed(2)`) is part of
@@ -1602,7 +1602,7 @@ try {
         assert(!/handler body not translated/.test(page), `${target}: the number-family handler is not a stub`);
       }
     }
-    // R18: a LOCAL arrow inside a handler - the declaration spells per target
+    // a LOCAL arrow inside a handler - the declaration spells per target
     // (Function lambda / delegate / lambda / closure), a reserved-word name
     // gains a `_` suffix everywhere, and the Object parameter's arithmetic
     // rides the kit numeric wrap (javac and dotnet refuse `n * 2` on Object).
@@ -1837,7 +1837,7 @@ try {
     const pc = spawnSync(PY, ['-c', `import ast; ast.parse(open(${JSON.stringify(join(sr.outDir, 'pages', 'index.py'))}, encoding='utf-8').read())`], { encoding: 'utf8' });
     assert(pc.status === 0, `python: the state-reads page byte-compiles${pc.status === 0 ? '' : ': ' + (pc.stderr ?? '').split('\n').slice(0, 3).join(' / ')}`);
   }
-  // R-AF: the exported SwiftUI tree must actually type-check. `swiftc` on a
+  // the exported SwiftUI tree must actually type-check. `swiftc` on a
   // Command Line Tools install cannot expand `@State` (the macro plugin ships
   // with Xcode), so the lock here is the shapes that failed before: a throwing
   // non-throwing function, a force-unwrapped non-optional, an array literal
@@ -2608,7 +2608,7 @@ try {
     assert(smokeResult.defer_flag_after === true, 'firing the timer flips the defer flag');
     assert(smokeResult.defer_shown_after === true, 'the deferred content renders after the timer fires');
     assert(smokeResult.defer_arm_after_fire === 1, `the re-render the timer triggers arms nothing further (${smokeResult.defer_arm_after_fire})`);
-    // R202/the same run also EXECUTES a page with a $derived, a $effect and
+    // the same run also EXECUTES a page with a $derived, a $effect and
     // a bare read, which is the only way to see a NameError the label fallback
     // would otherwise swallow. mirror = n * 7 must follow n as the handler bumps
     // it, and no label on the page may fall back to "failed to render".
@@ -2689,10 +2689,10 @@ try {
   // build time (the exported base is the fallback), and the kit reads it -
   // ROSEZM_API=https://... ./gradlew assembleRelease re-points the app.
   assert(kread('app/build.gradle.kts').includes('buildConfigField("String", "ROSEZM_API"') && kread('app/build.gradle.kts').includes('System.getenv("ROSEZM_API")') && kread('app/build.gradle.kts').includes('buildConfig = true'), 'the gradle fills ROSEZM_API from the environment with the baked base as fallback');
-  // A store build is not a debug build. Without a release block R8 never ran
+  // A store build is not a debug build. Without a release block the earlier round never ran
   // and `assembleRelease` shipped a 17 MB unsigned-unshrunk APK.
   assert(kread('app/build.gradle.kts').includes('isMinifyEnabled = true') && kread('app/build.gradle.kts').includes('isShrinkResources = true') && kread('app/build.gradle.kts').includes('proguard-android-optimize.txt'), 'the exported gradle ships a shrinking release build');
-  assert(existsSync(join(kdir, 'app', 'proguard-rules.pro')), 'the release build has the rules file R8 expects');
+  assert(existsSync(join(kdir, 'app', 'proguard-rules.pro')), 'the release build has the rules file the earlier round expects');
   assert(kread('app/src/main/java/dev/rosezm/app/kit/RoseKit.kt').includes('val ROSE_API_BASE: String = BuildConfig.ROSEZM_API'), 'the kit reads the base through BuildConfig');
   assert(kread('README.md').includes('ROSEZM_API=https://staging.example.com'), 'the Android README names the per-build override');
   assert(kread('app/src/main/res/values/themes.xml').includes('android:windowBackground') && !kread('app/src/main/res/values/themes.xml').includes('<style name="Theme.rosezm" parent="android:Theme.Material.Light.NoActionBar" />'), 'android: the launch window is painted the app colour, not a bare default');
@@ -3050,15 +3050,15 @@ try {
       mkdirSync(join(halfDir, 'target'), { recursive: true });
       writeFileSync(join(halfDir, 'Cargo.toml'), '[package]\n');
       const resumed = await exportProject('rust-core', capRoot, { apiBase: '', outRoot: halfRoot });
-      assert(existsSync(join(resumed.outDir, 'rosezm-export.json')), 'R553: a half-built rosezm tree is replaced without --force');
+      assert(existsSync(join(resumed.outDir, 'rosezm-export.json')), 'a half-built rosezm tree is replaced without --force');
       // But a directory with an UNKNOWN file is still somebody else's.
       const strangerDir = join(halfRoot, 'rust-web');
       mkdirSync(strangerDir, { recursive: true });
       writeFileSync(join(strangerDir, 'my-project.txt'), 'not an export\n');
       let refused2 = '';
       try { await exportProject('rust-web', capRoot, { apiBase: '', outRoot: halfRoot }); } catch (e) { refused2 = String((e as { code?: string }).code ?? e); }
-      assert(refused2 === 'E-EXPORT-DIR', 'R553: an unknown file still blocks the export');
-      assert(existsSync(join(strangerDir, 'my-project.txt')), 'R553: the stranger file survives the refusal');
+      assert(refused2 === 'E-EXPORT-DIR', 'an unknown file still blocks the export');
+      assert(existsSync(join(strangerDir, 'my-project.txt')), 'the stranger file survives the refusal');
       // A re-export needs no force: the previous export left its manifest.
       await exportProject('android', capRoot, { apiBase: '', outRoot: root });
       assert(existsSync(join(forced.outDir, 'rosezm-export.json')), 'a re-export into its own tree is allowed');
@@ -3246,15 +3246,15 @@ try {
     assert(androidIgnore.includes('*.jks') && androidIgnore.includes('key.properties'), 'android: the signing keystore is git-ignored');
     const flutterIgnore = readFileSync(join(scratch, 'gitignore-flutter', 'flutter', '.gitignore'), 'utf8');
     assert(flutterIgnore.includes('*.jks') && flutterIgnore.includes('.dart_tool/'), 'flutter: the keystore and the Dart caches are git-ignored');
-    // R602: the Rust family ignores its cargo caches — the root /target and,
+    // the Rust family ignores its cargo caches — the root /target and,
     // for the shells that embed the kernel crate, the kernel/target/ cache
     // the gate memo keeps across re-exports (~45MB+ into the first commit
     // otherwise). rust-core IS the kernel crate, so its root /target covers.
     for (const target of ['rust-core', 'rust-web', 'rust-mobile', 'rust-native', 'rust-desktop'] as const) {
       const r = await exportProject(target, giProj, { outRoot: join(scratch, `gitignore-${target}`) });
       const ignore = readFileSync(join(r.outDir, '.gitignore'), 'utf8');
-      assert(ignore.includes('/target'), `R602: ${target} ignores the root cargo target dir`);
-      if (target !== 'rust-core') assert(ignore.includes('kernel/target/'), `R602: ${target} ignores the embedded kernel's cargo cache`);
+      assert(ignore.includes('/target'), `${target} ignores the root cargo target dir`);
+      if (target !== 'rust-core') assert(ignore.includes('kernel/target/'), `${target} ignores the embedded kernel's cargo cache`);
     }
   }
 
@@ -3940,7 +3940,7 @@ try {
   assert(cppLeftovers.length === 0, 'no template/Rose syntax survives into C++');
   assert(cread('src/pages/DeftestPage.cpp').includes('hello'), 'the shared snippet expansion reaches C++ too');
 
-  // 13a. R202/what a page RUNS, not what it looks like. The example's
+  // 13a. the what a page RUNS, not what it looks like. The example's
   // deftest page carries a $derived, a $effect that writes state, BARE reads of
   // both, a list join and the class/style object shorthand - the constructs that
   // used to reach a native target as JS source and either fail to compile or fail
@@ -4172,7 +4172,7 @@ function setName() { $setState('tag', 'n=' + n()); }
   // 13g. {#boundary} degrades like the web - the subtree runs and a
   // throw renders the fallback text instead of killing the page. The seven
   // statement-shaped targets get a real try/catch; Flutter (a widget expression
-  // tree) wraps its builder in the roseBoundary helper - see R138.
+  // tree) wraps its builder in the roseBoundary helper - see the earlier pass.
   const BOUNDARY_TEXT = 'This section failed to render.';
   for (const [name, body] of [['Java', jIndex], ['C++', cread('src/pages/IndexPage.cpp')], ['C#', nread('Pages/IndexPage.cs')], ['Tk', pread('pages/index.py')], ['Swift', xread('rosezmApp/Pages/IndexView.swift')], ['ArkTS', aread('entry/src/main/ets/pages/IndexPage.ets')]] as Array<[string, string]>) {
     assert(body.includes(BOUNDARY_TEXT), `${name} renders the boundary fallback text`);
@@ -4276,8 +4276,8 @@ function setName() { $setState('tag', 'n=' + n()); }
 
   // A <select multiple> is a real multi-select on ALL TEN targets now
   // - mini program (checkbox-group), Compose/Flutter (toggling checkboxes), the
-  // four desktop targets (native multi-selection lists, R141), and Swift/ArkTS
-  // (toggling buttons/checkbox Toggles, R142). No target silently collapses the
+  // four desktop targets (native multi-selection lists, the earlier pass), and Swift/ArkTS
+  // (toggling buttons/checkbox Toggles, the earlier pass). No target silently collapses the
   // array to a scalar any more, and none needs to warn about it.
   const multiWarn = [...(result.warnings ?? []), ...(flutter.warnings ?? []), ...(python.warnings ?? []), ...(arkts.warnings ?? []), ...(android.warnings ?? []), ...(xcode.warnings ?? []), ...(java.warnings ?? []), ...(dotnet.warnings ?? []), ...(cpp.warnings ?? [])].filter((w) => /<select multiple>/.test(w));
   assert(multiWarn.length === 0, `no target warns about <select multiple> any more - all ten render it (${multiWarn.length})`);
@@ -4445,9 +4445,9 @@ function setName() { $setState('tag', 'n=' + n()); }
     page2.__bp1.call(page2, { detail: false });
     assert(page2.data.subscribed === false, 'unchecking the box writes back too');
   }
-  // R173/`{#defer}` is a streaming primitive - the web build flushes a
-  // placeholder and the content arrives later. R173 closed the gap the honest
-  // way (warn on the targets that could not honour it); R124 closed it for real.
+  // /`{#defer}` is a streaming primitive - the web build flushes a
+  // placeholder and the content arrives later. the earlier pass closed the gap the honest
+  // way (warn on the targets that could not honour it); the earlier pass closed it for real.
   // Every target now has a timer of its own: setTimeout on the mini programs and
   // ArkUI, Future.delayed / Task.sleep / LaunchedEffect on Flutter / SwiftUI /
   // Compose, a one-shot Swing DispatcherTimer Qt QTimer and Tk after() on the
@@ -4639,7 +4639,7 @@ function setName() { $setState('tag', 'n=' + n()); }
       assert(initLines.every((l) => !/===/.test(l)), `${t} normalizes === in a state initializer`);
       assert(txt.includes('"x"') || txt.includes("'x'"), `${t} still emits a plain literal initializer untouched`);
     }
-    // `s() || 'x'` is the case R176 could not fix - the emptiness test must
+    // `s() || 'x'` is the case the earlier pass could not fix - the emptiness test must
     // land on a real method call, not a mangled reference. The bug was a regex
     // whose `(?!\s*\()` lookahead is defeated by backtracking, so `s.toString()`
     // became `s["toStrin"]g()` in seven emitters.
@@ -4880,7 +4880,7 @@ function setName() { $setState('tag', 'n=' + n()); }
     assert(!/attrMark\(__c, \(\) => \(n\(\)\), 'x'\)/.test(ssr), 'x= is not mistaken for an attribute');
     assert(ssr.includes("attrMark(__c, () => (href()), 'href')"), 'a real attribute value still emits an attrMark');
   }
-  // A SECOND reactive attribute on the same tag. R183's `insideOpenTag`
+  // A SECOND reactive attribute on the same tag. the earlier `insideOpenTag`
   // looked only at the text before the span, so `<a href={x} title={y}>` had a
   // second span whose preceding text was just ` title=` - no `<a` in it - and
   // the second attribute fell through to the TEXT path. It emitted a literal
@@ -4906,7 +4906,7 @@ function setName() { $setState('tag', 'n=' + n()); }
     assert(ssr.includes("attrMark(__c, () => (hv()), 'href')"), 'the first reactive attribute emits an attrMark');
     assert(ssr.includes("attrMark(__c, () => (tv()), 'title')"), 'the SECOND reactive attribute on the same tag also emits an attrMark');
     assert(ssr.includes("attrMark(__c, () => (n()), 'width')"), 'a reactive attribute after static ones still emits an attrMark');
-    // The text cases from R183 must still be text.
+    // The text cases from the earlier pass must still be text.
     assert(new RegExp('total=";\\s*\\nh \\+= textMark\\(__c, \\(\\) => \\(n\\(\\)\\)\\)').test(ssr), 'total= is still text, not an attribute');
   }
   // The Electron shell's path guard. `resolved.startsWith(DIST)` is a
@@ -5207,7 +5207,7 @@ function setName() { $setState('tag', 'n=' + n()); }
     assert(faces.length === 1 && faces[0].family === 'Brand Sans' && faces[0].file === '/BrandSans.woff2', 'an @font-face rule is parsed into family + file');
     // The demo declares no @font-face, so its pubspec carries no fonts section.
     assert(!/^  fonts:/m.test(fread('pubspec.yaml')), 'a project with no @font-face emits no fonts section');
-    // R152 (end to end): a project that DOES declare one gets the font file
+    // (end to end): a project that DOES declare one gets the font file
     // copied into assets/fonts and a pubspec fonts entry naming it - so the
     // custom face actually renders instead of silently falling back.
     const fontProj = join(scratch, 'fontproj');
@@ -5440,46 +5440,46 @@ function setName() { $setState('tag', 'n=' + n()); }
   const twDart = readFileSync(join(flutter.outDir, 'lib', 'components', 'text_field.dart'), 'utf8');
   const twDBind = readFileSync(join(flutter.outDir, 'lib', 'pages', 'bind_demo.dart'), 'utf8');
   assert(twDart.includes('final void Function(dynamic)? onValueChange;') && twDart.includes('onValueChange?.call(value)'), 'Flutter declares the implicit change callback and wires the input to it');
-  assert(twDBind.includes('onValueChange: (v) => __set(\'name\', v)'), 'Flutter writes the parent state from the change callback');
+  assert(twDBind.includes('onValueChange: (v) => __set(\'name\', v)'), 'Flutter writes the parent state from the earlier pass callback');
   const twKt = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/components/TextField.kt'), 'utf8');
   const twKBind = readFileSync(join(kdir, 'app/src/main/java/dev/rosezm/app/pages/BindDemoPage.kt'), 'utf8');
   assert(twKt.includes('onValueChange: (String) -> Unit = {}') && twKt.includes('onValueChange = { v -> onValueChange(v) }'), 'Compose declares the implicit change callback and wires the input to it');
-  assert(twKBind.includes('onValueChange = { v -> name = v }'), 'Compose writes the parent state from the change callback');
+  assert(twKBind.includes('onValueChange = { v -> name = v }'), 'Compose writes the parent state from the earlier pass callback');
   const twSwift = readFileSync(join(xcode.outDir, 'rosezmApp', 'Components', 'TextFieldView.swift'), 'utf8');
   const twSBind = readFileSync(join(xcode.outDir, 'rosezmApp', 'Pages', 'BindDemoView.swift'), 'utf8');
   assert(twSwift.includes('var onValueChange: (Any?) -> Void = { _ in }') && twSwift.includes('set: { v in onValueChange(v) }'), 'SwiftUI declares the implicit change closure and wires the input to it');
-  assert(twSBind.includes('onValueChange: { v in name = v }'), 'SwiftUI writes the parent state from the change closure');
+  assert(twSBind.includes('onValueChange: { v in name = v }'), 'SwiftUI writes the parent state from the earlier pass closure');
   const twArk = readFileSync(join(arkts.outDir, 'entry/src/main/ets/components/TextFieldPage.ets'), 'utf8');
   const twABind = readFileSync(join(arkts.outDir, 'entry/src/main/ets/pages/BindDemoPage.ets'), 'utf8');
   assert(twArk.includes('onValueChange: (v: Object) => void = () => {};') && twArk.includes('this.onValueChange(value);'), 'ArkTS declares the implicit change callback and wires the input to it');
-  assert(twABind.includes('onValueChange: (v: Object) => { this.name = v; }'), 'ArkTS writes the parent state from the change callback');
+  assert(twABind.includes('onValueChange: (v: Object) => { this.name = v; }'), 'ArkTS writes the parent state from the earlier pass callback');
   const twPy = readFileSync(join(python.outDir, 'pages', 'bind_demo.py'), 'utf8');
   assert(twPy.includes("__var_name = tk.StringVar(value=st.get('name', ''))") && twPy.includes("__var_name.trace_add('write', lambda *_: st.__setitem__('name', __var_name.get()))"), 'Tkinter binds the inlined component input to the parent state');
   const twJava = readFileSync(join(java.outDir, 'src/main/java/dev/rosezm/app/components/TextFieldView.java'), 'utf8');
   const twJBind = readFileSync(join(java.outDir, 'src/main/java/dev/rosezm/app/pages/BindDemoPage.java'), 'utf8');
   assert(twJava.includes('java.util.function.Consumer<Object> onValueChange') && twJava.includes('onValueChange.accept(field.getText())'), 'Swing declares the implicit change callback and wires the field to it');
-  assert(twJBind.includes('v -> { app.set("name", v); app.render(); }'), 'Swing writes the parent state from the change callback');
+  assert(twJBind.includes('v -> { app.set("name", v); app.render(); }'), 'Swing writes the parent state from the earlier pass callback');
   const twNet = readFileSync(join(dotnet.outDir, 'Components/TextFieldView.cs'), 'utf8');
   const twNBind = readFileSync(join(dotnet.outDir, 'Pages/BindDemoPage.cs'), 'utf8');
   assert(twNet.includes('Action<object?> onValueChange') && twNet.includes('onValueChange(box.Text)'), 'WPF declares the implicit change callback and wires the box to it');
-  assert(twNBind.includes('(object? v) => { app.Set("name", v); app.Render(); }'), 'WPF writes the parent state from the change callback');
+  assert(twNBind.includes('(object? v) => { app.Set("name", v); app.Render(); }'), 'WPF writes the parent state from the earlier pass callback');
   const twCpp = readFileSync(join(cpp.outDir, 'src/components/TextFieldView.cpp'), 'utf8');
   const twCBind = readFileSync(join(cpp.outDir, 'src/pages/BindDemoPage.cpp'), 'utf8');
   const twHeader = readFileSync(join(cpp.outDir, 'src/pages.h'), 'utf8');
   assert(twCpp.includes('const std::function<void(const RoseValue&)>& onValueChange') && twCpp.includes('onValueChange(RoseValue(t.toStdString()))'), 'Qt declares the implicit change callback and wires the editor to it');
-  assert(twCBind.includes('app.set("name", v); app.render();'), 'Qt writes the parent state from the change callback');
+  assert(twCBind.includes('app.set("name", v); app.render();'), 'Qt writes the parent state from the earlier pass callback');
   assert(twHeader.includes('buildTextFieldView(RoseApp& app, QWidget* parent, const std::string& inst, const RoseValue& value, const RoseValue& placeholder, const std::function<void(const RoseValue&)>& onValueChange)'), 'the Qt header declares the two-way callback');
   const twMpWxml = readFileSync(join(result.outDir, 'components', 'TextField', 'TextField.wxml'), 'utf8');
   const twMpJs = readFileSync(join(result.outDir, 'components', 'TextField', 'TextField.js'), 'utf8');
   const twMpPage = readFileSync(join(result.outDir, 'pages', 'bind-demo', 'bind-demo.wxml'), 'utf8');
   const twMpPageJs = readFileSync(join(result.outDir, 'pages', 'bind-demo', 'bind-demo.js'), 'utf8');
   assert(twMpWxml.includes('bindinput=') && twMpJs.includes('this.triggerEvent("valuechange"'), 'the mini-program component reports its edits as an event');
-  assert(twMpPage.includes('bind:valuechange="__bp0"') && twMpPageJs.includes('__bp0: function (e) { this.__set("name", e.detail); }'), 'the mini-program call site binds the change event to the parent state');
+  assert(twMpPage.includes('bind:valuechange="__bp0"') && twMpPageJs.includes('__bp0: function (e) { this.__set("name", e.detail); }'), 'the mini-program call site binds the earlier pass event to the parent state');
 
   // Two-way CHECKBOX and GROUP props on a component - the gap the
   // remaining-depth list named. The state rides on the NAMED prop, the edit
   // comes back as the component's change event.
-  assert(twMpPage.includes('<check-field checked="{{subscribed}}" bind:checkedchange="__bp1" group="{{colors}}" bind:groupchange="__bp2"'), 'the mini-program call site passes checked/group on their OWN props with the change events bound');
+  assert(twMpPage.includes('<check-field checked="{{subscribed}}" bind:checkedchange="__bp1" group="{{colors}}" bind:groupchange="__bp2"'), 'the mini-program call site passes checked/group on their OWN props with the earlier pass events bound');
   const cgMpJs = readFileSync(join(result.outDir, 'components', 'CheckField', 'CheckField.js'), 'utf8');
   assert(cgMpJs.includes('triggerEvent("checkedchange", v)') && cgMpJs.includes('var own = ["red","blue"]') && cgMpJs.includes('triggerEvent("groupchange", next)'), 'the mini-program component converts the checkbox bool and MERGES its group options into the parent array');
   const cgMpWxml = readFileSync(join(result.outDir, 'components', 'CheckField', 'CheckField.wxml'), 'utf8');
@@ -5492,7 +5492,7 @@ function setName() { $setState('tag', 'n=' + n()); }
   // 14. inline handlers : the bare signal form
   // `on:click={taps.set(taps() + 1)}` and the arrow form
   // `on:click={() => $setState('stamped', total)}` must leave as a real state
-  // write in EVERY target - before R99 eight of the ten dropped them with a
+  // write in EVERY target - before the earlier round eight of the ten dropped them with a
   // warning and the exported button did nothing. The demo carries both forms
   // (bare.rose / const-demo.rose), so the same source proves all ten.
   const inlineTargets: Array<[string, string, string]> = [
@@ -5942,7 +5942,7 @@ function setName() { $setState('tag', 'n=' + n()); }
   // what it cannot carry: every dropped construct is named - selectors, hover
   // halves, width guards, keyframes, feature tests - and so is the dynamic half
   // and a literal style="" it has nowhere to apply.
-  // (ArkTS left this list in R194, Python in R195, WPF in R196 and Swing in
+  // (ArkTS left this list in the earlier pass, Python in the earlier pass, WPF in the earlier pass and Swing in
   // all four resolve the shared engine now.)
   const legacyProj = join(scratch, 'legacyproj');
   mkdirSync(join(legacyProj, 'src/pages'), { recursive: true });
@@ -5960,7 +5960,7 @@ function setName() { $setState('tag', 'n=' + n()); }
 <div class={tone} style:color={accent}>bound</div>
 <p style="margin: 4px">plain</p>
 `);
-  // The last target on the legacy parser was C++/Qt. R200 carried it onto the
+  // The last target on the legacy parser was C++/Qt. the earlier pass carried it onto the
   // shared cascade, so the fixture above is now CARRIED, not dropped: what Qt
   // genuinely cannot paint (a hover half, keyframes, a feature test) is still
   // named once each, the descendant chain and the width guard resolve, and the
@@ -6495,7 +6495,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
   // A `void x;` line is the compiler's own "I know this is unused" marker.
   // In the emitters it means a value was computed and thrown away, which is
   // either dead code (a computation nobody reads) or a rewrite that was planned
-  // and never landed - R189 found three targets discarding the very parameter
+  // and never landed - the earlier pass found three targets discarding the very parameter
   // their handler path needed. Only the documented decisions survive: the
   // desktop targets deliberately run exported actions locally, so the action
   // list they extract is intentionally unused.
@@ -7051,7 +7051,7 @@ ${NATIVE_CAPABILITIES.map((c) => `    out = out + String(await useNative('${c}',
     assert(open === close, `the Swing active page stays balanced (${open}/${close})`);
   }
 
-  // Qt consumes `:active` fourth. The R256 RoseFocusFilter shape applies:
+  // Qt consumes `:active` fourth. The change RoseFocusFilter shape applies:
   // a MouseButtonPress/Release filter applies the active entry on press and the
   // base on release; the entry registers in the same second pass, adopting the
   // base border width for a recolor-only half.
@@ -7518,7 +7518,7 @@ h2 { font-size: 40px; }
     assert(/:first-child|:nth-child/.test(p.warnings.join('\n')) && !/\.item:first-child.*bold/.test(p.warnings.join('\n')), 'the warning explains it would otherwise style every match');
     assert(parseStylesheet('.memo { color: red }') === parseStylesheet('.memo { color: red }'), 'a stylesheet is parsed once per exact text (export all reuses it)');
   }
-  // R-AF: the modern shorthands real stylesheets write. The engine had the
+  // the modern shorthands real stylesheets write. The engine had the
   // longhands only, so `inset: 0` positioned nothing and said nothing.
   {
     const sheet = parseStylesheet([
@@ -7543,7 +7543,7 @@ h2 { font-size: 40px; }
     const foreign = parseStylesheet('.x { filter: blur(2px); outline: 1px solid red; inset: 0; }');
     const named = foreign.warnings.find((w) => w.startsWith('these declarations have no native answer'));
     assert(named !== undefined && /outline/.test(named) && !/inset/.test(named) && !/filter/.test(named), 'unsupported declarations are named once per sheet, filter carries a model, and a supported shorthand is not blamed');
-    assert(foreign.rules[0]?.model.filterBlur === 2, 'R514: blur carries into the model instead of dropping');
+    assert(foreign.rules[0]?.model.filterBlur === 2, 'blur carries into the model instead of dropping');
   }
   // The dark half is kept and marked, so a target that follows the system
   // appearance can apply it while the light resolve never sees it.
@@ -7834,7 +7834,7 @@ h2 { font-size: 40px; }
     // ArkTS no longer just names the hover it cannot do - it does it, with a
     // pointer flag, .onHover(), and the hover model in the runtime style table.
     assert(/\.onHover\(\(isHover: boolean\) => \{ this\.__h_/.test(hPage), 'arkts: a hover rule flips a @State flag from onHover');
-    // R260 FIX: the flag is class-only now (the rule's tag disagreed with the
+    // FIX: the flag is class-only now (the rule's tag disagreed with the
     // element's real tag for non-div elements, so the table key and the lookup
     // disagreed); the assertions spell the fixed name.
     assert(/@State __h_btn: boolean = false;/.test(hPage), 'arkts: the hover flag is a @State field, so setting it re-renders');
@@ -7843,7 +7843,7 @@ h2 { font-size: 40px; }
     assert(!(h.warnings ?? []).some((w) => /:hover on .* is dropped/.test(w)), 'arkts: hover is applied now, so it is no longer reported as dropped');
   }
 
-  // ArkTS `:focus` - the R243 hover shape adapted to ArkUI's focus pair:
+  // ArkTS `:focus` - the earlier pass hover shape adapted to ArkUI's focus pair:
   // a synthetic class keyed `__focus_<flag>` plus .onFocus/.onBlur writing the
   // same derived @State flag the attributeModifier reads. A recolor-only half
   // borrows the base row's border width.
@@ -8587,7 +8587,7 @@ h2 { font-size: 40px; }
 
   // The completeness gate - "can this export actually be opened?". The
   // other three gates ask whether the right CODE was emitted; this asks whether
-  // the FILES that make a project openable are all there. R238's electron bug
+  // the FILES that make a project openable are all there. the earlier electron bug
   // (an app that only showed "index.html is missing") passed every other gate.
   {
     const kProj = join(scratch, 'completeproj');
@@ -8625,7 +8625,7 @@ h2 { font-size: 40px; }
       const files = walk(k.outDir).map((f) => relative(k.outDir, f).replace(/\\/g, '/'));
       const missing = pats.filter((re) => !files.some((f) => re.test(f))).map((re) => re.source);
       assert(missing.length === 0, `${target}: every file the project needs to open is shipped (missing: ${missing.join(', ') || 'none'})`);
-      // And the manifest must tell the truth about what was exported - R231 found
+      // And the manifest must tell the truth about what was exported - the earlier pass found
       // electron claiming zero pages while the project had two.
       const manifest = JSON.parse(readFileSync(join(k.outDir, 'rosezm-export.json'), 'utf8'));
       assert((manifest.pages ?? []).length > 0, `${target}: the export manifest reports the pages it actually emitted`);
@@ -9047,7 +9047,7 @@ h2 { font-size: 40px; }
     }
   }
 
-  // R546: the Rust target - the first source-to-source Rust emitter, and the
+  // the Rust target - the first source-to-source Rust emitter, and the
   // same question the Zig server answers ("can the built site ship as ONE
   // binary with no runtime?") in the language a server team staffs for. Pure
   // std, zero dependencies: include_bytes! embeds the baked site, std::net
@@ -9855,7 +9855,7 @@ h2 { font-size: 40px; }
       process.exit(1);
     }
   }
-  // R504: the modern CSS properties the shared engine used to drop. A rule
+  // the modern CSS properties the shared engine used to drop. A rule
   // that states one of them is no longer a "no native answer" drop - the model
   // carries it, and every target that can paint it does. A target that cannot
   // says so in the export report, by name.
@@ -9877,28 +9877,28 @@ h2 { font-size: 40px; }
     // answer" any more.
     const cssWx = await exportProject('weapp', cssProj, { apiBase: 'x', outRoot: join(scratch, 'css-out-wx') });
     const cssWxWarns = (cssWx.warnings ?? []).join('\n');
-    assert(!cssWxWarns.includes('grid-template-columns') && !cssWxWarns.includes('text-shadow'), 'R504: the modern CSS properties are no longer dropped by the engine');
+    assert(!cssWxWarns.includes('grid-template-columns') && !cssWxWarns.includes('text-shadow'), 'the modern CSS properties are no longer dropped by the engine');
     // The mini program keeps its CSS verbatim - the declarations reach the
     // device's own CSS engine.
     const cssWxss = readFileSync(join(cssWx.outDir, 'pages/index/index.wxss'), 'utf8');
-    assert(cssWxss.includes('grid-template-columns: repeat(3, 1fr)'), 'R504: the mini program keeps the grid declaration verbatim');
-    assert(cssWxss.includes('clamp(10px, 50%, 300px)'), 'R504: the mini program keeps clamp() verbatim');
+    assert(cssWxss.includes('grid-template-columns: repeat(3, 1fr)'), 'the mini program keeps the grid declaration verbatim');
+    assert(cssWxss.includes('clamp(10px, 50%, 300px)'), 'the mini program keeps clamp() verbatim');
     // The native targets paint what they can and NAME what they cannot.
     const cssFl = await exportProject('flutter', cssProj, { apiBase: 'x', outRoot: join(scratch, 'css-out-fl') });
     const cssFlWarns = (cssFl.warnings ?? []).join('\n');
-    assert(!cssFlWarns.includes('no native answer - dropped: text-shadow'), 'R504: Flutter paints the text shadow instead of dropping it');
-    assert(cssFlWarns.includes('no Flutter equivalent - dropped:') && cssFlWarns.includes('pointer-events'), 'R504: Flutter NAMES the properties it cannot paint');
+    assert(!cssFlWarns.includes('no native answer - dropped: text-shadow'), 'Flutter paints the text shadow instead of dropping it');
+    assert(cssFlWarns.includes('no Flutter equivalent - dropped:') && cssFlWarns.includes('pointer-events'), 'Flutter NAMES the properties it cannot paint');
     const cssAk = await exportProject('arkts', cssProj, { apiBase: 'x', outRoot: join(scratch, 'css-out-ak') });
     const cssAkStyles = readFileSync(join(cssAk.outDir, 'entry/src/main/ets/kit/RoseStyles.ets'), 'utf8');
-    assert(cssAkStyles.includes('it.textShadowRadius'), 'R504: ArkTS carries the text shadow into its style table');
-    assert(cssAkStyles.includes('it.noPointer'), 'R504: ArkTS carries pointer-events: none into its style table');
+    assert(cssAkStyles.includes('it.textShadowRadius'), 'ArkTS carries the text shadow into its style table');
+    assert(cssAkStyles.includes('it.noPointer'), 'ArkTS carries pointer-events: none into its style table');
     const cssCpp = await exportProject('cpp', cssProj, { apiBase: 'x', outRoot: join(scratch, 'css-out-cpp') });
     const cssCppPage = readFileSync(join(cssCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(cssCppPage.includes('rose_grid('), 'R504: the C++ target builds a real QGridLayout for a grid');
-    assert((cssCpp.warnings ?? []).join('\n').includes('no Qt equivalent - dropped:'), 'R504: the C++ target NAMES the properties Qt cannot paint');
+    assert(cssCppPage.includes('rose_grid('), 'the C++ target builds a real QGridLayout for a grid');
+    assert((cssCpp.warnings ?? []).join('\n').includes('no Qt equivalent - dropped:'), 'the C++ target NAMES the properties Qt cannot paint');
   }
 
-  // R505: a member-path two-way binding - `bind:value={form.name}` - used to
+  // a member-path two-way binding - `bind:value={form.name}` - used to
   // die on every target: the web build shipped a literal `bind:value` attribute
   // (nothing bound it, and a page with ONLY bindings shipped no client bundle
   // at all), and the native targets emitted an empty onChange. The reads also
@@ -9919,36 +9919,36 @@ h2 { font-size: 40px; }
 `);
     // The web build ships the client bundle for a bindings-only page.
     const bpWeb = await buildProject(bpProj, join(scratch, 'bindpath-web'), {});
-    assert(bpWeb.routes.length === 1, 'R505: the bind-path page builds');
+    assert(bpWeb.routes.length === 1, 'the bind-path page builds');
     // The engine writes server.js into outDir; the document comes from
     // rendering through it (the CLI prerenders into its own cwd, not here).
     const bpServer = await import(pathToFileURL(join(scratch, 'bindpath-web', 'server.js')).href);
     const bpPage = await bpServer.renderPage('/');
     const bpHtml = bpPage.html as string;
-    assert(bpHtml.includes('data-on-input'), 'R505: the web document carries the bound input listeners');
-    assert(!bpHtml.includes('bind:value'), 'R505: no literal bind:value attribute survives into the document');
+    assert(bpHtml.includes('data-on-input'), 'the web document carries the bound input listeners');
+    assert(!bpHtml.includes('bind:value'), 'no literal bind:value attribute survives into the document');
     // The native targets wire the path write through their kit setters.
     const bpFl = await exportProject('flutter', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bindpath-fl') });
     const bpFlPage = readFileSync(join(bpFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(bpFlPage.includes('__writePath') && bpFlPage.includes("roseSetPath("), 'R505: Flutter writes the member path through the kit setter');
+    assert(bpFlPage.includes('__writePath') && bpFlPage.includes("roseSetPath("), 'Flutter writes the member path through the kit setter');
     const bpAk = await exportProject('arkts', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bindpath-ak') });
     const bpAkPage = readFileSync(join(bpAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(bpAkPage.includes('roseSetPath(this.form'), 'R505: ArkTS writes the member path through the kit setter');
-    assert(!bpAkPage.includes('onChange((value: string) => {})'), 'R505: ArkTS leaves no empty onChange on a bound input');
+    assert(bpAkPage.includes('roseSetPath(this.form'), 'ArkTS writes the member path through the kit setter');
+    assert(!bpAkPage.includes('onChange((value: string) => {})'), 'ArkTS leaves no empty onChange on a bound input');
     const bpAn = await exportProject('android', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bindpath-an') });
     const bpAnPage = readFileSync(join(bpAn.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(bpAnPage.includes('roseSetPath(form'), 'R505: Compose writes the member path through the kit setter');
+    assert(bpAnPage.includes('roseSetPath(form'), 'Compose writes the member path through the kit setter');
     // The member READ compiles on the desktop targets (the stray dot is gone).
     const bpDn = await exportProject('dotnet', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bindpath-dn') });
     const bpDnPage = readFileSync(join(bpDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(bpDnPage.includes('RoseTheme.Get(app.V("form"), "name")'), 'R505: the C# member read spells the kit Get');
-    assert(!/Get\([^()]*\)\s*\.\s*\)/.test(bpDnPage), 'R505: no stray dot after the spelled Get (was a compile error)');
+    assert(bpDnPage.includes('RoseTheme.Get(app.V("form"), "name")'), 'the C# member read spells the kit Get');
+    assert(!/Get\([^()]*\)\s*\.\s*\)/.test(bpDnPage), 'no stray dot after the spelled Get (was a compile error)');
     const bpJv = await exportProject('java', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bindpath-jv') });
     const bpJvPage = readFileSync(join(bpJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(!/get\([^()]*\)\s*\.\s*\)/.test(bpJvPage), 'R505: no stray dot in the Java member read');
+    assert(!/get\([^()]*\)\s*\.\s*\)/.test(bpJvPage), 'no stray dot in the Java member read');
   }
 
-  // R506: a row-field two-way binding - `bind:checked={item.done}` inside a
+  // a row-field two-way binding - `bind:checked={item.done}` inside a
   // keyed {#each} - writes back through the items state, by row reference.
   // The web build registers the write per row (the row's closure is where the
   // item lives); the Flutter export swaps the row inside a copied list.
@@ -9965,82 +9965,82 @@ h2 { font-size: 40px; }
 `);
     const rbFl = await exportProject('flutter', rbProj, { apiBase: 'x', outRoot: join(scratch, 'rowbind-fl') });
     const rbFlPage = readFileSync(join(rbFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(rbFlPage.includes('__setRowField("items"'), 'R506: Flutter writes the row field back through the items state');
-    assert(rbFlPage.includes('onChanged: (value)'), 'R506: the row checkbox is a live control, not a dead one');
-    assert(!rbFlPage.includes('Checkbox(value: false, onChanged: null)'), 'R506: no dead checkbox remains on a row-bound page');
+    assert(rbFlPage.includes('__setRowField("items"'), 'Flutter writes the row field back through the items state');
+    assert(rbFlPage.includes('onChanged: (value)'), 'the row checkbox is a live control, not a dead one');
+    assert(!rbFlPage.includes('Checkbox(value: false, onChanged: null)'), 'no dead checkbox remains on a row-bound page');
   }
 
-  // R507: the row-field checkbox reaches ArkTS and Compose too - the loop
+  // the row-field checkbox reaches ArkTS and Compose too - the loop
   // variable rides eachRoots, the write swaps the row at its index.
   {
     const rbAk = await exportProject('arkts', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-ak') });
     const rbAkPage = readFileSync(join(rbAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(rbAkPage.includes('roseSetRow(this.items, index'), 'R507: ArkTS writes the row field back at its index');
-    assert(!rbAkPage.includes('Toggle({ type: ToggleType.Checkbox, isOn: false })'), 'R507: no dead toggle remains on a row-bound page');
+    assert(rbAkPage.includes('roseSetRow(this.items, index'), 'ArkTS writes the row field back at its index');
+    assert(!rbAkPage.includes('Toggle({ type: ToggleType.Checkbox, isOn: false })'), 'no dead toggle remains on a row-bound page');
     const rbAn = await exportProject('android', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-an') });
     const rbAnPage = readFileSync(join(rbAn.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(rbAnPage.includes('roseSetRowIndexed(items, index'), 'R507: Compose writes the row field back at its index');
-    assert(!rbAnPage.includes('Checkbox(checked = false, onCheckedChange = null)'), 'R507: no dead checkbox remains on a row-bound page');
+    assert(rbAnPage.includes('roseSetRowIndexed(items, index'), 'Compose writes the row field back at its index');
+    assert(!rbAnPage.includes('Checkbox(checked = false, onCheckedChange = null)'), 'no dead checkbox remains on a row-bound page');
   }
 
-  // R508: the row-field checkbox reaches the WeChat mini program too - the
+  // the row-field checkbox reaches the WeChat mini program too - the
   // write path spells items[index].done (WXML subscript) and the kit's __set
   // applies the path immutably, with the row index riding the dataset.
   {
     const rbWx = await exportProject('weapp', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-wx') });
     const rbWxWxml = readFileSync(join(rbWx.outDir, 'pages/index/index.wxml'), 'utf8');
     const rbWxJs = readFileSync(join(rbWx.outDir, 'pages/index/index.js'), 'utf8');
-    assert(rbWxWxml.includes('checked="{{items[index].done}}"'), 'R508: the WXML reads the row field through the subscript path');
-    assert(rbWxWxml.includes('data-__rowidx="{{index}}"'), 'R508: the row index rides the dataset channel');
-    assert(rbWxJs.includes("replace('[index]', '[' + idx + ']')"), 'R508: the handler spells the write path with the concrete index');
+    assert(rbWxWxml.includes('checked="{{items[index].done}}"'), 'the WXML reads the row field through the subscript path');
+    assert(rbWxWxml.includes('data-__rowidx="{{index}}"'), 'the row index rides the dataset channel');
+    assert(rbWxJs.includes("replace('[index]', '[' + idx + ']')"), 'the handler spells the write path with the concrete index');
     // The kit set writes a dotted/subscripted path immutably.
     const rbWxKit = readFileSync(join(rbWx.outDir, 'utils/rosezm.js'), 'utf8');
-    assert(rbWxKit.includes('__setPath'), 'R508: the kit carries the immutable path setter');
+    assert(rbWxKit.includes('__setPath'), 'the kit carries the immutable path setter');
   }
 
-  // R509: the row-field checkbox reaches the desktop targets too - each
+  // the row-field checkbox reaches the desktop targets too - each
   // writes the row back BY VALUE through its kit (a copied list with the
   // swapped row), so a todo-list checkbox is a live control on every one.
   {
     const rbDn = await exportProject('dotnet', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-dn') });
     const rbDnPage = readFileSync(join(rbDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(rbDnPage.includes('RoseTheme.CheckBox(') && rbDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"done\" }, on)'), 'R509: WPF writes the row field back through a copied list');
-    assert(!rbDnPage.includes('new CheckBox()'), 'R509: no dead checkbox remains on a row-bound WPF page');
+    assert(rbDnPage.includes('RoseTheme.CheckBox(') && rbDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"done\" }, on)'), 'WPF writes the row field back through a copied list');
+    assert(!rbDnPage.includes('new CheckBox()'), 'no dead checkbox remains on a row-bound WPF page');
     const rbJv = await exportProject('java', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-jv') });
     const rbJvPage = readFileSync(join(rbJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(rbJvPage.includes('RoseTheme.checkBox(') && rbJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"done\"), on)'), 'R509: Swing writes the row field back through a copied list');
-    assert(!rbJvPage.includes('new JCheckBox()'), 'R509: no dead checkbox remains on a row-bound Swing page');
+    assert(rbJvPage.includes('RoseTheme.checkBox(') && rbJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"done\"), on)'), 'Swing writes the row field back through a copied list');
+    assert(!rbJvPage.includes('new JCheckBox()'), 'no dead checkbox remains on a row-bound Swing page');
     const rbCpp = await exportProject('cpp', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-cpp') });
     const rbCppPage = readFileSync(join(rbCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(rbCppPage.includes('rose_checkbox(') && rbCppPage.includes('rose_index_of(rows, item)'), 'R509: Qt writes the row field back through the row index');
-    assert(!rbCppPage.includes('new QCheckBox()'), 'R509: no dead checkbox remains on a row-bound Qt page');
+    assert(rbCppPage.includes('rose_checkbox(') && rbCppPage.includes('rose_index_of(rows, item)'), 'Qt writes the row field back through the row index');
+    assert(!rbCppPage.includes('new QCheckBox()'), 'no dead checkbox remains on a row-bound Qt page');
     const rbPy = await exportProject('python', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-py') });
     const rbPyPage = readFileSync(join(rbPy.outDir, 'pages/index.py'), 'utf8');
-    assert(rbPyPage.includes("__rowtoggle_item_done(row=item"), 'R509: Tk freezes the row through the factory default (no late binding)');
-    assert(rbPyPage.includes("r == row"), 'R509: Tk writes the row field back by value');
+    assert(rbPyPage.includes("__rowtoggle_item_done(row=item"), 'Tk freezes the row through the factory default (no late binding)');
+    assert(rbPyPage.includes("r == row"), 'Tk writes the row field back by value');
     // The generated Python still compiles.
     const { execFileSync } = await import('child_process');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(rbPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R509: the Tk page compiles under py_compile');
+      assert(true, 'the Tk page compiles under py_compile');
     } catch {
-      assert(false, 'R509: the Tk page compiles under py_compile');
+      assert(false, 'the Tk page compiles under py_compile');
     }
   }
 
-  // R510: the row-field checkbox reaches SwiftUI too - the enumerated offset
+  // the row-field checkbox reaches SwiftUI too - the enumerated offset
   // (__ri) writes through the kit's path setter, and the dead Toggle is gone.
   {
     const rbXc = await exportProject('xcode', join(scratch, 'rowbind'), { apiBase: 'x', outRoot: join(scratch, 'rowbind-xc') });
     const rbXcPage = readFileSync(join(rbXc.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(rbXcPage.includes('__ri, item in'), 'R510: the ForEach exposes its enumerated offset');
-    assert(rbXcPage.includes('roseSetPath(rows[__ri], ["done"], v)'), 'R510: SwiftUI writes the row field back at the offset');
-    assert(!rbXcPage.includes('Toggle(isOn: .constant(false))'), 'R510: no dead toggle remains on a row-bound SwiftUI page');
+    assert(rbXcPage.includes('__ri, item in'), 'the ForEach exposes its enumerated offset');
+    assert(rbXcPage.includes('roseSetPath(rows[__ri], ["done"], v)'), 'SwiftUI writes the row field back at the offset');
+    assert(!rbXcPage.includes('Toggle(isOn: .constant(false))'), 'no dead toggle remains on a row-bound SwiftUI page');
     const rbXcKit = readFileSync(join(rbXc.outDir, 'rosezmApp/Kit/RoseKit.swift'), 'utf8');
-    assert(rbXcKit.includes('func roseSetPath'), 'R510: the Swift kit carries the immutable path setter');
+    assert(rbXcKit.includes('func roseSetPath'), 'the Swift kit carries the immutable path setter');
   }
 
-  // R511: a row-field TEXT bind - `bind:value={item.text}` inside an {#each} -
+  // a row-field TEXT bind - `bind:value={item.text}` inside an {#each} -
   // reads the row field and writes it back on every target: the mobile three
   // through their kit path setters, the desktop four through a copied list.
   {
@@ -10056,41 +10056,41 @@ h2 { font-size: 40px; }
 `);
     const rvFl = await exportProject('flutter', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-fl') });
     const rvFlPage = readFileSync(join(rvFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(rvFlPage.includes("__setRowField('items'") && rvFlPage.includes('liveWrite:'), 'R511: Flutter reads and writes the row text field');
+    assert(rvFlPage.includes("__setRowField('items'") && rvFlPage.includes('liveWrite:'), 'Flutter reads and writes the row text field');
     const rvAk = await exportProject('arkts', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-ak') });
     const rvAkPage = readFileSync(join(rvAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(rvAkPage.includes('roseSetRow(this.items, index, ["text"]'), 'R511: ArkTS writes the row text back at its index');
-    assert(!rvAkPage.includes('.onChange((value: string) => {})'), 'R511: no empty onChange remains on a row-bound page');
+    assert(rvAkPage.includes('roseSetRow(this.items, index, ["text"]'), 'ArkTS writes the row text back at its index');
+    assert(!rvAkPage.includes('.onChange((value: string) => {})'), 'no empty onChange remains on a row-bound page');
     const rvAn = await exportProject('android', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-an') });
     const rvAnPage = readFileSync(join(rvAn.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(rvAnPage.includes('roseSetRowIndexed(items, index'), 'R511: Compose writes the row text back at its index');
-    assert(!rvAnPage.includes('item = roseSetPath(item,'), 'R511: no write to the loop variable itself (it never reaches the state)');
+    assert(rvAnPage.includes('roseSetRowIndexed(items, index'), 'Compose writes the row text back at its index');
+    assert(!rvAnPage.includes('item = roseSetPath(item,'), 'no write to the loop variable itself (it never reaches the state)');
     const rvDn = await exportProject('dotnet', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-dn') });
     const rvDnPage = readFileSync(join(rvDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(rvDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"text\" }, box.Text)'), 'R511: WPF writes the row text back through a copied list');
+    assert(rvDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"text\" }, box.Text)'), 'WPF writes the row text back through a copied list');
     const rvJv = await exportProject('java', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-jv') });
     const rvJvPage = readFileSync(join(rvJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(rvJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"text\"), field.getText())'), 'R511: Swing writes the row text back through a copied list');
+    assert(rvJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"text\"), field.getText())'), 'Swing writes the row text back through a copied list');
     const rvCpp = await exportProject('cpp', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-cpp') });
     const rvCppPage = readFileSync(join(rvCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(rvCppPage.includes('rose_index_of(rows, item)') && rvCppPage.includes('RoseValue(value)'), 'R511: Qt writes the row text back through the row index');
+    assert(rvCppPage.includes('rose_index_of(rows, item)') && rvCppPage.includes('RoseValue(value)'), 'Qt writes the row text back through the row index');
     const rvPy = await exportProject('python', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-py') });
     const rvPyPage = readFileSync(join(rvPy.outDir, 'pages/index.py'), 'utf8');
-    assert(rvPyPage.includes("__rowset_item_text(v, row=item"), 'R511: Tk freezes the row through the factory default');
+    assert(rvPyPage.includes("__rowset_item_text(v, row=item"), 'Tk freezes the row through the factory default');
     const { execFileSync } = await import('child_process');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(rvPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R511: the Tk page compiles under py_compile');
+      assert(true, 'the Tk page compiles under py_compile');
     } catch {
-      assert(false, 'R511: the Tk page compiles under py_compile');
+      assert(false, 'the Tk page compiles under py_compile');
     }
     const rvXc = await exportProject('xcode', rvProj, { apiBase: 'x', outRoot: join(scratch, 'rowvalue-xc') });
     const rvXcPage = readFileSync(join(rvXc.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(rvXcPage.includes('roseSetPath(rows[__ri], ["text"], v)'), 'R511: SwiftUI writes the row text back at the offset');
-    assert(!rvXcPage.includes('.constant(""))'), 'R511: no dead .constant binding remains on a row-bound SwiftUI page');
+    assert(rvXcPage.includes('roseSetPath(rows[__ri], ["text"], v)'), 'SwiftUI writes the row text back at the offset');
+    assert(!rvXcPage.includes('.constant(""))'), 'no dead .constant binding remains on a row-bound SwiftUI page');
   }
 
-  // R512: a DEEP row-field path - `bind:value={item.meta.nick}` - walks the
+  // a DEEP row-field path - `bind:value={item.meta.nick}` - walks the
   // path instead of flattening into the last key. The desktop kits carry the
   // recursive write (rose_set_path / deepPut / DeepPut / __deepset); the web
   // and mobile targets already walked the full path.
@@ -10106,29 +10106,29 @@ h2 { font-size: 40px; }
 {/each}
 `);
     const dpWeb = await buildProject(dpProj, join(scratch, 'deeprow-web'), {});
-    assert(dpWeb.routes.length === 1, 'R512: the deep-path page builds');
+    assert(dpWeb.routes.length === 1, 'the deep-path page builds');
     const dpCpp = await exportProject('cpp', dpProj, { apiBase: 'x', outRoot: join(scratch, 'deeprow-cpp') });
     const dpCppPage = readFileSync(join(dpCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(dpCppPage.includes('rose_set_path(row, std::vector<std::string>{\"meta\", \"nick\"}'), 'R512: Qt walks the deep path through rose_set_path');
+    assert(dpCppPage.includes('rose_set_path(row, std::vector<std::string>{\"meta\", \"nick\"}'), 'Qt walks the deep path through rose_set_path');
     const dpJv = await exportProject('java', dpProj, { apiBase: 'x', outRoot: join(scratch, 'deeprow-jv') });
     const dpJvPage = readFileSync(join(dpJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(dpJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"meta\", \"nick\")'), 'R512: Swing walks the deep path through deepPut');
+    assert(dpJvPage.includes('deepPut(RoseTheme.map(r), java.util.List.of(\"meta\", \"nick\")'), 'Swing walks the deep path through deepPut');
     const dpDn = await exportProject('dotnet', dpProj, { apiBase: 'x', outRoot: join(scratch, 'deeprow-dn') });
     const dpDnPage = readFileSync(join(dpDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(dpDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"meta\", \"nick\" }'), 'R512: WPF walks the deep path through DeepPut');
+    assert(dpDnPage.includes('DeepPut(RoseTheme.Map(r), new[] { \"meta\", \"nick\" }'), 'WPF walks the deep path through DeepPut');
     const dpPy = await exportProject('python', dpProj, { apiBase: 'x', outRoot: join(scratch, 'deeprow-py') });
     const dpPyPage = readFileSync(join(dpPy.outDir, 'pages/index.py'), 'utf8');
-    assert(dpPyPage.includes('__deepset(r, [\"meta\",\"nick\"]'), 'R512: Tk walks the deep path through __deepset');
+    assert(dpPyPage.includes('__deepset(r, [\"meta\",\"nick\"]'), 'Tk walks the deep path through __deepset');
     const { execFileSync } = await import('child_process');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(dpPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R512: the Tk page compiles under py_compile');
+      assert(true, 'the Tk page compiles under py_compile');
     } catch {
-      assert(false, 'R512: the Tk page compiles under py_compile');
+      assert(false, 'the Tk page compiles under py_compile');
     }
   }
 
-  // R513: a list item paints its marker the way a browser does with no
+  // a list item paints its marker the way a browser does with no
   // stylesheet at all - the li baseline carries list-style: disc, an <ol>'s
   // counter numbers its items, `list-style: none` draws nothing. The mini
   // program already painted markers through its CSS shell.
@@ -10145,43 +10145,43 @@ h2 { font-size: 40px; }
 `);
     const lsFl = await exportProject('flutter', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-fl') });
     const lsFlPage = readFileSync(join(lsFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(lsFlPage.includes('"• " + ') && lsFlPage.includes("'alpha'"), 'R513: Flutter paints the ul bullet');
-    assert(lsFlPage.includes('"1. " + ') && lsFlPage.includes('"2. " + '), 'R513: Flutter numbers the ol items');
+    assert(lsFlPage.includes('"• " + ') && lsFlPage.includes("'alpha'"), 'Flutter paints the ul bullet');
+    assert(lsFlPage.includes('"1. " + ') && lsFlPage.includes('"2. " + '), 'Flutter numbers the ol items');
     const lsAk = await exportProject('arkts', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-ak') });
     const lsAkPage = readFileSync(join(lsAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(lsAkPage.includes('Text("• " + ') && lsAkPage.includes('Text("1. " + '), 'R513: ArkTS paints both markers');
+    assert(lsAkPage.includes('Text("• " + ') && lsAkPage.includes('Text("1. " + '), 'ArkTS paints both markers');
     const lsAn = await exportProject('android', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-an') });
     const lsAnPage = readFileSync(join(lsAn.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(lsAnPage.includes('Text("• " + ') && lsAnPage.includes('Text("1. " + '), 'R513: Compose paints both markers');
+    assert(lsAnPage.includes('Text("• " + ') && lsAnPage.includes('Text("1. " + '), 'Compose paints both markers');
     const lsXc = await exportProject('xcode', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-xc') });
     const lsXcPage = readFileSync(join(lsXc.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(lsXcPage.includes('Text("• " + ') && lsXcPage.includes('Text("1. " + '), 'R513: SwiftUI paints both markers');
+    assert(lsXcPage.includes('Text("• " + ') && lsXcPage.includes('Text("1. " + '), 'SwiftUI paints both markers');
     const lsDn = await exportProject('dotnet', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-dn') });
     const lsDnPage = readFileSync(join(lsDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(lsDnPage.includes('"• " + ') && lsDnPage.includes('"1. " + '), 'R513: WPF paints both markers');
+    assert(lsDnPage.includes('"• " + ') && lsDnPage.includes('"1. " + '), 'WPF paints both markers');
     const lsJv = await exportProject('java', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-jv') });
     const lsJvPage = readFileSync(join(lsJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(lsJvPage.includes('"• " + ') && lsJvPage.includes('"1. " + '), 'R513: Swing paints both markers');
+    assert(lsJvPage.includes('"• " + ') && lsJvPage.includes('"1. " + '), 'Swing paints both markers');
     const lsCpp = await exportProject('cpp', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-cpp') });
     const lsCppPage = readFileSync(join(lsCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(lsCppPage.includes('"• " + ') && lsCppPage.includes('"1. " + '), 'R513: Qt paints both markers');
+    assert(lsCppPage.includes('"• " + ') && lsCppPage.includes('"1. " + '), 'Qt paints both markers');
     const lsPy = await exportProject('python', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-py') });
     const lsPyPage = readFileSync(join(lsPy.outDir, 'pages/index.py'), 'utf8');
-    assert(lsPyPage.includes('"• " + ') && lsPyPage.includes('"1. " + '), 'R513: Tk paints both markers');
+    assert(lsPyPage.includes('"• " + ') && lsPyPage.includes('"1. " + '), 'Tk paints both markers');
     const { execFileSync } = await import('child_process');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(lsPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R513: the Tk page compiles under py_compile');
+      assert(true, 'the Tk page compiles under py_compile');
     } catch {
-      assert(false, 'R513: the Tk page compiles under py_compile');
+      assert(false, 'the Tk page compiles under py_compile');
     }
     // list-style: none draws nothing on the target that reads the model.
     const lsWx = await exportProject('weapp', lsProj, { apiBase: 'x', outRoot: join(scratch, 'listmarks-wx') });
     const lsWxWxss = readFileSync(join(lsWx.outDir, 'app.wxss'), 'utf8');
-    assert(lsWxWxss.includes('.rose-li::before'), 'R513: the mini program shell still paints its CSS markers');
+    assert(lsWxWxss.includes('.rose-li::before'), 'the mini program shell still paints its CSS markers');
   }
 
-  // R514: the filter/border-collapse downgrade report is SPECIFIC - named by
+  // the filter/border-collapse downgrade report is SPECIFIC - named by
   // selector, carrying the value, and saying what THIS target draws. SwiftUI
   // draws blur/brightness natively; the other seven name the drop.
   {
@@ -10199,31 +10199,31 @@ h2 { font-size: 40px; }
 `);
     const fiXc = await exportProject('xcode', fiProj, { apiBase: 'x', outRoot: join(scratch, 'filters-xc') });
     const fiXcPage = readFileSync(join(fiXc.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(fiXcPage.includes('.blur(radius: 4)'), 'R514: SwiftUI draws blur(4px) natively');
-    assert(fiXcPage.includes('.brightness(-0.4)'), 'R514: SwiftUI draws brightness(0.6) as a -0.4 shift');
+    assert(fiXcPage.includes('.blur(radius: 4)'), 'SwiftUI draws blur(4px) natively');
+    assert(fiXcPage.includes('.brightness(-0.4)'), 'SwiftUI draws brightness(0.6) as a -0.4 shift');
     const fiXcWarns = (fiXc.warnings ?? []).join('\n');
-    assert(fiXcWarns.includes('.blur: filter: blur(4px) draws as a blur effect'), 'R514: the report says the blur is drawn');
-    assert(fiXcWarns.includes('.tbl: border-collapse: collapse - no native table borders to merge'), 'R514: the collapse note is specific, not a bare drop');
+    assert(fiXcWarns.includes('.blur: filter: blur(4px) draws as a blur effect'), 'the report says the blur is drawn');
+    assert(fiXcWarns.includes('.tbl: border-collapse: collapse - no native table borders to merge'), 'the collapse note is specific, not a bare drop');
     const fiFl = await exportProject('flutter', fiProj, { apiBase: 'x', outRoot: join(scratch, 'filters-fl') });
     const fiFlWarns = (fiFl.warnings ?? []).join('\n');
-    assert(fiFlWarns.includes('.blur: filter: blur(4px) has no flutter equivalent - dropped'), 'R514: Flutter names the blur drop with the selector and value');
-    assert(!fiFlWarns.includes('no native answer - dropped: filter'), 'R514: filter no longer lands in the generic drop list');
+    assert(fiFlWarns.includes('.blur: filter: blur(4px) has no flutter equivalent - dropped'), 'Flutter names the blur drop with the selector and value');
+    assert(!fiFlWarns.includes('no native answer - dropped: filter'), 'filter no longer lands in the generic drop list');
   }
 
-  // R515: Qt draws blur natively - a QGraphicsBlurEffect with the CSS radius,
+  // Qt draws blur natively - a QGraphicsBlurEffect with the CSS radius,
   // the report says so, and the alpha+blur trade is named.
   {
     const fiCpp = await exportProject('cpp', join(scratch, 'filters'), { apiBase: 'x', outRoot: join(scratch, 'filters-cpp2') });
     const fiCppPage = readFileSync(join(fiCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(/"cover", false, 0, 4, "", 400, ""\}/.test(fiCppPage), 'R515: the blur radius rides the style literal');
+    assert(/"cover", false, 0, 4, "", 400, ""\}/.test(fiCppPage), 'the blur radius rides the style literal');
     const fiCppKit = readFileSync(join(fiCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(fiCppKit.includes('QGraphicsBlurEffect') && fiCppKit.includes('setBlurRadius(style.blur)'), 'R515: Qt applies the blur effect natively');
+    assert(fiCppKit.includes('QGraphicsBlurEffect') && fiCppKit.includes('setBlurRadius(style.blur)'), 'Qt applies the blur effect natively');
     const fiCppWarns = (fiCpp.warnings ?? []).join('\n');
-    assert(fiCppWarns.includes('.blur: filter: blur(4px) draws as a blur effect'), 'R515: the report says the blur is drawn');
-    assert(fiCppWarns.includes('.dim: filter: brightness(0.6) has no cpp equivalent - dropped'), 'R515: the brightness drop is still named');
+    assert(fiCppWarns.includes('.blur: filter: blur(4px) draws as a blur effect'), 'the report says the blur is drawn');
+    assert(fiCppWarns.includes('.dim: filter: brightness(0.6) has no cpp equivalent - dropped'), 'the brightness drop is still named');
   }
 
-  // R516: vertical-align on a replaced element (an image) is CONSUMED where a
+  // vertical-align on a replaced element (an image) is CONSUMED where a
   // native widget has the alignment: Qt/Swing/WPF align the image inside its
   // own box, Tk through its anchor; the report stops blaming those targets.
   {
@@ -10243,70 +10243,70 @@ h2 { font-size: 40px; }
 `);
     const vaCpp = await exportProject('cpp', vaProj, { apiBase: 'x', outRoot: join(scratch, 'imgalign-cpp') });
     const vaCppPage = readFileSync(join(vaCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(/"middle"[,}]|\("middle"\)/.test(vaCppPage) && vaCppPage.includes('"bottom"'), 'R516: Qt carries the alignment in the image style');
+    assert(/"middle"[,}]|\("middle"\)/.test(vaCppPage) && vaCppPage.includes('"bottom"'), 'Qt carries the alignment in the image style');
     const vaCppKit = readFileSync(join(vaCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(vaCppKit.includes('style.v_align == "middle"') && vaCppKit.includes('setAlignment(Qt::AlignVCenter)'), 'R516: Qt aligns the image natively');
+    assert(vaCppKit.includes('style.v_align == "middle"') && vaCppKit.includes('setAlignment(Qt::AlignVCenter)'), 'Qt aligns the image natively');
     const vaJv = await exportProject('java', vaProj, { apiBase: 'x', outRoot: join(scratch, 'imgalign-jv') });
     const vaJvPage = readFileSync(join(vaJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(vaJvPage.includes('"middle"') && vaJvPage.includes('"bottom"'), 'R516: Swing carries the alignment in the image call');
+    assert(vaJvPage.includes('"middle"') && vaJvPage.includes('"bottom"'), 'Swing carries the alignment in the image call');
     const vaJvKit = readFileSync(join(vaJv.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
-    assert(vaJvKit.includes('setVerticalAlignment(SwingConstants.CENTER)'), 'R516: Swing aligns the image natively');
+    assert(vaJvKit.includes('setVerticalAlignment(SwingConstants.CENTER)'), 'Swing aligns the image natively');
     const vaDn = await exportProject('dotnet', vaProj, { apiBase: 'x', outRoot: join(scratch, 'imgalign-dn') });
     const vaDnPage = readFileSync(join(vaDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(vaDnPage.includes('"middle"') && vaDnPage.includes('"bottom"'), 'R516: WPF carries the alignment in the image call');
+    assert(vaDnPage.includes('"middle"') && vaDnPage.includes('"bottom"'), 'WPF carries the alignment in the image call');
     const vaDnKit = readFileSync(join(vaDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(vaDnKit.includes('image.VerticalAlignment = VerticalAlignment.Center'), 'R516: WPF aligns the image natively');
+    assert(vaDnKit.includes('image.VerticalAlignment = VerticalAlignment.Center'), 'WPF aligns the image natively');
     const vaPy = await exportProject('python', vaProj, { apiBase: 'x', outRoot: join(scratch, 'imgalign-py') });
     const vaPyPage = readFileSync(join(vaPy.outDir, 'pages/index.py'), 'utf8');
-    assert(vaPyPage.includes("anchor='center'") && vaPyPage.includes("anchor='s'"), 'R516: Tk aligns the image through its anchor');
+    assert(vaPyPage.includes("anchor='center'") && vaPyPage.includes("anchor='s'"), 'Tk aligns the image through its anchor');
     // The report stops blaming the four consumers for vertical-align.
     for (const [t, exp] of [['cpp', false], ['java', false], ['dotnet', false], ['python', false], ['flutter', false], ['android', false], ['arkts', false], ['xcode', false]] as Array<[string, boolean]>) {
       const exp2 = await exportProject(t, vaProj, { apiBase: 'x', outRoot: join(scratch, `imgalign-${t}`) });
       const blamed = (exp2.warnings ?? []).join('\n').includes('vertical-align');
-      assert(blamed === exp, `R516: ${t} ${exp ? 'still names' : 'no longer blames'} vertical-align`);
+      assert(blamed === exp, `${t} ${exp ? 'still names' : 'no longer blames'} vertical-align`);
     }
   }
 
-  // R517: the mobile two consume vertical-align on an image through a
+  // the mobile two consume vertical-align on an image through a
   // wrapper widget - Flutter's Align, Compose's Box with a contentAlignment -
   // and the reports stop blaming them. ArkTS/SwiftUI keep the honest drop.
   {
     const vaFl = await exportProject('flutter', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-fl2') });
     const vaFlPage = readFileSync(join(vaFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(vaFlPage.includes('Align(alignment: Alignment.centerLeft, child:'), 'R517: Flutter aligns the image through an Align wrapper');
-    assert(vaFlPage.includes('Alignment.bottomLeft'), 'R517: the bottom alignment reaches the wrapper too');
+    assert(vaFlPage.includes('Align(alignment: Alignment.centerLeft, child:'), 'Flutter aligns the image through an Align wrapper');
+    assert(vaFlPage.includes('Alignment.bottomLeft'), 'the bottom alignment reaches the wrapper too');
     const vaAn = await exportProject('android', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-an2') });
     const vaAnPage = readFileSync(join(vaAn.outDir, 'app/src/main/java/dev/rosezm/app/pages/IndexPage.kt'), 'utf8');
-    assert(vaAnPage.includes('contentAlignment = Alignment.CenterStart') && vaAnPage.includes('contentAlignment = Alignment.BottomStart'), 'R517: Compose aligns the image through a Box wrapper');
+    assert(vaAnPage.includes('contentAlignment = Alignment.CenterStart') && vaAnPage.includes('contentAlignment = Alignment.BottomStart'), 'Compose aligns the image through a Box wrapper');
     const vaFlWarns = (vaFl.warnings ?? []).join('\n');
-    assert(!vaFlWarns.includes('vertical-align'), 'R517: Flutter stops blaming vertical-align');
+    assert(!vaFlWarns.includes('vertical-align'), 'Flutter stops blaming vertical-align');
     const vaAnWarns = (vaAn.warnings ?? []).join('\n');
-    assert(!vaAnWarns.includes('vertical-align'), 'R517: Compose stops blaming vertical-align');
+    assert(!vaAnWarns.includes('vertical-align'), 'Compose stops blaming vertical-align');
     const vaAk = await exportProject('arkts', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-ak2') });
     const vaAkPage = readFileSync(join(vaAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(vaAkPage.includes('Stack({ alignContent: Alignment.Center })') && vaAkPage.includes('Alignment.Bottom'), 'R517: ArkTS aligns the image through a Stack wrapper');
+    assert(vaAkPage.includes('Stack({ alignContent: Alignment.Center })') && vaAkPage.includes('Alignment.Bottom'), 'ArkTS aligns the image through a Stack wrapper');
     const vaXc = await exportProject('xcode', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-xc2') });
     const vaXcPage = readFileSync(join(vaXc.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(vaXcPage.includes('HStack {') && vaXcPage.includes('.frame(maxWidth: .infinity, alignment: .bottom)'), 'R517: SwiftUI aligns the image through a frame wrapper');
+    assert(vaXcPage.includes('HStack {') && vaXcPage.includes('.frame(maxWidth: .infinity, alignment: .bottom)'), 'SwiftUI aligns the image through a frame wrapper');
   }
 
-  // R518: the last two targets consume vertical-align on an image too -
+  // the last two targets consume vertical-align on an image too -
   // ArkTS through a Stack with alignContent, SwiftUI through a full-width
   // HStack with a frame alignment - and both reports stop blaming it.
   {
     const vaAk2 = await exportProject('arkts', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-ak3') });
     const vaAk3 = readFileSync(join(vaAk2.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(vaAk3.includes('Stack({ alignContent: Alignment.Center })') && vaAk3.includes('Alignment.Bottom'), 'R518: ArkTS aligns the image through a Stack wrapper');
+    assert(vaAk3.includes('Stack({ alignContent: Alignment.Center })') && vaAk3.includes('Alignment.Bottom'), 'ArkTS aligns the image through a Stack wrapper');
     const vaAkWarns = (vaAk2.warnings ?? []).join('\n');
-    assert(!vaAkWarns.includes('vertical-align'), 'R518: ArkTS stops blaming vertical-align');
+    assert(!vaAkWarns.includes('vertical-align'), 'ArkTS stops blaming vertical-align');
     const vaXc2 = await exportProject('xcode', join(scratch, 'imgalign'), { apiBase: 'x', outRoot: join(scratch, 'imgalign-xc3') });
     const vaXc3 = readFileSync(join(vaXc2.outDir, 'rosezmApp/Pages/IndexView.swift'), 'utf8');
-    assert(vaXc3.includes('HStack {') && vaXc3.includes('alignment: .center') && vaXc3.includes('alignment: .bottom'), 'R518: SwiftUI aligns the image through a frame wrapper');
+    assert(vaXc3.includes('HStack {') && vaXc3.includes('alignment: .center') && vaXc3.includes('alignment: .bottom'), 'SwiftUI aligns the image through a frame wrapper');
     const vaXcWarns = (vaXc2.warnings ?? []).join('\n');
-    assert(!vaXcWarns.includes('vertical-align'), 'R518: SwiftUI stops blaming vertical-align');
+    assert(!vaXcWarns.includes('vertical-align'), 'SwiftUI stops blaming vertical-align');
   }
 
-  // R519: vertical-align on a TEXT block is consumed by the desktop four -
+  // vertical-align on a TEXT block is consumed by the desktop four -
   // each label positions its own text (Qt setAlignment, Swing setVertical-
   // Alignment, WPF host VerticalAlignment, Tk anchor) - closing the honesty
   // gap r516 left (the supported list claimed them, only images listened).
@@ -10321,31 +10321,31 @@ h2 { font-size: 40px; }
 `);
     const tvCpp = await exportProject('cpp', tvProj, { apiBase: 'x', outRoot: join(scratch, 'textva-cpp') });
     const tvCppPage = readFileSync(join(tvCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(/"middle"}\)\)/.test(tvCppPage) || tvCppPage.includes('rose_apply_text(__l, RoseStyle'), 'R519: Qt carries the text vertical-align in the style');
+    assert(/"middle"}\)\)/.test(tvCppPage) || tvCppPage.includes('rose_apply_text(__l, RoseStyle'), 'Qt carries the text vertical-align in the style');
     const tvCppKit = readFileSync(join(tvCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(tvCppKit.includes('style.v_align == "middle"') && tvCppKit.includes('setAlignment(align)'), 'R519: Qt aligns the label text natively');
+    assert(tvCppKit.includes('style.v_align == "middle"') && tvCppKit.includes('setAlignment(align)'), 'Qt aligns the label text natively');
     const tvJv = await exportProject('java', tvProj, { apiBase: 'x', outRoot: join(scratch, 'textva-jv') });
     const tvJvTheme = readFileSync(join(tvJv.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
-    assert(tvJvTheme.includes('.vAlign("middle")'), 'R519: Swing carries the text vertical-align in the style row');
-    assert(tvJvTheme.includes('setVerticalAlignment(SwingConstants.CENTER)'), 'R519: Swing aligns the label text natively');
+    assert(tvJvTheme.includes('.vAlign("middle")'), 'Swing carries the text vertical-align in the style row');
+    assert(tvJvTheme.includes('setVerticalAlignment(SwingConstants.CENTER)'), 'Swing aligns the label text natively');
     const tvDn = await exportProject('dotnet', tvProj, { apiBase: 'x', outRoot: join(scratch, 'textva-dn') });
     const tvDnPage = readFileSync(join(tvDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(tvDnPage.includes('VAlign = "middle"'), 'R519: WPF carries the text vertical-align in the style');
+    assert(tvDnPage.includes('VAlign = "middle"'), 'WPF carries the text vertical-align in the style');
     const tvDnKit = readFileSync(join(tvDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(tvDnKit.includes('host.VerticalAlignment = style.VAlign == "middle" ? VerticalAlignment.Center'), 'R519: WPF aligns the text block natively');
+    assert(tvDnKit.includes('host.VerticalAlignment = style.VAlign == "middle" ? VerticalAlignment.Center'), 'WPF aligns the text block natively');
     const tvPy = await exportProject('python', tvProj, { apiBase: 'x', outRoot: join(scratch, 'textva-py') });
     const tvPyPage = readFileSync(join(tvPy.outDir, 'pages/index.py'), 'utf8');
-    assert(tvPyPage.includes("anchor='center'"), 'R519: Tk positions the label text through its anchor');
+    assert(tvPyPage.includes("anchor='center'"), 'Tk positions the label text through its anchor');
     const { execFileSync } = await import('child_process');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(tvPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R519: the Tk page compiles under py_compile');
+      assert(true, 'the Tk page compiles under py_compile');
     } catch {
-      assert(false, 'R519: the Tk page compiles under py_compile');
+      assert(false, 'the Tk page compiles under py_compile');
     }
   }
 
-  // R521: a `li::marker` rule styles the GLYPH, not the list item - the
+  // a `li::marker` rule styles the GLYPH, not the list item - the
   // engine models the pseudo-element (the one it does), the cascade hands the
   // marker model to the li, and the Flutter emitter paints the marker as its
   // own styled run inside a roseRich.
@@ -10360,33 +10360,33 @@ li::marker { color: #e91e63; }
 `);
     const mkFl = await exportProject('flutter', mkProj, { apiBase: 'x', outRoot: join(scratch, 'markerstyle-fl') });
     const mkFlPage = readFileSync(join(mkFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(mkFlPage.includes("RoseRun(RoseStyle(color: Color(0xFFE91E63)), '• ')"), 'R521: Flutter paints the marker glyph in its own colour');
-    assert(mkFlPage.includes("RoseRun(null, 'alpha')"), 'R521: the text beside the marker keeps its own (default) style');
+    assert(mkFlPage.includes("RoseRun(RoseStyle(color: Color(0xFFE91E63)), '• ')"), 'Flutter paints the marker glyph in its own colour');
+    assert(mkFlPage.includes("RoseRun(null, 'alpha')"), 'the text beside the marker keeps its own (default) style');
     // The rule no longer lands in the outside-subset skip.
     const mkFlWarns = (mkFl.warnings ?? []).join('\n');
-    assert(!mkFlWarns.includes('li::marker'), 'R521: the ::marker rule is no longer reported as out-of-subset');
+    assert(!mkFlWarns.includes('li::marker'), 'the ::marker rule is no longer reported as out-of-subset');
   }
 
-  // R523: the desktop rich-text targets consume ::marker too - Qt through its
+  // the desktop rich-text targets consume ::marker too - Qt through its
   // rich-text label, Swing through the HTML label path, WPF through inline
   // runs; the glyph paints in ITS colour on all three. Tk (no rich text)
   // keeps the plain concatenation, named honestly.
   {
     const mkCpp = await exportProject('cpp', join(scratch, 'markerstyle'), { apiBase: 'x', outRoot: join(scratch, 'markerstyle-cpp') });
     const mkCppPage = readFileSync(join(mkCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(mkCppPage.includes('rose_html_label(') && mkCppPage.includes('color:#e91e63'), 'R523: Qt paints the marker glyph through its rich-text label');
+    assert(mkCppPage.includes('rose_html_label(') && mkCppPage.includes('color:#e91e63'), 'Qt paints the marker glyph through its rich-text label');
     const mkJv = await exportProject('java', join(scratch, 'markerstyle'), { apiBase: 'x', outRoot: join(scratch, 'markerstyle-jv') });
     const mkJvPage = readFileSync(join(mkJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(mkJvPage.includes("<font color='#e91e63'>"), 'R523: Swing paints the marker glyph through its HTML label');
+    assert(mkJvPage.includes("<font color='#e91e63'>"), 'Swing paints the marker glyph through its HTML label');
     const mkDn = await exportProject('dotnet', join(scratch, 'markerstyle'), { apiBase: 'x', outRoot: join(scratch, 'markerstyle-dn') });
     const mkDnPage = readFileSync(join(mkDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(mkDnPage.includes('FromHex("#e91e63")') && mkDnPage.includes('block.Inlines.Add'), 'R523: WPF paints the marker glyph through inline runs');
+    assert(mkDnPage.includes('FromHex("#e91e63")') && mkDnPage.includes('block.Inlines.Add'), 'WPF paints the marker glyph through inline runs');
     const mkPy = await exportProject('python', join(scratch, 'markerstyle'), { apiBase: 'x', outRoot: join(scratch, 'markerstyle-py') });
     const mkPyPage = readFileSync(join(mkPy.outDir, 'pages/index.py'), 'utf8');
-    assert(mkPyPage.includes('alpha') && !mkPyPage.includes('#e91e63'), 'R523: Tk keeps the plain concatenation (no rich text), honestly');
+    assert(mkPyPage.includes('alpha') && !mkPyPage.includes('#e91e63'), 'Tk keeps the plain concatenation (no rich text), honestly');
   }
 
-  // R524: ::marker's content replacement and font-family reach the model and
+  // ::marker's content replacement and font-family reach the model and
   // the consumers - the author's string IS the glyph, and the glyph paints in
   // its own family.
   {
@@ -10400,23 +10400,23 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
 `);
     const mk2Fl = await exportProject('flutter', mk2Proj, { apiBase: 'x', outRoot: join(scratch, 'markerfont-fl') });
     const mk2FlPage = readFileSync(join(mk2Fl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(mk2FlPage.includes("'▶ '"), 'R524: Flutter paints the author marker content instead of the bullet');
-    assert(mk2FlPage.includes("fontFamily: 'monospace'"), 'R524: the marker glyph paints in its own font family');
+    assert(mk2FlPage.includes("'▶ '"), 'Flutter paints the author marker content instead of the bullet');
+    assert(mk2FlPage.includes("fontFamily: 'monospace'"), 'the marker glyph paints in its own font family');
     const mk2Cpp = await exportProject('cpp', mk2Proj, { apiBase: 'x', outRoot: join(scratch, 'markerfont-cpp') });
     const mk2CppPage = readFileSync(join(mk2Cpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(mk2CppPage.includes('▶ ') && mk2CppPage.includes('color:#e91e63'), 'R524: Qt paints the replaced content in its colour');
+    assert(mk2CppPage.includes('▶ ') && mk2CppPage.includes('color:#e91e63'), 'Qt paints the replaced content in its colour');
     const mk2Jv = await exportProject('java', mk2Proj, { apiBase: 'x', outRoot: join(scratch, 'markerfont-jv') });
     const mk2JvPage = readFileSync(join(mk2Jv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(mk2JvPage.includes('▶ '), 'R524: Swing paints the replaced content');
+    assert(mk2JvPage.includes('▶ '), 'Swing paints the replaced content');
     const mk2Dn = await exportProject('dotnet', mk2Proj, { apiBase: 'x', outRoot: join(scratch, 'markerfont-dn') });
     const mk2DnPage = readFileSync(join(mk2Dn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(mk2DnPage.includes('Run("▶ ")'), 'R524: WPF paints the replaced content');
+    assert(mk2DnPage.includes('Run("▶ ")'), 'WPF paints the replaced content');
     // An ordinary rule stating `content` is named, not silently dropped.
     const mk2FlWarns = (mk2Fl.warnings ?? []).join('\n');
-    assert(mk2FlWarns.includes("content applies only inside ::marker here") || !mk2FlWarns.includes('content'), 'R524: an ordinary content declaration is named or absent, never silent');
+    assert(mk2FlWarns.includes("content applies only inside ::marker here") || !mk2FlWarns.includes('content'), 'an ordinary content declaration is named or absent, never silent');
   }
 
-  // R525: vertical-align: sub/super used to be SILENTLY dropped - the model
+  // vertical-align: sub/super used to be SILENTLY dropped - the model
   // declared the value, but every consumer only branched middle/top/bottom,
   // and TARGET_MODEL_ONLY_SUPPORT called the whole property "supported", so
   // the report never named it either. Now it is value-aware: middle/top/bottom
@@ -10437,29 +10437,29 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
     const ssCpp = await exportProject('cpp', ssProj, { apiBase: 'x', outRoot: join(scratch, 'subsup-cpp') });
     const ssCppKit = readFileSync(join(ssCpp.outDir, 'src/rose.cpp'), 'utf8');
     const ssCppPage = readFileSync(join(ssCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(ssCppKit.includes('run.style.v_align == "sub"') && ssCppKit.includes('<sub>'), 'R525: Qt wraps a sub run in <sub>');
+    assert(ssCppKit.includes('run.style.v_align == "sub"') && ssCppKit.includes('<sub>'), 'Qt wraps a sub run in <sub>');
     // The page must actually emit the sub run (not an image/label path).
-    assert(ssCppPage.includes('rose_rich_label') || ssCppPage.includes('<sub>'), 'R525: Qt emits the sub run through rich text');
+    assert(ssCppPage.includes('rose_rich_label') || ssCppPage.includes('<sub>'), 'Qt emits the sub run through rich text');
     const ssJv = await exportProject('java', ssProj, { apiBase: 'x', outRoot: join(scratch, 'subsup-jv') });
     const ssJvTheme = readFileSync(join(ssJv.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
-    assert(ssJvTheme.includes('"sub".equals(s.vAlign)') && ssJvTheme.includes('<sub>'), 'R525: Swing wraps a sub run in <sub>');
+    assert(ssJvTheme.includes('"sub".equals(s.vAlign)') && ssJvTheme.includes('<sub>'), 'Swing wraps a sub run in <sub>');
     const ssDn = await exportProject('dotnet', ssProj, { apiBase: 'x', outRoot: join(scratch, 'subsup-dn') });
     const ssDnKit = readFileSync(join(ssDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(ssDnKit.includes('style.VAlign == "sub"') && ssDnKit.includes('FontVariants.Subscript'), 'R525: WPF renders sub through FontVariants');
-    assert(ssDnKit.includes('style.VAlign == "super"') && ssDnKit.includes('FontVariants.Superscript'), 'R525: WPF renders super through FontVariants');
+    assert(ssDnKit.includes('style.VAlign == "sub"') && ssDnKit.includes('FontVariants.Subscript'), 'WPF renders sub through FontVariants');
+    assert(ssDnKit.includes('style.VAlign == "super"') && ssDnKit.includes('FontVariants.Superscript'), 'WPF renders super through FontVariants');
     // The five mobile targets have no inline subscript - the report NAMES it.
     for (const t of ['flutter', 'android', 'arkts', 'xcode', 'python'] as const) {
       const ex = await exportProject(t, ssProj, { apiBase: 'x', outRoot: join(scratch, `subsup-${t}`) });
       const named = (ex.warnings ?? []).join('\n').includes('vertical-align:sub');
-      assert(named, `R525: ${t} names vertical-align:sub instead of dropping it silently`);
+      assert(named, `${t} names vertical-align:sub instead of dropping it silently`);
       const namedSup = (ex.warnings ?? []).join('\n').includes('vertical-align:super');
-      assert(namedSup, `R525: ${t} names vertical-align:super instead of dropping it silently`);
+      assert(namedSup, `${t} names vertical-align:super instead of dropping it silently`);
     }
     // The desktop three must NOT name sub/super (they render it).
     for (const t of ['cpp', 'java', 'dotnet'] as const) {
       const ex = await exportProject(t, ssProj, { apiBase: 'x', outRoot: join(scratch, `subsup-ok-${t}`) });
       const named = (ex.warnings ?? []).join('\n').includes('vertical-align:sub') || (ex.warnings ?? []).join('\n').includes('vertical-align:super');
-      assert(!named, `R525: ${t} does not name sub/super - it renders it`);
+      assert(!named, `${t} does not name sub/super - it renders it`);
     }
     // middle/top/bottom stay consumed-and-invisible (no warning) on every target.
     const mtProj = join(scratch, 'midtop');
@@ -10474,11 +10474,11 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
     for (const t of ['flutter', 'android', 'arkts', 'xcode', 'python', 'cpp', 'java', 'dotnet'] as const) {
       const ex = await exportProject(t, mtProj, { apiBase: 'x', outRoot: join(scratch, `midtop-${t}`) });
       const named = (ex.warnings ?? []).join('\n').includes('vertical-align');
-      assert(!named, `R525: ${t} stays silent on middle/top/bottom (consumed, not dropped)`);
+      assert(!named, `${t} stays silent on middle/top/bottom (consumed, not dropped)`);
     }
   }
 
-  // R526: a LITERAL <sub>/<sup> tag carries no stylesheet declaration, so it
+  // a LITERAL <sub>/<sup> tag carries no stylesheet declaration, so it
   // used to flatten to plain runs on every target - neither rendered nor named.
   // Now: desktop three render it (their rich text wraps the run), Flutter paints
   // a smaller baseline-offset WidgetSpan, and the mobile four NAME the loss.
@@ -10490,36 +10490,36 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
     // Desktop three: the run carries the shift into the rich text.
     const tagCpp = await exportProject('cpp', tagProj, { apiBase: 'x', outRoot: join(scratch, 'lss-cpp') });
     const tagCppPage = readFileSync(join(tagCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(tagCppPage.includes('"sub", 400, ""}, "2"'), 'R526: Qt emits the literal <sub> run with its shift');
-    assert(tagCppPage.includes('"super", 400, ""}, "+"'), 'R526: Qt emits the literal <sup> run with its shift');
+    assert(tagCppPage.includes('"sub", 400, ""}, "2"'), 'Qt emits the literal <sub> run with its shift');
+    assert(tagCppPage.includes('"super", 400, ""}, "+"'), 'Qt emits the literal <sup> run with its shift');
     const tagCppKit = readFileSync(join(tagCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(tagCppKit.includes('run.style.v_align == "sub"') && tagCppKit.includes('<sub>'), 'R526: Qt wraps the sub run in <sub>');
+    assert(tagCppKit.includes('run.style.v_align == "sub"') && tagCppKit.includes('<sub>'), 'Qt wraps the sub run in <sub>');
     const tagJv = await exportProject('java', tagProj, { apiBase: 'x', outRoot: join(scratch, 'lss-jv') });
     const tagJvPage = readFileSync(join(tagJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(tagJvPage.includes('.vAlign("sub")') && tagJvPage.includes('.vAlign("super")'), 'R526: Swing emits the literal sub/sup shifts');
+    assert(tagJvPage.includes('.vAlign("sub")') && tagJvPage.includes('.vAlign("super")'), 'Swing emits the literal sub/sup shifts');
     const tagJvKit = readFileSync(join(tagJv.outDir, 'src/main/java/dev/rosezm/app/RoseTheme.java'), 'utf8');
-    assert(tagJvKit.includes('"sub".equals(s.vAlign)') && tagJvKit.includes('<sub>'), 'R526: Swing wraps the sub run in <sub>');
+    assert(tagJvKit.includes('"sub".equals(s.vAlign)') && tagJvKit.includes('<sub>'), 'Swing wraps the sub run in <sub>');
     const tagDn = await exportProject('dotnet', tagProj, { apiBase: 'x', outRoot: join(scratch, 'lss-dn') });
     const tagDnPage = readFileSync(join(tagDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(tagDnPage.includes('VAlign = "sub"') && tagDnPage.includes('VAlign = "super"'), 'R526: WPF emits the literal sub/sup shifts');
+    assert(tagDnPage.includes('VAlign = "sub"') && tagDnPage.includes('VAlign = "super"'), 'WPF emits the literal sub/sup shifts');
     const tagDnKit = readFileSync(join(tagDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(tagDnKit.includes('style.VAlign == "sub"') && tagDnKit.includes('FontVariants.Subscript'), 'R526: WPF sets the subscript variant');
+    assert(tagDnKit.includes('style.VAlign == "sub"') && tagDnKit.includes('FontVariants.Subscript'), 'WPF sets the subscript variant');
     // Flutter: the tag shift reaches the run AND the kit paints a WidgetSpan.
     const tagFl = await exportProject('flutter', tagProj, { apiBase: 'x', outRoot: join(scratch, 'lss-fl') });
     const tagFlPage = readFileSync(join(tagFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(tagFlPage.includes("RoseStyle(verticalAlign: 'sub')") && tagFlPage.includes("RoseStyle(verticalAlign: 'super')"), 'R526: Flutter folds the tag shift into the runs');
+    assert(tagFlPage.includes("RoseStyle(verticalAlign: 'sub')") && tagFlPage.includes("RoseStyle(verticalAlign: 'super')"), 'Flutter folds the tag shift into the runs');
     const tagFlKit = readFileSync(join(tagFl.outDir, 'lib/styles.dart'), 'utf8');
-    assert(tagFlKit.includes("r.style?.verticalAlign == 'sub'") && tagFlKit.includes('WidgetSpan('), 'R526: Flutter paints sub/sup as baseline-offset spans');
+    assert(tagFlKit.includes("r.style?.verticalAlign == 'sub'") && tagFlKit.includes('WidgetSpan('), 'Flutter paints sub/sup as baseline-offset spans');
     // The mobile four name the loss on BOTH tags, never silently flatten.
     for (const [t, label] of [['android', 'Compose'], ['arkts', 'ArkUI'], ['xcode', 'SwiftUI'], ['python', 'Tk']] as const) {
       const ex = await exportProject(t, tagProj, { apiBase: 'x', outRoot: join(scratch, `lss-${t}`) });
       const warns = (ex.warnings ?? []).join('\n');
-      assert(warns.includes(`<sub> has no ${label} inline baseline here`), `R526: ${t} names the literal <sub> loss`);
-      assert(warns.includes(`<sup> has no ${label} inline baseline here`), `R526: ${t} names the literal <sup> loss`);
+      assert(warns.includes(`<sub> has no ${label} inline baseline here`), `${t} names the literal <sub> loss`);
+      assert(warns.includes(`<sup> has no ${label} inline baseline here`), `${t} names the literal <sup> loss`);
     }
   }
 
-  // R527: closing r526's last gap - dotnet's {@html} channel (HtmlLabel) did
+  // closing r526's last gap - dotnet's {@html} channel (HtmlLabel) did
   // not parse literal <sub>/<sup>, so trusted markup with a chemical formula
   // flattened the glyph even though the rich-text run path rendered it. Now the
   // runtime parser carries a baseline state and sets Typography.Variants.
@@ -10533,18 +10533,18 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
 `);
     const htmlDn = await exportProject('dotnet', htmlProj, { apiBase: 'x', outRoot: join(scratch, 'htmlss-dn') });
     const htmlDnKit = readFileSync(join(htmlDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(htmlDnKit.includes('string? baseline = null;'), 'R527: WPF HtmlLabel carries a per-run baseline state');
-    assert(htmlDnKit.includes('tag is "sub" or "sup"') && htmlDnKit.includes('tag is "/sub" or "/sup"'), 'R527: WPF HtmlLabel parses both sub and sup tags');
-    assert(htmlDnKit.includes('baseline == "sub"') && htmlDnKit.includes('FontVariants.Subscript'), 'R527: WPF HtmlLabel paints sub as a subscript Run');
-    assert(htmlDnKit.includes('baseline == "super"') && htmlDnKit.includes('FontVariants.Superscript'), 'R527: WPF HtmlLabel paints sup as a superscript Run');
+    assert(htmlDnKit.includes('string? baseline = null;'), 'WPF HtmlLabel carries a per-run baseline state');
+    assert(htmlDnKit.includes('tag is "sub" or "sup"') && htmlDnKit.includes('tag is "/sub" or "/sup"'), 'WPF HtmlLabel parses both sub and sup tags');
+    assert(htmlDnKit.includes('baseline == "sub"') && htmlDnKit.includes('FontVariants.Subscript'), 'WPF HtmlLabel paints sub as a subscript Run');
+    assert(htmlDnKit.includes('baseline == "super"') && htmlDnKit.includes('FontVariants.Superscript'), 'WPF HtmlLabel paints sup as a superscript Run');
     const htmlDnPage = readFileSync(join(htmlDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(htmlDnPage.includes('RoseTheme.HtmlLabel('), 'R527: the page still routes trusted markup through HtmlLabel');
+    assert(htmlDnPage.includes('RoseTheme.HtmlLabel('), 'the page still routes trusted markup through HtmlLabel');
     // The other {@html} platforms are untouched - their parsers still exist.
     const htmlFl = readFileSync(join((await exportProject('flutter', htmlProj, { apiBase: 'x', outRoot: join(scratch, 'htmlss-fl') })).outDir, 'lib/rosezm.dart'), 'utf8');
-    assert(htmlFl.includes('Widget roseHtml(String html)'), 'R527: Flutter keeps its {@html} parser');
+    assert(htmlFl.includes('Widget roseHtml(String html)'), 'Flutter keeps its {@html} parser');
   }
 
-  // R528: {@html} inside a TEXT tag (<p>, <span>, ...) used to VANISH - the
+  // {@html} inside a TEXT tag (<p>, <span>, ...) used to VANISH - the
   // pure-text branch handed the children to the string joiner, which only
   // reads text/expr, so the html node was dropped with no warning and the page
   // rendered "prefix  suffix". A bare {@html} in a <div> always worked; the
@@ -10562,17 +10562,17 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
     // dotnet: the whole paragraph becomes Inlines through HtmlLabel.
     const pDn = await exportProject('dotnet', inP, { apiBase: 'x', outRoot: join(scratch, 'hp-dn') });
     const pDnPage = readFileSync(join(pDn.outDir, 'Pages/IndexPage.cs'), 'utf8');
-    assert(pDnPage.includes('RoseTheme.HtmlLabel(') && pDnPage.includes('"prefix "'), 'R528: WPF routes a text tag carrying {@html} through HtmlLabel');
-    assert(!pDnPage.includes('RoseTheme.Label('), 'R528: WPF does NOT leave the paragraph a plain Label');
+    assert(pDnPage.includes('RoseTheme.HtmlLabel(') && pDnPage.includes('"prefix "'), 'WPF routes a text tag carrying {@html} through HtmlLabel');
+    assert(!pDnPage.includes('RoseTheme.Label('), 'WPF does NOT leave the paragraph a plain Label');
     // python: the paragraph becomes a rose_html_label (the same rich reader).
     const pPy = await exportProject('python', inP, { apiBase: 'x', outRoot: join(scratch, 'hp-py') });
     const pPyPage = readFileSync(join(pPy.outDir, 'pages/index.py'), 'utf8');
-    assert(pPyPage.includes("rose_html_label(") && pPyPage.includes("'formula'"), 'R528: Tk routes a text tag carrying {@html} through rose_html_label');
+    assert(pPyPage.includes("rose_html_label(") && pPyPage.includes("'formula'"), 'Tk routes a text tag carrying {@html} through rose_html_label');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(pPy.outDir, 'pages/index.py')], { stdio: 'pipe' });
-      assert(true, 'R528: the Tk rich-route page compiles under py_compile');
+      assert(true, 'the Tk rich-route page compiles under py_compile');
     } catch {
-      assert(false, 'R528: the Tk rich-route page compiles under py_compile');
+      assert(false, 'the Tk rich-route page compiles under py_compile');
     }
     // The remaining targets carry the expression in the label string - the
     // value survives at minimum (Qt auto-detects the markup, Swing decorates
@@ -10582,12 +10582,12 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
       const stem = t === 'xcode' ? 'IndexView' : 'IndexPage';
       const files = walk(ex.outDir).filter((f) => f.endsWith(`${stem}.${ext}`));
       const body = files.length ? readFileSync(files[0], 'utf8') : '';
-      assert(body.includes('formula'), `R528: ${t} keeps the {@html} value inside the text tag`);
-      assert(!/prefix ["`]?\s*\+\s*["`]\s*["`]\s*suffix|prefix  suffix/.test(body), `R528: ${t} does not render the eaten "prefix  suffix" shape`);
+      assert(body.includes('formula'), `${t} keeps the {@html} value inside the text tag`);
+      assert(!/prefix ["`]?\s*\+\s*["`]\s*["`]\s*suffix|prefix  suffix/.test(body), `${t} does not render the eaten "prefix  suffix" shape`);
     }
   }
 
-  // R529: a String state read already IS `RoseTheme.text(app.v("x"))`, so the
+  // a String state read already IS `RoseTheme.text(app.v("x"))`, so the
   // paragraph joiner wrapped it again - `text(text(...))` in every generated
   // label. Harmless at run time, but a lie about the shape; the joiner now
   // skips an already-typed read.
@@ -10601,11 +10601,11 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
 `);
     const wJv = await exportProject('java', wProj, { apiBase: 'x', outRoot: join(scratch, 'jw') });
     const wPage = readFileSync(join(wJv.outDir, 'src/main/java/dev/rosezm/app/pages/IndexPage.java'), 'utf8');
-    assert(wPage.includes('RoseTheme.text(app.v("name"))'), 'R529: the String read is typed once');
-    assert(!wPage.includes('text(text(') && !/RoseTheme\.text\(RoseTheme\.text\(/.test(wPage), 'R529: no double text() wrapper survives');
+    assert(wPage.includes('RoseTheme.text(app.v("name"))'), 'the String read is typed once');
+    assert(!wPage.includes('text(text(') && !/RoseTheme\.text\(RoseTheme\.text\(/.test(wPage), 'no double text() wrapper survives');
   }
 
-  // R530: closing r528's boundary - the mobile three's {@html} readers
+  // closing r528's boundary - the mobile three's {@html} readers
   // (roseHtml / RoseHtmlText / roseHtmlSpans) only fired on a bare {@html}
   // block; the same markup one tag deeper rendered as LITERAL tags in the
   // string. Now a text tag carrying {@html} routes through the same reader on
@@ -10621,20 +10621,20 @@ li::marker { color: #e91e63; content: '▶ '; font-family: monospace; }
     const anEx = await exportProject('android', inP2, { apiBase: 'x', outRoot: join(scratch, 'hp2-android') });
     const anPage = walk(anEx.outDir).filter((f) => f.endsWith('IndexPage.kt'))[0] ?? '';
     const anBody = anPage ? readFileSync(anPage, 'utf8') : '';
-    assert(anBody.includes('Text(roseHtml('), 'R530: Compose renders the paragraph through roseHtml');
-    assert(!anBody.includes('Text("prefix'), 'R530: Compose does NOT leave the paragraph a plain literal');
+    assert(anBody.includes('Text(roseHtml('), 'Compose renders the paragraph through roseHtml');
+    assert(!anBody.includes('Text("prefix'), 'Compose does NOT leave the paragraph a plain literal');
     const akEx = await exportProject('arkts', inP2, { apiBase: 'x', outRoot: join(scratch, 'hp2-arkts') });
     const akPage = walk(akEx.outDir).filter((f) => f.endsWith('IndexPage.ets'))[0] ?? '';
     const akBody = akPage ? readFileSync(akPage, 'utf8') : '';
-    assert(akBody.includes('ForEach(roseHtmlSpans('), 'R530: ArkUI renders the paragraph through roseHtmlSpans');
+    assert(akBody.includes('ForEach(roseHtmlSpans('), 'ArkUI renders the paragraph through roseHtmlSpans');
     const xcEx = await exportProject('xcode', inP2, { apiBase: 'x', outRoot: join(scratch, 'hp2-xcode') });
     const xcPage = walk(xcEx.outDir).filter((f) => f.endsWith('IndexView.swift'))[0] ?? '';
     const xcBody = xcPage ? readFileSync(xcPage, 'utf8') : '';
-    assert(xcBody.includes('RoseHtmlText(html:'), 'R530: SwiftUI renders the paragraph through RoseHtmlText');
-    assert(!xcBody.includes('Text("prefix'), 'R530: SwiftUI does NOT leave the paragraph a plain literal');
+    assert(xcBody.includes('RoseHtmlText(html:'), 'SwiftUI renders the paragraph through RoseHtmlText');
+    assert(!xcBody.includes('Text("prefix'), 'SwiftUI does NOT leave the paragraph a plain literal');
   }
 
-  // R531: closing r530's boundary - a rosezmSpan carried only bold/italic/link,
+  // closing r530's boundary - a rosezmSpan carried only bold/italic/link,
   // so a styled colour (a ::marker glyph or <font color=...>) fell back to the
   // reader's default on ArkUI. The span now carries `color` from
   // <span style="color:..."> and <font color=...>, and the ForEach paints it.
@@ -10650,15 +10650,15 @@ li::marker { color: #e91e63; }
     const scAk = await exportProject('arkts', scProj, { apiBase: 'x', outRoot: join(scratch, 'sc-ak') });
     const scKit = readFileSync(join(scAk.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8');
     const scPage = readFileSync(join(scAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(scKit.includes('color?: string;'), 'R531: the span model carries an optional colour');
-    assert(scKit.includes('if (color) span.color = color;'), 'R531: the parser attaches the colour to the span');
-    assert(scPage.includes('span.color ? span.color : span.link ? Color.Blue : Color.Black'), 'R531: the ForEach paints the span colour');
-    assert(scKit.includes('function stripQuotes('), 'R531: the attribute peel avoids a quote inside a regex literal');
+    assert(scKit.includes('color?: string;'), 'the span model carries an optional colour');
+    assert(scKit.includes('if (color) span.color = color;'), 'the parser attaches the colour to the span');
+    assert(scPage.includes('span.color ? span.color : span.link ? Color.Blue : Color.Black'), 'the ForEach paints the span colour');
+    assert(scKit.includes('function stripQuotes('), 'the attribute peel avoids a quote inside a regex literal');
     // Both attribute spellings parse through the character-level peel.
-    assert(scKit.includes('indexOf("color=")'), 'R531: <font color=...> is read without a quote-bearing regex');
+    assert(scKit.includes('indexOf("color=")'), '<font color=...> is read without a quote-bearing regex');
   }
 
-  // R532: closing r531's last boundary - Tk's rose_html_label tag palette had
+  // closing r531's last boundary - Tk's rose_html_label tag palette had
   // no colour, so a styled glyph (<font color=...>, a ::marker colour) fell
   // back to the widget default. The parser now configures one tag per distinct
   // value and pushes it on the active set - and the generated kit still
@@ -10675,21 +10675,21 @@ li::marker { color: #e91e63; }
 `);
     const tkEx = await exportProject('python', tkC, { apiBase: 'x', outRoot: join(scratch, 'tkc') });
     const tkKit = readFileSync(join(tkEx.outDir, 'rosezm.py'), 'utf8');
-    assert(tkKit.includes("tag.startswith('font ')") && tkKit.includes("tag.startswith('span ')"), 'R532: the parser recognises both colour carriers');
-    assert(tkKit.includes("name = 'r_c_' + val.lstrip('#')"), 'R532: one tag_config per distinct colour value');
-    assert(tkKit.includes('box.tag_config(name, foreground=val)'), 'R532: the colour becomes a foreground config');
-    assert(tkKit.includes("startswith('r_c_')"), 'R532: closing tags discard every active colour tag');
+    assert(tkKit.includes("tag.startswith('font ')") && tkKit.includes("tag.startswith('span ')"), 'the parser recognises both colour carriers');
+    assert(tkKit.includes("name = 'r_c_' + val.lstrip('#')"), 'one tag_config per distinct colour value');
+    assert(tkKit.includes('box.tag_config(name, foreground=val)'), 'the colour becomes a foreground config');
+    assert(tkKit.includes("startswith('r_c_')"), 'closing tags discard every active colour tag');
     // The whole kit still compiles under py_compile (the gate that caught the
     // quote-escape bug on the first cut).
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(tkEx.outDir, 'rosezm.py')], { stdio: 'pipe' });
-      assert(true, 'R532: the kit with the colour peel compiles under py_compile');
+      assert(true, 'the kit with the colour peel compiles under py_compile');
     } catch {
-      assert(false, 'R532: the kit with the colour peel compiles under py_compile');
+      assert(false, 'the kit with the colour peel compiles under py_compile');
     }
   }
 
-  // R533: closing r532's boundary - span-level SIZE. The {@html} readers only
+  // closing r532's boundary - span-level SIZE. The {@html} readers only
   // carried colour, so a style="font-size:20px" span rendered at the widget
   // default. ArkUI's rosezmSpan gains `size`, Tk gains a dynamic r_s_<px> tag;
   // closing tags discard both families.
@@ -10700,23 +10700,23 @@ li::marker { color: #e91e63; }
 `);
     const szAk = await exportProject('arkts', szProj, { apiBase: 'x', outRoot: join(scratch, 'sz-ak') });
     const szAkKit = readFileSync(join(szAk.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8');
-    assert(szAkKit.includes('size?: number;'), 'R533: the span model carries an optional size');
-    assert(szAkKit.includes('if (size > 0) span.size = size;'), 'R533: the parser attaches the pixel size');
+    assert(szAkKit.includes('size?: number;'), 'the span model carries an optional size');
+    assert(szAkKit.includes('if (size > 0) span.size = size;'), 'the parser attaches the pixel size');
     const szAkPage = readFileSync(join(szAk.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(szAkPage.includes('.fontSize(span.size ? span.size : undefined)'), 'R533: the ForEach paints the span size');
+    assert(szAkPage.includes('.fontSize(span.size ? span.size : undefined)'), 'the ForEach paints the span size');
     const szPy = await exportProject('python', szProj, { apiBase: 'x', outRoot: join(scratch, 'sz-py') });
     const szPyKit = readFileSync(join(szPy.outDir, 'rosezm.py'), 'utf8');
-    assert(szPyKit.includes("name = 'r_s_%d' % px"), 'R533: Tk configures one font tag per pixel size');
-    assert(szPyKit.includes("a.startswith('r_s_')"), 'R533: closing tags discard the size tags too');
+    assert(szPyKit.includes("name = 'r_s_%d' % px"), 'Tk configures one font tag per pixel size');
+    assert(szPyKit.includes("a.startswith('r_s_')"), 'closing tags discard the size tags too');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(szPy.outDir, 'rosezm.py')], { stdio: 'pipe' });
-      assert(true, 'R533: the kit with the size tag compiles under py_compile');
+      assert(true, 'the kit with the size tag compiles under py_compile');
     } catch {
-      assert(false, 'R533: the kit with the size tag compiles under py_compile');
+      assert(false, 'the kit with the size tag compiles under py_compile');
     }
   }
 
-  // R534: closing r533's boundary on the last two hand-written readers -
+  // closing r533's boundary on the last two hand-written readers -
   // Flutter's roseHtml and Compose's roseHtmlOf now carry a
   // style="font-size:Npx" span into their span styles (SwiftUI's reader is the
   // platform's own NSAttributedString HTML parser, which always did).
@@ -10727,18 +10727,18 @@ li::marker { color: #e91e63; }
 `);
     const fFl = await exportProject('flutter', fSz, { apiBase: 'x', outRoot: join(scratch, 'dsz-fl') });
     const fKit = readFileSync(join(fFl.outDir, 'lib/rosezm.dart'), 'utf8');
-    assert(fKit.includes('var size = 0.0;'), 'R534: Flutter roseHtml carries a size state');
-    assert(fKit.includes('fontSize: size > 0 ? size : null,'), 'R534: the span style paints the size');
-    assert(fKit.includes("RegExp('font-size:"), 'R534: the parser reads the px value out of the style');
+    assert(fKit.includes('var size = 0.0;'), 'Flutter roseHtml carries a size state');
+    assert(fKit.includes('fontSize: size > 0 ? size : null,'), 'the span style paints the size');
+    assert(fKit.includes("RegExp('font-size:"), 'the parser reads the px value out of the style');
     const fAn = await exportProject('android', fSz, { apiBase: 'x', outRoot: join(scratch, 'dsz-an') });
     const kFiles = walk(fAn.outDir).filter((f) => f.endsWith('RoseKit.kt'));
     const kKit = kFiles.length ? readFileSync(kFiles[0], 'utf8') : '';
-    assert(kKit.includes('var size = 0f'), 'R534: Compose roseHtmlOf carries a size state');
-    assert(kKit.includes('fontSize = if (size > 0f) size.sp else TextUnit.Unspecified,'), 'R534: the SpanStyle paints the size');
-    assert(kKit.includes('Regex("font-size:'), 'R534: the parser reads the px value out of the style');
+    assert(kKit.includes('var size = 0f'), 'Compose roseHtmlOf carries a size state');
+    assert(kKit.includes('fontSize = if (size > 0f) size.sp else TextUnit.Unspecified,'), 'the SpanStyle paints the size');
+    assert(kKit.includes('Regex("font-size:'), 'the parser reads the px value out of the style');
   }
 
-  // R535: closing r534's boundary - numeric font-weight. Both hand-written
+  // closing r534's boundary - numeric font-weight. Both hand-written
   // readers collapsed font-weight:500/300 into bold-or-nothing; now the value
   // rides into the span style (500 renders Medium, 300 Light - the same
   // mapping the stylesheet path has always had).
@@ -10749,17 +10749,17 @@ li::marker { color: #e91e63; }
 `);
     const wFl = await exportProject('flutter', wProj, { apiBase: 'x', outRoot: join(scratch, 'sw-fl') });
     const wKit = readFileSync(join(wFl.outDir, 'lib/rosezm.dart'), 'utf8');
-    assert(wKit.includes('var weight = 0;'), 'R535: Flutter roseHtml carries a weight state');
-    assert(wKit.includes("RegExp('font-weight:"), 'R535: the parser reads the numeric weight');
-    assert(wKit.includes('weight > 0 ? FontWeight.values.firstWhere((w) => w.value == weight'), 'R535: the TextStyle maps the numeric weight');
+    assert(wKit.includes('var weight = 0;'), 'Flutter roseHtml carries a weight state');
+    assert(wKit.includes("RegExp('font-weight:"), 'the parser reads the numeric weight');
+    assert(wKit.includes('weight > 0 ? FontWeight.values.firstWhere((w) => w.value == weight'), 'the TextStyle maps the numeric weight');
     const wAn = await exportProject('android', wProj, { apiBase: 'x', outRoot: join(scratch, 'sw-an') });
     const kwFiles = walk(wAn.outDir).filter((f) => f.endsWith('RoseKit.kt'));
     const kwKit = kwFiles.length ? readFileSync(kwFiles[0], 'utf8') : '';
-    assert(kwKit.includes('var weight = 0'), 'R535: Compose roseHtmlOf carries a weight state');
-    assert(kwKit.includes('weight >= 100 -> FontWeight(weight)'), 'R535: the SpanStyle maps the numeric weight');
+    assert(kwKit.includes('var weight = 0'), 'Compose roseHtmlOf carries a weight state');
+    assert(kwKit.includes('weight >= 100 -> FontWeight(weight)'), 'the SpanStyle maps the numeric weight');
   }
 
-  // R536: closing r535's boundary on ArkUI - rosezmSpan gains `weight`, and
+  // closing r535's boundary on ArkUI - rosezmSpan gains `weight`, and
   // the ForEach maps the numeric value onto the same Bold/Medium/Regular
   // ladder the stylesheet path has always used.
   {
@@ -10769,13 +10769,13 @@ li::marker { color: #e91e63; }
 `);
     const awEx = await exportProject('arkts', awProj, { apiBase: 'x', outRoot: join(scratch, 'aw') });
     const awKit = readFileSync(join(awEx.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8');
-    assert(awKit.includes('weight?: number;'), 'R536: the span model carries an optional weight');
-    assert(awKit.includes('if (weight >= 100) span.weight = weight;'), 'R536: the parser attaches the numeric weight');
+    assert(awKit.includes('weight?: number;'), 'the span model carries an optional weight');
+    assert(awKit.includes('if (weight >= 100) span.weight = weight;'), 'the parser attaches the numeric weight');
     const awPage = readFileSync(join(awEx.outDir, 'entry/src/main/ets/pages/IndexPage.ets'), 'utf8');
-    assert(awPage.includes('span.weight >= 700 ? FontWeight.Bold : span.weight >= 500 ? FontWeight.Medium : FontWeight.Regular'), 'R536: the ForEach maps the weight onto the three-rung ladder');
+    assert(awPage.includes('span.weight >= 700 ? FontWeight.Bold : span.weight >= 500 ? FontWeight.Medium : FontWeight.Regular'), 'the ForEach maps the weight onto the three-rung ladder');
   }
 
-  // R537: closing r536's boundary on the desktop - the Qt style literal now
+  // closing r536's boundary on the desktop - the Qt style literal now
   // carries the numeric weight (the bold flag folds it away no more), and the
   // rich-text CSS paints the real value instead of the hardwired 700.
   {
@@ -10788,12 +10788,12 @@ li::marker { color: #e91e63; }
 `);
     const cwEx = await exportProject('cpp', cwProj, { apiBase: 'x', outRoot: join(scratch, 'cw') });
     const cwPage = readFileSync(join(cwEx.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(cwPage.includes(', 500, ""}'), 'R537: the Qt style literal carries the numeric weight');
+    assert(cwPage.includes(', 500, ""}'), 'the Qt style literal carries the numeric weight');
     const cwKit = readFileSync(join(cwEx.outDir, 'src/rose.cpp'), 'utf8');
-    assert(cwKit.includes('font-weight:" + std::to_string(run.style.weight)'), 'R537: the rich-text CSS paints the real weight value');
+    assert(cwKit.includes('font-weight:" + std::to_string(run.style.weight)'), 'the rich-text CSS paints the real weight value');
   }
 
-  // R538: closing r527's boundary on the three hand-written readers - their
+  // closing r527's boundary on the three hand-written readers - their
   // {@html} parsers skipped literal <sub>/<sup> silently, even though every
   // platform has a native shift (Flutter WidgetSpan, Compose BaselineShift,
   // Tk tag offset). Now trusted markup with a chemical formula keeps its
@@ -10805,26 +10805,26 @@ li::marker { color: #e91e63; }
 `);
     const hsFl = await exportProject('flutter', hsProj, { apiBase: 'x', outRoot: join(scratch, 'hsr-fl') });
     const hsFlKit = readFileSync(join(hsFl.outDir, 'lib/rosezm.dart'), 'utf8');
-    assert(hsFlKit.includes("String? baseline;"), 'R538: Flutter roseHtml carries a baseline state');
-    assert(hsFlKit.includes("tag == 'sub'") && hsFlKit.includes("tag == 'sup'"), 'R538: Flutter roseHtml parses both sub and sup');
-    assert(hsFlKit.includes('PlaceholderAlignment.belowBaseline') && hsFlKit.includes('PlaceholderAlignment.aboveBaseline'), 'R538: Flutter paints the shift through WidgetSpan');
+    assert(hsFlKit.includes("String? baseline;"), 'Flutter roseHtml carries a baseline state');
+    assert(hsFlKit.includes("tag == 'sub'") && hsFlKit.includes("tag == 'sup'"), 'Flutter roseHtml parses both sub and sup');
+    assert(hsFlKit.includes('PlaceholderAlignment.belowBaseline') && hsFlKit.includes('PlaceholderAlignment.aboveBaseline'), 'Flutter paints the shift through WidgetSpan');
     const hsAn = await exportProject('android', hsProj, { apiBase: 'x', outRoot: join(scratch, 'hsr-an') });
     const hsAnKitPath = (walk(hsAn.outDir).filter((f) => f.endsWith('RoseKit.kt'))[0] ?? '');
     const hsAnKit = hsAnKitPath ? readFileSync(hsAnKitPath, 'utf8') : '';
-    assert(hsAnKit.includes('BaselineShift.Subscript') && hsAnKit.includes('BaselineShift.Superscript'), 'R538: Compose carries the shift on the SpanStyle');
+    assert(hsAnKit.includes('BaselineShift.Subscript') && hsAnKit.includes('BaselineShift.Superscript'), 'Compose carries the shift on the SpanStyle');
     const hsPy = await exportProject('python', hsProj, { apiBase: 'x', outRoot: join(scratch, 'hsr-py') });
     const hsPyKit = readFileSync(join(hsPy.outDir, 'rosezm.py'), 'utf8');
-    assert(hsPyKit.includes("'r_sub'") && hsPyKit.includes("'r_sup'"), 'R538: Tk configures the sub/sup tags');
-    assert(hsPyKit.includes('offset=(-2 if tag'), 'R538: Tk shifts the baseline through the tag offset');
+    assert(hsPyKit.includes("'r_sub'") && hsPyKit.includes("'r_sup'"), 'Tk configures the sub/sup tags');
+    assert(hsPyKit.includes('offset=(-2 if tag'), 'Tk shifts the baseline through the tag offset');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(hsPy.outDir, 'rosezm.py')], { stdio: 'pipe' });
-      assert(true, 'R538: the Tk kit with the sub/sup tags compiles under py_compile');
+      assert(true, 'the Tk kit with the sub/sup tags compiles under py_compile');
     } catch {
-      assert(false, 'R538: the Tk kit with the sub/sup tags compiles under py_compile');
+      assert(false, 'the Tk kit with the sub/sup tags compiles under py_compile');
     }
   }
 
-  // R539: the CSS default value finally reads as the default - WPF's
+  // the CSS default value finally reads as the default - WPF's
   // vertical-align ternary used Bottom as its catch-all, so an explicit
   // vertical-align: baseline (a class resetting an inherited middle, say)
   // rendered BOTTOM-aligned: the one alignment the author did not ask for.
@@ -10845,18 +10845,18 @@ img.rst { vertical-align: baseline; }
 `);
     const blDn = await exportProject('dotnet', blProj, { apiBase: 'x', outRoot: join(scratch, 'bl-dn') });
     const blKit = readFileSync(join(blDn.outDir, 'RoseTheme.cs'), 'utf8');
-    assert(blKit.includes(': style.VAlign == "bottom" ? VerticalAlignment.Bottom'), 'R539: the ternary keys on bottom explicitly');
-    assert(!blKit.includes(': style.VAlign == "top" ? VerticalAlignment.Top\n                : VerticalAlignment.Bottom;'), 'R539: baseline no longer falls through to Bottom');
+    assert(blKit.includes(': style.VAlign == "bottom" ? VerticalAlignment.Bottom'), 'the ternary keys on bottom explicitly');
+    assert(!blKit.includes(': style.VAlign == "top" ? VerticalAlignment.Top\n                : VerticalAlignment.Bottom;'), 'baseline no longer falls through to Bottom');
     // The other three stay no-op on baseline (the honest CSS default).
     const blCpp = await exportProject('cpp', blProj, { apiBase: 'x', outRoot: join(scratch, 'bl-cpp') });
     const blCppKit = readFileSync(join(blCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(!blCppKit.includes('"baseline"'), 'R539: Qt never aligns on baseline (no-op, the default)');
+    assert(!blCppKit.includes('"baseline"'), 'Qt never aligns on baseline (no-op, the default)');
     const blFl = await exportProject('flutter', blProj, { apiBase: 'x', outRoot: join(scratch, 'bl-fl') });
     const blFlPage = readFileSync(join(blFl.outDir, 'lib/pages/index.dart'), 'utf8');
-    assert(!blFlPage.includes('Align(alignment:'), 'R539: Flutter stays unwrapped on baseline (the default)');
+    assert(!blFlPage.includes('Align(alignment:'), 'Flutter stays unwrapped on baseline (the default)');
   }
 
-  // R540: the length form of vertical-align (3px / -4px / 10%) - a baseline
+  // the length form of vertical-align (3px / -4px / 10%) - a baseline
   // OFFSET, not an alignment keyword - used to be dropped by the parser (only
   // the six keywords matched). Now the model carries it, Qt's rich text paints
   // the offset straight off the span, and the targets without a baseline-shift
@@ -10871,23 +10871,23 @@ img.rst { vertical-align: baseline; }
 `);
     const vsCpp = await exportProject('cpp', vsProj, { apiBase: 'x', outRoot: join(scratch, 'vs-cpp') });
     const vsCppPage = readFileSync(join(vsCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(vsCppPage.includes(', "3px"}'), 'R540: the Qt style literal carries the offset');
+    assert(vsCppPage.includes(', "3px"}'), 'the Qt style literal carries the offset');
     const vsCppKit = readFileSync(join(vsCpp.outDir, 'src/rose.cpp'), 'utf8');
-    assert(vsCppKit.includes('vertical-align:" + run.style.shift + ";"'), 'R540: the rich CSS paints the offset');
-    assert(!(vsCpp.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R540: Qt does not name what it renders');
+    assert(vsCppKit.includes('vertical-align:" + run.style.shift + ";"'), 'the rich CSS paints the offset');
+    assert(!(vsCpp.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Qt does not name what it renders');
     // Flutter renders the px offset too (its run carries the shift); everyone
     // without a baseline-shift painter names the loss.
     const vsFl = await exportProject('flutter', vsProj, { apiBase: 'x', outRoot: join(scratch, 'vs-fl') });
     const vsFlStyles = readFileSync(join(vsFl.outDir, 'lib/styles.dart'), 'utf8');
-    assert(vsFlStyles.includes("'lift__index': RoseStyle(verticalShift: 3)"), 'R540: Flutter carries the px offset on the style row');
-    assert(!(vsFl.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R540: Flutter does not name what it renders');
+    assert(vsFlStyles.includes("'lift__index': RoseStyle(verticalShift: 3)"), 'Flutter carries the px offset on the style row');
+    assert(!(vsFl.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Flutter does not name what it renders');
     for (const t of ['java', 'dotnet'] as const) {
       const ex = await exportProject(t, vsProj, { apiBase: 'x', outRoot: join(scratch, `vs-${t}`) });
-      assert((ex.warnings ?? []).join('\\n').includes('vertical-align:<length>'), `R540: ${t} names the offset loss`);
+      assert((ex.warnings ?? []).join('\\n').includes('vertical-align:<length>'), `${t} names the offset loss`);
     }
   }
 
-  // R541: closing r540's boundary - Flutter now PAINTS the px offset, not just
+  // closing r540's boundary - Flutter now PAINTS the px offset, not just
   // carries it. The roseRich kit translates the run off the baseline through a
   // WidgetSpan + Transform.translate (the same spelling the sub/sup shift
   // uses), so `vertical-align: 3px` renders raised instead of being named.
@@ -10901,9 +10901,9 @@ img.rst { vertical-align: baseline; }
 `);
     const fsEx = await exportProject('flutter', fsProj, { apiBase: 'x', outRoot: join(scratch, 'fs') });
     const fsKit = readFileSync(join(fsEx.outDir, 'lib/styles.dart'), 'utf8');
-    assert(fsKit.includes('r.style?.verticalShift ?? 0') && fsKit.includes('Transform.translate('), 'R541: the roseRich kit translates the shifted run off the baseline');
-    assert(fsKit.includes('offset: Offset(0, -r.style!.verticalShift!)'), 'R541: the translate reads the px value (positive lifts, so negated for the y axis)');
-    assert(!(fsEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R541: Flutter does not name the px shift it renders');
+    assert(fsKit.includes('r.style?.verticalShift ?? 0') && fsKit.includes('Transform.translate('), 'the roseRich kit translates the shifted run off the baseline');
+    assert(fsKit.includes('offset: Offset(0, -r.style!.verticalShift!)'), 'the translate reads the px value (positive lifts, so negated for the y axis)');
+    assert(!(fsEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Flutter does not name the px shift it renders');
     // The percent form still has no line-height to read against at export
     // time - it stays honestly named.
     const pcProj = join(scratch, 'fl-shift-pc');
@@ -10914,10 +10914,10 @@ img.rst { vertical-align: baseline; }
 <p><span class="up">percent</span></p>
 `);
     const pcEx = await exportProject('flutter', pcProj, { apiBase: 'x', outRoot: join(scratch, 'fsp') });
-    assert((pcEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R541: the percent form stays named (no line-height at export time)');
+    assert((pcEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'the percent form stays named (no line-height at export time)');
   }
 
-  // R542: closing r541's boundary - Tk now PAINTS the px offset. The rich-run
+  // closing r541's boundary - Tk now PAINTS the px offset. The rich-run
   // tuple grows a 4th slot (the baseline shift), and rose_rich_label applies
   // it as opts['offset'] on the run's own Text tag - Tk's native per-tag
   // baseline offset. The px form now renders on three targets (Qt, Flutter,
@@ -10932,20 +10932,20 @@ img.rst { vertical-align: baseline; }
 `);
     const tkEx = await exportProject('python', tkProj, { apiBase: 'x', outRoot: join(scratch, 'tks') });
     const tkPage = readFileSync(join(tkEx.outDir, 'pages/index.py'), 'utf8');
-    assert(/rose_rich_label\(parent, \[\(\('[^']+', \d+\), [^,]+, "raised", 3\)/.test(tkPage), 'R542: the shifted run carries the offset in its 4th tuple slot');
+    assert(/rose_rich_label\(parent, \[\(\('[^']+', \d+\), [^,]+, "raised", 3\)/.test(tkPage), 'the shifted run carries the offset in its 4th tuple slot');
     const tkKit = readFileSync(join(tkEx.outDir, 'rosezm.py'), 'utf8');
-    assert(tkKit.includes("opts['offset'] = int(shift)"), 'R542: the kit applies the offset on the run tag');
-    assert(tkKit.includes('shift = run[3] if len(run) > 3 else None'), 'R542: the 3-tuple shape stays valid for older callers');
+    assert(tkKit.includes("opts['offset'] = int(shift)"), 'the kit applies the offset on the run tag');
+    assert(tkKit.includes('shift = run[3] if len(run) > 3 else None'), 'the 3-tuple shape stays valid for older callers');
     try {
       execFileSync('/usr/bin/python3', ['-m', 'py_compile', join(tkEx.outDir, 'rosezm.py')], { stdio: 'pipe' });
-      assert(true, 'R542: the kit with the offset slot compiles under py_compile');
+      assert(true, 'the kit with the offset slot compiles under py_compile');
     } catch {
-      assert(false, 'R542: the kit with the offset slot compiles under py_compile');
+      assert(false, 'the kit with the offset slot compiles under py_compile');
     }
-    assert(!(tkEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R542: Tk does not name the px shift it renders');
+    assert(!(tkEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Tk does not name the px shift it renders');
   }
 
-  // R543: closing r542's boundary - Compose now PAINTS the px offset too.
+  // closing r542's boundary - Compose now PAINTS the px offset too.
   // BaselineShift's native unit IS an em ratio, so offset px / font size px is
   // the honest conversion; the RoseStyle carries it and roseSpanOf hands it
   // to the SpanStyle. The px form now renders on FOUR targets.
@@ -10960,15 +10960,15 @@ img.rst { vertical-align: baseline; }
     const anEx = await exportProject('android', anProj, { apiBase: 'x', outRoot: join(scratch, 'ans') });
     const themeFile = walk(anEx.outDir).filter((f) => f.endsWith('RoseTheme.kt'))[0] ?? '';
     const anTheme = themeFile ? readFileSync(themeFile, 'utf8') : '';
-    assert(anTheme.includes('"lift__Index" to RoseStyle(baselineShift = 0.1875f)'), 'R543: the style row carries the offset as an em ratio (3px / 16px)');
-    assert(anTheme.includes('baselineShift = other.baselineShift ?: baselineShift,'), 'R543: the merge carries the shift');
+    assert(anTheme.includes('"lift__Index" to RoseStyle(baselineShift = 0.1875f)'), 'the style row carries the offset as an em ratio (3px / 16px)');
+    assert(anTheme.includes('baselineShift = other.baselineShift ?: baselineShift,'), 'the merge carries the shift');
     const spanFile = walk(anEx.outDir).filter((f) => f.endsWith('RoseTheme.kt'))[0] ?? '';
     const anSpan = spanFile ? readFileSync(spanFile, 'utf8') : '';
-    assert(anSpan.includes('baselineShift = s.baselineShift?.let { BaselineShift(it) },'), 'R543: roseSpanOf hands the shift to the SpanStyle');
-    assert(!(anEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R543: Compose does not name the px shift it renders');
+    assert(anSpan.includes('baselineShift = s.baselineShift?.let { BaselineShift(it) },'), 'roseSpanOf hands the shift to the SpanStyle');
+    assert(!(anEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Compose does not name the px shift it renders');
   }
 
-  // R544: closing r543's boundary - the percent form of vertical-align now
+  // closing r543's boundary - the percent form of vertical-align now
   // converts to px when the same block declares a line-height (CSS reads a
   // percent against the element's own line-height, which is a unitless
   // multiplier of the font size). The conversion runs after the whole rule is
@@ -10985,11 +10985,11 @@ img.rst { vertical-align: baseline; }
 `);
     const pcCpp = await exportProject('cpp', pcProj, { apiBase: 'x', outRoot: join(scratch, 'vp-cpp') });
     const pcCppPage = readFileSync(join(pcCpp.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(pcCppPage.includes(', "2px"}'), 'R544: the percent converts against the declared line-height');
-    assert(!(pcCpp.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R544: Qt does not name the converted percent');
+    assert(pcCppPage.includes(', "2px"}'), 'the percent converts against the declared line-height');
+    assert(!(pcCpp.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'Qt does not name the converted percent');
     const pcFl = await exportProject('flutter', pcProj, { apiBase: 'x', outRoot: join(scratch, 'vp-fl') });
     const pcFlStyles = readFileSync(join(pcFl.outDir, 'lib/styles.dart'), 'utf8');
-    assert(pcFlStyles.includes('verticalShift: 2'), 'R544: Flutter carries the converted px');
+    assert(pcFlStyles.includes('verticalShift: 2'), 'Flutter carries the converted px');
     // Without a line-height the percent stays a percent - named, not dropped.
     const bareProj = join(scratch, 'va-percent-bare');
     mkdirSync(join(bareProj, 'src', 'pages'), { recursive: true });
@@ -10999,12 +10999,12 @@ img.rst { vertical-align: baseline; }
 <p><span class="up">raised</span></p>
 `);
     const bareEx = await exportProject('flutter', bareProj, { apiBase: 'x', outRoot: join(scratch, 'vpb') });
-    assert((bareEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'R544: a percent with no line-height stays named');
+    assert((bareEx.warnings ?? []).join('\\n').includes('vertical-align:<length>'), 'a percent with no line-height stays named');
     const bareFl = readFileSync(join(bareEx.outDir, 'lib/styles.dart'), 'utf8');
-    assert(!bareFl.includes('verticalShift: 1'), 'R544: no converted px lands in a style row without a line-height');
+    assert(!bareFl.includes('verticalShift: 1'), 'no converted px lands in a style row without a line-height');
   }
 
-  // R545: line-height is a CSS INHERITED property, and Qt was the one target
+  // line-height is a CSS INHERITED property, and Qt was the one target
   // whose textCarry dropped it - a .hero { line-height: 2 } reached its child
   // paragraphs as bare unstyled rose_label calls, so the child text rendered
   // at the toolkit's default spacing while the web page read 2x. The carry
@@ -11019,13 +11019,13 @@ img.rst { vertical-align: baseline; }
 `);
     const lhEx = await exportProject('cpp', lhProj, { apiBase: 'x', outRoot: join(scratch, 'lh') });
     const lhPage = readFileSync(join(lhEx.outDir, 'src/pages/IndexPage.cpp'), 'utf8');
-    assert(lhPage.includes('rose_apply_text(__l, RoseStyle{'), 'R545: the child paragraph gets an explicit text style');
+    assert(lhPage.includes('rose_apply_text(__l, RoseStyle{'), 'the child paragraph gets an explicit text style');
     // The inline style literal must carry the inherited 2x line-height.
     const labelLine = lhPage.split('\\n').find((l) => l.includes('child text inherits')) ?? '';
-    assert(/rose_apply_text\(__l, RoseStyle\{[^}]*, 2, "/.test(labelLine), 'R545: the inherited line-height rides into the child style');
+    assert(/rose_apply_text\(__l, RoseStyle\{[^}]*, 2, "/.test(labelLine), 'the inherited line-height rides into the child style');
   }
 
-  // R547: the business half - `src/lib/*.ts` modules transpile to Rust source
+  // the business half - `src/lib/*.ts` modules transpile to Rust source
   // and compile INTO the binary. The rust-ts subset translates the shapes a
   // business module actually uses (interfaces -> serde structs, string-literal
   // unions -> enums, loops, compound assignment, enum comparison), and what it
@@ -11060,30 +11060,30 @@ export function total(items: LineItem[], discount: Discount): number {
     writeFileSync(join(libProj, 'src', 'pages', 'index.rose'), '<p>hello</p>\n');
     const rlEx = await exportProject('rust', libProj, { apiBase: 'x', outRoot: join(scratch, 'rl') });
     const rlLib = readFileSync(join(rlEx.outDir, 'src', 'lib', 'pricing.rs'), 'utf8');
-    assert(rlLib.includes('pub struct LineItem') && rlLib.includes('serde::Serialize'), 'R547: the interface becomes a serde struct');
-    assert(rlLib.includes('pub enum Discount') && rlLib.includes('serde(rename = "vip")'), 'R547: the string-literal union becomes a renamed enum');
+    assert(rlLib.includes('pub struct LineItem') && rlLib.includes('serde::Serialize'), 'the interface becomes a serde struct');
+    assert(rlLib.includes('pub enum Discount') && rlLib.includes('serde(rename = "vip")'), 'the string-literal union becomes a renamed enum');
     // The kernel's dynamic domain: the counter is a mut JSON number.
-    assert(rlLib.includes('let mut sum = 0.0;') || rlLib.includes('let mut sum = serde_json::json!(0)'), 'R547: the reassigned counter is mut and numeric');
+    assert(rlLib.includes('let mut sum = 0.0;') || rlLib.includes('let mut sum = serde_json::json!(0)'), 'the reassigned counter is mut and numeric');
     // The compound assignment: Rust's `+=` on a JSON value is the operator
     // through the runtime helper (`sum = rustz::add(&sum, &x)`).
-    assert(/sum \+= |sum = rustz::js_add\(/.test(rlLib), 'R547: the compound assignment spells correctly');
+    assert(/sum \+= |sum = rustz::js_add\(/.test(rlLib), 'the compound assignment spells correctly');
     // The kernel's dynamic domain: the enum's VALUE is a JSON string, so the
     // comparison is the text - the same answer the JS gave.
-    assert(/discount\)?\) == "vip"|as_text\(&\(discount\)\) == "vip"/.test(rlLib) || rlLib.includes('matches!(discount, Discount::Vip)'), 'R547: the literal comparison spells the enum match');
+    assert(/discount\)?\) == "vip"|as_text\(&\(discount\)\) == "vip"/.test(rlLib) || rlLib.includes('matches!(discount, Discount::Vip)'), 'the literal comparison spells the enum match');
     const rlCargo = readFileSync(join(rlEx.outDir, 'Cargo.toml'), 'utf8');
-    assert(rlCargo.includes('serde = { version = "1", features = ["derive"] }'), 'R547: serde rides the manifest only when lib modules exist');
+    assert(rlCargo.includes('serde = { version = "1", features = ["derive"] }'), 'serde rides the manifest only when lib modules exist');
     const rlMain = readFileSync(join(rlEx.outDir, 'src', 'main.rs'), 'utf8');
-    assert(rlMain.includes('pub mod lib {') && rlMain.includes('pub mod pricing;'), 'R547: main declares the lib module tree');
+    assert(rlMain.includes('pub mod lib {') && rlMain.includes('pub mod pricing;'), 'main declares the lib module tree');
     const noLibCargo = readFileSync(join((await exportProject('rust', example, { apiBase: 'x', outRoot: join(scratch, 'rl-nolib') })).outDir, 'Cargo.toml'), 'utf8');
-    assert(!noLibCargo.includes('serde'), 'R547: a project with no lib modules stays zero-dependency');
+    assert(!noLibCargo.includes('serde'), 'a project with no lib modules stays zero-dependency');
     const cargoLib = readFileSync(join(rlEx.outDir, 'Cargo.toml'), 'utf8');
-    assert(cargoLib.includes('chrono') && cargoLib.includes('once_cell'), 'R547: a project with lib modules carries the runtime shim crates');
+    assert(cargoLib.includes('chrono') && cargoLib.includes('once_cell'), 'a project with lib modules carries the runtime shim crates');
     // The transpiled logic COMPILES AND PASSES when the toolchain is present -
     // a test harness rides the generated file, so cargo test runs it.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R547: no cargo toolchain on PATH, so the transpiled module is not run here (cargo test)');
+      console.log('ok - no cargo toolchain on PATH, so the transpiled module is not run here (cargo test)');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       // The runtime the translated module calls (the JSON helpers) rides the
@@ -11113,11 +11113,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: rlEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('total_sums_and_discounts ... ok'), `R547: the transpiled logic runs and answers the same numbers (${(tested.stderr || tested.stdout).slice(-300)})`);
+      assert(tested.status === 0 && tested.stdout.includes('total_sums_and_discounts ... ok'), `the transpiled logic runs and answers the same numbers (${(tested.stderr || tested.stdout).slice(-300)})`);
     }
   }
 
-  // R548: the Rust DESKTOP shell - the desktop family's Rust answer, the same
+  // the Rust DESKTOP shell - the desktop family's Rust answer, the same
   // bet Tauri makes (a native webview over the embedded site) without Tauri's
   // IPC/bundler layers: wry draws the webview, tao owns the window, and a
   // custom `rosezm://assets` protocol serves the include_bytes! frontend - no
@@ -11146,36 +11146,36 @@ export function total(items: LineItem[]): number {
     // The desktop shell embeds the site, compiles the kernel crate in-process,
     // and opens a wry window over a localhost server (the shared app layout).
     for (const f of ['Cargo.toml', 'src/main.rs', 'src/assets.rs', 'kernel/Cargo.toml', 'kernel/src/lib.rs', 'kernel/src/pricing.rs', 'kernel/src/rustz.rs']) {
-      assert(existsSync(join(rdEx.outDir, f)), `R548: ${f} is generated`);
+      assert(existsSync(join(rdEx.outDir, f)), `${f} is generated`);
     }
     const rdMain = readFileSync(join(rdEx.outDir, 'src/main.rs'), 'utf8');
-    assert(rdMain.includes('WebViewBuilder') && rdMain.includes('TcpListener'), 'R548: the window hosts a webview over an embedded HTTP server');
-    assert(rdMain.includes('EventLoop') && rdMain.includes('.run('), 'R548: the event loop drives the window');
+    assert(rdMain.includes('WebViewBuilder') && rdMain.includes('TcpListener'), 'the window hosts a webview over an embedded HTTP server');
+    assert(rdMain.includes('EventLoop') && rdMain.includes('.run('), 'the event loop drives the window');
     const rdKernel = readFileSync(join(rdEx.outDir, 'kernel', 'src', 'lib.rs'), 'utf8');
-    assert(rdKernel.includes('pub mod pricing;'), 'R548: the transpiled business module rides the desktop kernel');
+    assert(rdKernel.includes('pub mod pricing;'), 'the transpiled business module rides the desktop kernel');
     const rdCargo = readFileSync(join(rdEx.outDir, 'Cargo.toml'), 'utf8');
-    assert(rdCargo.includes('wry') && rdCargo.includes('tao'), 'R548: the manifest carries the webview and window crates');
+    assert(rdCargo.includes('wry') && rdCargo.includes('tao'), 'the manifest carries the webview and window crates');
     const rdAssets = readFileSync(join(rdEx.outDir, 'src/assets.rs'), 'utf8');
     const rdFiles = walk(join(rdEx.outDir, 'frontend')).length;
-    assert((rdAssets.match(/include_bytes!/g) ?? []).length === rdFiles, `R548: every frontend file is embedded (${rdFiles})`);
+    assert((rdAssets.match(/include_bytes!/g) ?? []).length === rdFiles, `every frontend file is embedded (${rdFiles})`);
     // The real gate: the shell COMPILES against the actual crates.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R548: no cargo toolchain on PATH, so the desktop shell is not compiled here (cargo build --release)');
+      console.log('ok - no cargo toolchain on PATH, so the desktop shell is not compiled here (cargo build --release)');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       const built = spawnSync(cargo, ['build', '--release'], { cwd: rdEx.outDir, encoding: 'utf8', timeout: 600_000 });
       const wryDeps = /The system library |\.pc` needs to be installed|PKG_CONFIG_PATH/.test(built.stderr ?? '');
       if (built.status !== 0 && wryDeps) {
-        console.log(`ok - R548: wry system libraries absent on this host - the compile gate is skipped (${(built.stderr ?? '').split('\n').find((l) => l.includes('system library')) ?? 'missing pkg-config library'})`);
+        console.log(`ok - wry system libraries absent on this host - the compile gate is skipped (${(built.stderr ?? '').split('\n').find((l) => l.includes('system library')) ?? 'missing pkg-config library'})`);
       } else {
-        assert(built.status === 0, `R548: the desktop shell compiles against wry + tao (${(built.stderr || '').slice(-400)})`);
+        assert(built.status === 0, `the desktop shell compiles against wry + tao (${(built.stderr || '').slice(-400)})`);
       }
     }
   }
 
-  // R549: the Rust family is now FOUR targets - a std-only static server
+  // the Rust family is now FOUR targets - a std-only static server
   // (`rust`), a native wry/tao desktop shell (`rust-desktop`), a full-stack
   // web server whose kernel answers /kernel/call (`rust-web`), and a mobile
   // FFI kernel (`rust-mobile`). The last two share ONE kernel crate: the
@@ -11194,27 +11194,27 @@ export function total(items: LineItem[]): number {
     // rust-web: the server with the kernel answering JSON-RPC calls.
     const fwEx = await exportProject('rust-web', famProj, { apiBase: 'x', outRoot: join(scratch, 'fw') });
     for (const f of ['Cargo.toml', 'src/main.rs', 'src/assets.rs', 'kernel/Cargo.toml', 'kernel/src/lib.rs', 'kernel/src/rustz.rs']) {
-      assert(existsSync(join(fwEx.outDir, f)), `R549: rust-web ${f} is generated`);
+      assert(existsSync(join(fwEx.outDir, f)), `rust-web ${f} is generated`);
     }
     const fwMain = readFileSync(join(fwEx.outDir, 'src', 'main.rs'), 'utf8');
-    assert(fwMain.includes('/kernel/call') || fwMain.includes('kernel/call'), 'R549: the web server routes the kernel calls');
+    assert(fwMain.includes('/kernel/call') || fwMain.includes('kernel/call'), 'the web server routes the kernel calls');
     const fwKernel = readFileSync(join(fwEx.outDir, 'kernel', 'src', 'lib.rs'), 'utf8');
-    assert(fwKernel.includes('pub fn kernel_call') || fwKernel.includes('kernel_call'), 'R549: the kernel exposes the call dispatch');
+    assert(fwKernel.includes('pub fn kernel_call') || fwKernel.includes('kernel_call'), 'the kernel exposes the call dispatch');
     // The transpiled module rides the kernel.
     const fwLib = readFileSync(join(fwEx.outDir, 'kernel', 'src', 'pricing.rs'), 'utf8');
-    assert(fwLib.includes('pub fn total'), 'R549: the TS business module is transpiled into the kernel');
+    assert(fwLib.includes('pub fn total'), 'the TS business module is transpiled into the kernel');
     // rust-mobile: the same kernel, as a cdylib for the native shells.
     const fmEx = await exportProject('rust-mobile', famProj, { apiBase: 'x', outRoot: join(scratch, 'fm') });
     for (const f of ['Cargo.toml', 'src/lib.rs', 'kernel/Cargo.toml', 'kernel/src/lib.rs', 'kernel/src/rustz.rs']) {
-      assert(existsSync(join(fmEx.outDir, f)), `R549: rust-mobile ${f} is generated`);
+      assert(existsSync(join(fmEx.outDir, f)), `rust-mobile ${f} is generated`);
     }
     const fmLib = readFileSync(join(fmEx.outDir, 'kernel', 'src', 'pricing.rs'), 'utf8');
-    assert(fmLib.includes('pub fn total'), 'R549: the mobile kernel carries the same translated module');
+    assert(fmLib.includes('pub fn total'), 'the mobile kernel carries the same translated module');
     const fmCargo = readFileSync(join(fmEx.outDir, 'Cargo.toml'), 'utf8');
-    assert(fmCargo.includes('cdylib') || fmCargo.includes('staticlib'), 'R549: the mobile kernel builds as an FFI library');
+    assert(fmCargo.includes('cdylib') || fmCargo.includes('staticlib'), 'the mobile kernel builds as an FFI library');
   }
 
-  // R550: rust-ts grows async - `async function` is a Rust `async fn`, the
+  // rust-ts grows async - `async function` is a Rust `async fn`, the
   // `await` is a `.await`, and the runtime carries a zero-dependency
   // `block_on` executor so the future actually runs. The awaited result's
   // shape decides how its members are read (a JSON value's member goes
@@ -11237,19 +11237,19 @@ async function load(id: string): Promise<{ name: string }> {
     writeFileSync(join(asProj, 'src', 'pages', 'index.rose'), '<p>async</p>\n');
     const asEx = await exportProject('rust', asProj, { apiBase: 'x', outRoot: join(scratch, 'as') });
     const asLib = readFileSync(join(asEx.outDir, 'src', 'lib', 'loader.rs'), 'utf8');
-    assert(asLib.includes('pub async fn fetch_name'), 'R550: an async function becomes a Rust async fn');
-    assert(/\.await/.test(asLib), 'R550: the await becomes a .await at the call site');
-    assert(asLib.includes('rustz::prop('), 'R550: a JSON member read goes through the runtime helper');
-    assert(asLib.includes('format!('), 'R550: a string concatenation becomes format! (Rust + is numeric)');
-    assert(asLib.includes('rustz::js_str(') || asLib.includes('rustz::as_text('), 'R550: a JSON value concatenated into a string reads as text, not as JSON');
+    assert(asLib.includes('pub async fn fetch_name'), 'an async function becomes a Rust async fn');
+    assert(/\.await/.test(asLib), 'the await becomes a .await at the call site');
+    assert(asLib.includes('rustz::prop('), 'a JSON member read goes through the runtime helper');
+    assert(asLib.includes('format!('), 'a string concatenation becomes format! (Rust + is numeric)');
+    assert(asLib.includes('rustz::js_str(') || asLib.includes('rustz::as_text('), 'a JSON value concatenated into a string reads as text, not as JSON');
     // The runtime carries the executor the future needs.
     const asRuntime = readFileSync(join(asEx.outDir, 'src', 'lib', 'loader.rs'), 'utf8');
-    assert(asRuntime.length > 0, 'R550: the transpiled module is written');
+    assert(asRuntime.length > 0, 'the transpiled module is written');
     // The real gate: the async code COMPILES AND RUNS.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R550: no cargo toolchain on PATH, so the async module is not run here (cargo test)');
+      console.log('ok - no cargo toolchain on PATH, so the async module is not run here (cargo test)');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       // The emitter's manifest, the runtime module and the runtime import in
@@ -11268,11 +11268,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: asEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('async_fn_runs ... ok'), `R550: the transpiled async function RUNS and answers the same value (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('async_fn_runs ... ok'), `the transpiled async function RUNS and answers the same value (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R528: rust-ts grows class - a TS class becomes a Rust struct + an impl
+  // rust-ts grows class - a TS class becomes a Rust struct + an impl
   // block. The fields are JSON values (the dynamic domain), the constructor
   // is `new`, the methods take `&mut self`, and `this` is the receiver - so
   // the class runs in Rust with the SAME answers the TypeScript gave.
@@ -11298,17 +11298,17 @@ mod rosezm_verify {
     writeFileSync(join(clProj, 'src', 'pages', 'index.rose'), '<p>class</p>\n');
     const clEx = await exportProject('rust', clProj, { apiBase: 'x', outRoot: join(scratch, 'cl') });
     const clLib = readFileSync(join(clEx.outDir, 'src', 'lib', 'counter.rs'), 'utf8');
-    assert(clLib.includes('pub struct Counter {'), 'R528: the class becomes a Rust struct');
-    assert(clLib.includes('impl Counter {'), 'R528: the methods ride an impl block');
-    assert(/pub fn new\((?:mut )?start: serde_json::Value\) -> Self/.test(clLib), 'R528: the constructor becomes new()');
-    assert(clLib.includes('pub fn inc(&mut self)'), 'R528: a method takes &mut self');
-    assert(clLib.includes('rustz::set_field(self, "n"'), 'R528: the member write goes through the struct helper');
-    assert(clLib.includes('rustz::prop_field(&(self), "n")'), 'R528: the member read goes through the struct helper');
+    assert(clLib.includes('pub struct Counter {'), 'the class becomes a Rust struct');
+    assert(clLib.includes('impl Counter {'), 'the methods ride an impl block');
+    assert(/pub fn new\((?:mut )?start: serde_json::Value\) -> Self/.test(clLib), 'the constructor becomes new()');
+    assert(clLib.includes('pub fn inc(&mut self)'), 'a method takes &mut self');
+    assert(clLib.includes('rustz::set_field(self, "n"'), 'the member write goes through the struct helper');
+    assert(clLib.includes('rustz::prop_field(&(self), "n")'), 'the member read goes through the struct helper');
     // The real gate: the class RUNS in Rust and answers the same value.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R528: no cargo toolchain on PATH, so the class is not run here (cargo test)');
+      console.log('ok - no cargo toolchain on PATH, so the class is not run here (cargo test)');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(clEx.outDir, 'src', 'lib', 'counter.rs'), `
@@ -11324,11 +11324,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: clEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('class_works ... ok'), `R528: the transpiled class RUNS and answers the same value (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('class_works ... ok'), `the transpiled class RUNS and answers the same value (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R531: rust-ts class grows static methods and getter/setter accessors,
+  // rust-ts class grows static methods and getter/setter accessors,
   // and the framework registers the standalone `rust-core` kernel target.
   {
     const cxProj = join(scratch, 'rust-class-extra');
@@ -11344,16 +11344,16 @@ mod rosezm_verify {
     writeFileSync(join(cxProj, 'src', 'pages', 'index.rose'), '<p>x</p>\n');
     const cxEx = await exportProject('rust', cxProj, { apiBase: 'x', outRoot: join(scratch, 'cx') });
     const cxLib = readFileSync(join(cxEx.outDir, 'src', 'lib', 'temp.rs'), 'utf8');
-    assert(cxLib.includes('pub fn zero() ->'), 'R531: a static method becomes an associated fn (no self)');
-    assert(cxLib.includes('pub fn value_get(&self)'), 'R531: a getter becomes a reader');
-    assert(cxLib.includes('pub fn value_set(&mut self, v:'), 'R531: a setter becomes a writer');
+    assert(cxLib.includes('pub fn zero() ->'), 'a static method becomes an associated fn (no self)');
+    assert(cxLib.includes('pub fn value_get(&self)'), 'a getter becomes a reader');
+    assert(cxLib.includes('pub fn value_set(&mut self, v:'), 'a setter becomes a writer');
     // The standalone kernel target is registered, and its tree is a crate.
-    assert(TARGETS['rust-core']?.status === 'ready', 'R531: the rust-core kernel target is registered');
+    assert(TARGETS['rust-core']?.status === 'ready', 'the rust-core kernel target is registered');
     const rc = await exportProject('rust-core', cxProj, { apiBase: 'x', outRoot: join(scratch, 'rc') });
-    assert(existsSync(join(rc.outDir, 'Cargo.toml')), 'R531: rust-core emits a crate');
+    assert(existsSync(join(rc.outDir, 'Cargo.toml')), 'rust-core emits a crate');
   }
 
-  // R532: rust-ts class inheritance - Rust has no `extends`, so a subclass
+  // rust-ts class inheritance - Rust has no `extends`, so a subclass
   // flattens its ancestor's fields and its methods that the child does not
   // override. The parent declared LATER in the file is still inherited (a
   // pre-pass registers every class first).
@@ -11374,14 +11374,14 @@ export class Dog extends Animal {
     writeFileSync(join(exProj, 'src', 'pages', 'index.rose'), '<p>extends</p>\n');
     const exEx = await exportProject('rust', exProj, { apiBase: 'x', outRoot: join(scratch, 'ex') });
     const exLib = readFileSync(join(exEx.outDir, 'src', 'lib', 'zoo.rs'), 'utf8');
-    assert(exLib.includes('pub struct Dog {') && exLib.includes('pub name: serde_json::Value,'), 'R532: the subclass inherits the parent field');
-    assert(exLib.includes('pub fn speak(&mut self) -> serde_json::Value {\n        return serde_json::json!("woof")') || /speak[\s\S]{0,90}woof/.test(exLib), 'R532: an override wins over the inherited method');
-    assert(exLib.includes('Self { name: serde_json::json!("pet"), breed:'), 'R532: the subclass constructor initialises inherited fields too');
+    assert(exLib.includes('pub struct Dog {') && exLib.includes('pub name: serde_json::Value,'), 'the subclass inherits the parent field');
+    assert(exLib.includes('pub fn speak(&mut self) -> serde_json::Value {\n        return serde_json::json!("woof")') || /speak[\s\S]{0,90}woof/.test(exLib), 'an override wins over the inherited method');
+    assert(exLib.includes('Self { name: serde_json::json!("pet"), breed:'), 'the subclass constructor initialises inherited fields too');
     // The real gate: the inherited class RUNS in Rust.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R532: no cargo toolchain on PATH, so the inherited class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the inherited class is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(exEx.outDir, 'src', 'lib', 'zoo.rs'), `
@@ -11397,11 +11397,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: exEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('inheritance_flattens ... ok'), `R532: the inherited class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('inheritance_flattens ... ok'), `the inherited class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R533: `super.method()` - the parent's overridden method rides the child
+  // `super.method()` - the parent's overridden method rides the child
   // impl as `__super_m`, so a super call resolves to the parent's body.
   {
     const spProj = join(scratch, 'rust-super');
@@ -11418,12 +11418,12 @@ export class Dog extends Animal {
     writeFileSync(join(spProj, 'src', 'pages', 'index.rose'), '<p>super</p>\n');
     const spEx = await exportProject('rust', spProj, { apiBase: 'x', outRoot: join(scratch, 'sp') });
     const spLib = readFileSync(join(spEx.outDir, 'src', 'lib', 'zoo.rs'), 'utf8');
-    assert(spLib.includes('self.__super_speak()'), 'R533: super.speak() calls the flattened parent method');
-    assert(spLib.includes('pub fn __super_speak(&mut self)'), 'R533: the parent implementation rides the child impl');
+    assert(spLib.includes('self.__super_speak()'), 'super.speak() calls the flattened parent method');
+    assert(spLib.includes('pub fn __super_speak(&mut self)'), 'the parent implementation rides the child impl');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R533: no cargo toolchain on PATH, so the super call is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the super call is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(spEx.outDir, 'src', 'lib', 'zoo.rs'), `
@@ -11438,11 +11438,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: spEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('super_call_works ... ok'), `R533: the super call RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('super_call_works ... ok'), `the super call RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R534: `super(...)` parent constructor - the parent ctor is flattened as
+  // `super(...)` parent constructor - the parent ctor is flattened as
   // `__super_ctor` (not a duplicate `new`), and a bare super(...) call in the
   // child constructor reaches it with the same arguments.
   {
@@ -11461,13 +11461,13 @@ export class Dog extends Animal {
     writeFileSync(join(scProj, 'src', 'pages', 'index.rose'), '<p>super ctor</p>\n');
     const scEx = await exportProject('rust', scProj, { apiBase: 'x', outRoot: join(scratch, 'sc') });
     const scLib = readFileSync(join(scEx.outDir, 'src', 'lib', 'zoo.rs'), 'utf8');
-    assert(/this\.__super_ctor_\w+\(/.test(scLib), 'R534: super(name) calls the parent ctor');
-    assert(/pub fn __super_ctor_\w+\(&mut self, name: serde_json::Value\)/.test(scLib), 'R534: the parent ctor rides the child impl');
-    assert((scLib.match(/pub fn new\(/g) ?? []).length === 2, 'R534: no duplicate new() from the parent ctor');
+    assert(/this\.__super_ctor_\w+\(/.test(scLib), 'super(name) calls the parent ctor');
+    assert(/pub fn __super_ctor_\w+\(&mut self, name: serde_json::Value\)/.test(scLib), 'the parent ctor rides the child impl');
+    assert((scLib.match(/pub fn new\(/g) ?? []).length === 2, 'no duplicate new() from the parent ctor');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R534: no cargo toolchain on PATH, so the super() ctor is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the super() ctor is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(scEx.outDir, 'src', 'lib', 'zoo.rs'), `
@@ -11482,11 +11482,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: scEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('super_ctor_works ... ok'), `R534: the super() ctor RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('super_ctor_works ... ok'), `the super() ctor RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R535: a multi-level ctor chain - each super(...) reaches its DIRECT
+  // a multi-level ctor chain - each super(...) reaches its DIRECT
   // parent's flattened ctor, named by owner, so Animal's super goes to Being
   // and never recurses into Animal's own method.
   {
@@ -11509,13 +11509,13 @@ export class Dog extends Animal {
     writeFileSync(join(chProj, 'src', 'pages', 'index.rose'), '<p>ctor chain</p>\n');
     const chEx = await exportProject('rust', chProj, { apiBase: 'x', outRoot: join(scratch, 'ch') });
     const chLib = readFileSync(join(chEx.outDir, 'src', 'lib', 'zoo.rs'), 'utf8');
-    assert(chLib.includes('pub fn __super_ctor_being') && chLib.includes('pub fn __super_ctor_animal'), 'R535: every ancestor ctor is named by owner');
-    assert(/self\.__super_ctor_being\(/.test(chLib), 'R535: the middle ctor calls its grandparent, not itself');
-    assert(/this\.__super_ctor_animal\(/.test(chLib), 'R535: the child ctor calls its direct parent');
+    assert(chLib.includes('pub fn __super_ctor_being') && chLib.includes('pub fn __super_ctor_animal'), 'every ancestor ctor is named by owner');
+    assert(/self\.__super_ctor_being\(/.test(chLib), 'the middle ctor calls its grandparent, not itself');
+    assert(/this\.__super_ctor_animal\(/.test(chLib), 'the child ctor calls its direct parent');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R535: no cargo toolchain on PATH, so the ctor chain is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the ctor chain is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(chEx.outDir, 'src', 'lib', 'zoo.rs'), `
@@ -11530,11 +11530,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: chEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('ctor_chain_works ... ok'), `R535: the ctor chain RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('ctor_chain_works ... ok'), `the ctor chain RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R536: a bare `super()` - with a parent constructor it reaches
+  // a bare `super()` - with a parent constructor it reaches
   // `__super_ctor_<Owner>`; with a parent that declares NO ctor it is a
   // no-op (the parent's field initialisers were already flattened).
   {
@@ -11560,12 +11560,12 @@ export class PlainChild extends Plain {
     writeFileSync(join(naProj, 'src', 'pages', 'index.rose'), '<p>noarg super</p>\n');
     const naEx = await exportProject('rust', naProj, { apiBase: 'x', outRoot: join(scratch, 'na') });
     const naLib = readFileSync(join(naEx.outDir, 'src', 'lib', 'zoo.rs'), 'utf8');
-    assert(/this\.__super_ctor_\w+\(\)/.test(naLib), 'R536: a bare super() calls the parent ctor with no args');
-    assert(naLib.includes('let _ = ();'), 'R536: super() on a parent with no ctor is a no-op');
+    assert(/this\.__super_ctor_\w+\(\)/.test(naLib), 'a bare super() calls the parent ctor with no args');
+    assert(naLib.includes('let _ = ();'), 'super() on a parent with no ctor is a no-op');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R536: no cargo toolchain on PATH, so the bare super() is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the bare super() is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(naEx.outDir, 'src', 'lib', 'zoo.rs'), `
@@ -11582,11 +11582,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: naEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('noarg_super_works ... ok'), `R536: the bare super() RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('noarg_super_works ... ok'), `the bare super() RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R537: `class X implements I` - Rust has no interface item here, but the
+  // `class X implements I` - Rust has no interface item here, but the
   // CONTRACT is checked: every method I declares must exist on the class
   // (or a flattened ancestor). A missing method is NAMED in the report;
   // implements clauses no longer masquerade as `extends`.
@@ -11606,11 +11606,11 @@ export class Doc implements Printable {
     writeFileSync(join(imProj, 'src', 'pages', 'index.rose'), '<p>implements</p>\n');
     const imEx = await exportProject('rust', imProj, { apiBase: 'x', outRoot: join(scratch, 'im') });
     const imWarns = (imEx.warnings ?? []).join('\n');
-    assert(!imWarns.includes('non-property member skipped'), 'R537: interface method signatures are contract, not noise');
-    assert(!imWarns.includes('extends Printable'), 'R537: implements is not mistaken for extends');
-    assert(!imWarns.includes('contract is not satisfied'), 'R537: a complete class satisfies the contract');
+    assert(!imWarns.includes('non-property member skipped'), 'interface method signatures are contract, not noise');
+    assert(!imWarns.includes('extends Printable'), 'implements is not mistaken for extends');
+    assert(!imWarns.includes('contract is not satisfied'), 'a complete class satisfies the contract');
     const imLib = readFileSync(join(imEx.outDir, 'src', 'lib', 'doc.rs'), 'utf8');
-    assert(imLib.includes('pub struct Printable') && imLib.includes('pub fn print(&mut self)'), 'R537: the interface struct and the implementing method both emit');
+    assert(imLib.includes('pub struct Printable') && imLib.includes('pub fn print(&mut self)'), 'the interface struct and the implementing method both emit');
     // A missing method is named, never silently dropped.
     const missProj = join(scratch, 'rust-implements-missing');
     mkdirSync(join(missProj, 'src', 'lib'), { recursive: true });
@@ -11623,12 +11623,12 @@ export class Doc implements Printable {
 `);
     writeFileSync(join(missProj, 'src', 'pages', 'index.rose'), '<p>missing</p>\n');
     const missEx = await exportProject('rust', missProj, { apiBase: 'x', outRoot: join(scratch, 'imm') });
-    assert((missEx.warnings ?? []).join('\n').includes('method `save` is missing'), 'R537: an unmet contract is named in the report');
+    assert((missEx.warnings ?? []).join('\n').includes('method `save` is missing'), 'an unmet contract is named in the report');
     // The real gate: the implementing class RUNS in Rust.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R537: no cargo toolchain on PATH, so the implements class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the implements class is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(imEx.outDir, 'src', 'lib', 'doc.rs'), `
@@ -11643,11 +11643,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: imEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('implements_contract_renders ... ok'), `R537: the implements class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('implements_contract_renders ... ok'), `the implements class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R538: an implements contract also covers PROPERTIES - every interface
+  // an implements contract also covers PROPERTIES - every interface
   // property must exist on the class (or a flattened ancestor) with a
   // compatible declared type. A missing field or a wrong type is NAMED.
   {
@@ -11668,9 +11668,9 @@ mod rosezm_verify {
 `);
     writeFileSync(join(ipProj, 'src', 'pages', 'index.rose'), '<p>props</p>\n');
     const ipOk = await exportProject('rust', ipProj, { apiBase: 'x', outRoot: join(scratch, 'ip-ok') });
-    assert(!(ipOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'R538: a matching property contract is silent');
+    assert(!(ipOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'a matching property contract is silent');
     const ipOkLib = readFileSync(join(ipOk.outDir, 'src', 'lib', 'doc.rs'), 'utf8');
-    assert(ipOkLib.includes('pub label: serde_json::Value') && ipOkLib.includes('pub count: serde_json::Value'), 'R538: both interface properties emit as fields');
+    assert(ipOkLib.includes('pub label: serde_json::Value') && ipOkLib.includes('pub count: serde_json::Value'), 'both interface properties emit as fields');
     // Wrong type is named.
     writeFileSync(join(ipProj, 'src', 'lib', 'doc.ts'), iface + `export class Doc implements Printable {
   label: string = 'doc';
@@ -11679,7 +11679,7 @@ mod rosezm_verify {
 }
 `);
     const ipBad = await exportProject('rust', ipProj, { apiBase: 'x', outRoot: join(scratch, 'ip-bad') });
-    assert((ipBad.warnings ?? []).join('\n').includes('property `count` is string, the interface declares f64'), 'R538: a wrong property type is named');
+    assert((ipBad.warnings ?? []).join('\n').includes('property `count` is string, the interface declares f64'), 'a wrong property type is named');
     // Missing property is named.
     writeFileSync(join(ipProj, 'src', 'lib', 'doc.ts'), iface + `export class Doc implements Printable {
   label: string = 'doc';
@@ -11687,7 +11687,7 @@ mod rosezm_verify {
 }
 `);
     const ipMiss = await exportProject('rust', ipProj, { apiBase: 'x', outRoot: join(scratch, 'ip-miss') });
-    assert((ipMiss.warnings ?? []).join('\n').includes('property `count` is missing'), 'R538: a missing property is named');
+    assert((ipMiss.warnings ?? []).join('\n').includes('property `count` is missing'), 'a missing property is named');
     // The real gate: the contract-satisfying class RUNS in Rust.
     writeFileSync(join(ipProj, 'src', 'lib', 'doc.ts'), iface + `export class Doc implements Printable {
   label: string = 'doc';
@@ -11699,7 +11699,7 @@ mod rosezm_verify {
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R538: no cargo toolchain on PATH, so the property contract class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the property contract class is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(ipRun.outDir, 'src', 'lib', 'doc.rs'), `
@@ -11714,11 +11714,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: ipRun.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('property_contract_renders ... ok'), `R538: the property contract class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('property_contract_renders ... ok'), `the property contract class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R539: the contract also checks method SIGNATURES - the parameter kinds
+  // the contract also checks method SIGNATURES - the parameter kinds
   // and the return kind a class method declares must match the interface's,
   // or the mismatch is NAMED (either side saying `any` is the dynamic-domain
   // opt-out and stays silent).
@@ -11736,21 +11736,21 @@ mod rosezm_verify {
 `);
     writeFileSync(join(sgProj, 'src', 'pages', 'index.rose'), '<p>sigs</p>\n');
     const sgOk = await exportProject('rust', sgProj, { apiBase: 'x', outRoot: join(scratch, 'sg-ok') });
-    assert(!(sgOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'R539: a matching method signature is silent');
+    assert(!(sgOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'a matching method signature is silent');
     // Wrong parameter kind is named.
     writeFileSync(join(sgProj, 'src', 'lib', 'doc.ts'), sgIface + `export class Doc implements Printable {
   print(prefix: string, times: string): string { return prefix; }
 }
 `);
     const sgBad = await exportProject('rust', sgProj, { apiBase: 'x', outRoot: join(scratch, 'sg-bad') });
-    assert((sgBad.warnings ?? []).join('\n').includes('method `print` has signature string,string=>string, the interface declares string,f64=>string'), 'R539: a wrong parameter type is named');
+    assert((sgBad.warnings ?? []).join('\n').includes('method `print` has signature string,string=>string, the interface declares string,f64=>string'), 'a wrong parameter type is named');
     // Wrong return kind is named.
     writeFileSync(join(sgProj, 'src', 'lib', 'doc.ts'), sgIface + `export class Doc implements Printable {
   print(prefix: string, times: number): number { return 1; }
 }
 `);
     const sgRet = await exportProject('rust', sgProj, { apiBase: 'x', outRoot: join(scratch, 'sg-ret') });
-    assert((sgRet.warnings ?? []).join('\n').includes('method `print` has signature string,f64=>f64, the interface declares string,f64=>string'), 'R539: a wrong return type is named');
+    assert((sgRet.warnings ?? []).join('\n').includes('method `print` has signature string,f64=>f64, the interface declares string,f64=>string'), 'a wrong return type is named');
     // The real gate: the signature-satisfying class RUNS in Rust.
     writeFileSync(join(sgProj, 'src', 'lib', 'doc.ts'), sgIface + `export class Doc implements Printable {
   print(prefix: string, times: number): string { return prefix; }
@@ -11760,7 +11760,7 @@ mod rosezm_verify {
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R539: no cargo toolchain on PATH, so the signature contract class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the signature contract class is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(sgRun.outDir, 'src', 'lib', 'doc.rs'), `
@@ -11775,11 +11775,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: sgRun.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('signature_contract_renders ... ok'), `R539: the signature contract class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('signature_contract_renders ... ok'), `the signature contract class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R540: the implements contract reaches UP the extends chain - a class
+  // the implements contract reaches UP the extends chain - a class
   // implementing a derived interface also owes every method/property its
   // base interfaces declare, and a derived signature mismatch is named too.
   {
@@ -11799,7 +11799,7 @@ export class Doc implements Printable {
 `);
     writeFileSync(join(exProj, 'src', 'pages', 'index.rose'), '<p>extends</p>\n');
     const exOk = await exportProject('rust', exProj, { apiBase: 'x', outRoot: join(scratch, 'ex-ok') });
-    assert(!(exOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'R540: a class satisfying the base chain is silent');
+    assert(!(exOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'a class satisfying the base chain is silent');
     // The base method is missing - named even though `print` lives on Base.
     writeFileSync(join(exProj, 'src', 'lib', 'doc.ts'), `export interface Base {
   print(): string;
@@ -11812,7 +11812,7 @@ export class Doc implements Printable {
 }
 `);
     const exMiss = await exportProject('rust', exProj, { apiBase: 'x', outRoot: join(scratch, 'ex-miss') });
-    assert((exMiss.warnings ?? []).join('\n').includes('implements Printable but method `print` is missing'), 'R540: a missing base-interface method is named');
+    assert((exMiss.warnings ?? []).join('\n').includes('implements Printable but method `print` is missing'), 'a missing base-interface method is named');
     // A signature mismatch declared on the BASE is named through the chain.
     writeFileSync(join(exProj, 'src', 'lib', 'doc.ts'), `export interface Base {
   print(prefix: string): string;
@@ -11826,7 +11826,7 @@ export class Doc implements Printable {
 }
 `);
     const exSig = await exportProject('rust', exProj, { apiBase: 'x', outRoot: join(scratch, 'ex-sig') });
-    assert((exSig.warnings ?? []).join('\n').includes('method `print` has signature f64=>string, the interface declares string=>string'), 'R540: a base-declared signature mismatch is named');
+    assert((exSig.warnings ?? []).join('\n').includes('method `print` has signature f64=>string, the interface declares string=>string'), 'a base-declared signature mismatch is named');
     // The real gate: the chain-satisfying class RUNS in Rust.
     writeFileSync(join(exProj, 'src', 'lib', 'doc.ts'), `export interface Base {
   print(): string;
@@ -11843,7 +11843,7 @@ export class Doc implements Printable {
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R540: no cargo toolchain on PATH, so the extends-chain class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the extends-chain class is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(exRun.outDir, 'src', 'lib', 'doc.rs'), `
@@ -11858,11 +11858,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: exRun.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('extends_chain_renders ... ok'), `R540: the extends-chain class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('extends_chain_renders ... ok'), `the extends-chain class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R541: the rust-mobile cdylib does not ship alone - the shells it is FOR
+  // the rust-mobile cdylib does not ship alone - the shells it is FOR
   // ride beside it: an Android JNA bridge binding the plain C symbols and an
   // iOS bridging header + Swift wrapper for the staticlib. The names each
   // bridge binds ARE the FFI contract (kernel_call/kernel_methods/kernel_free).
@@ -11872,22 +11872,22 @@ mod rosezm_verify {
     writeFileSync(join(mbProj, 'src', 'pages', 'index.rose'), '<p>mobile</p>\n');
     const mbEx = await exportProject('rust-mobile', mbProj, { apiBase: 'x', outRoot: join(scratch, 'mb') });
     const kt = readFileSync(join(mbEx.outDir, 'android', 'app', 'src', 'main', 'java', 'app', 'rosezm', 'KernelBridge.kt'), 'utf8');
-    assert(kt.includes('Native.load("dodovim_mobile"'), 'R541: the Android bridge loads the cdylib by its Cargo.toml name');
+    assert(kt.includes('Native.load("dodovim_mobile"'), 'the Android bridge loads the cdylib by its Cargo.toml name');
     for (const sym of ['kernel_call', 'kernel_methods', 'kernel_free']) {
-      assert(kt.includes(`fun ${sym}`), `R541: the Android bridge binds ${sym}`);
+      assert(kt.includes(`fun ${sym}`), `the Android bridge binds ${sym}`);
     }
-    assert(kt.includes('kernel_free(ptr)'), 'R541: the Android bridge frees every reply pointer');
+    assert(kt.includes('kernel_free(ptr)'), 'the Android bridge frees every reply pointer');
     const iosH = readFileSync(join(mbEx.outDir, 'ios', 'RosezmKernel', 'RosezmKernel.h'), 'utf8');
-    assert(iosH.includes('char *kernel_call(const char *method, const char *args_json);') && iosH.includes('void kernel_free(char *s);'), 'R541: the iOS header declares the C surface');
+    assert(iosH.includes('char *kernel_call(const char *method, const char *args_json);') && iosH.includes('void kernel_free(char *s);'), 'the iOS header declares the C surface');
     const mm = readFileSync(join(mbEx.outDir, 'ios', 'RosezmKernel', 'module.modulemap'), 'utf8');
-    assert(mm.includes('module RosezmKernel') && mm.includes('header "RosezmKernel.h"'), 'R541: the modulemap exposes the header to Swift');
+    assert(mm.includes('module RosezmKernel') && mm.includes('header "RosezmKernel.h"'), 'the modulemap exposes the header to Swift');
     const swift = readFileSync(join(mbEx.outDir, 'ios', 'RosezmKernel', 'RosezmKernel.swift'), 'utf8');
-    assert(swift.includes('kernel_call(method, argsJson)') && swift.includes('kernel_free('), 'R541: the Swift wrapper calls the surface and frees every reply');
+    assert(swift.includes('kernel_call(method, argsJson)') && swift.includes('kernel_free('), 'the Swift wrapper calls the surface and frees every reply');
     const cargo = readFileSync(join(mbEx.outDir, 'Cargo.toml'), 'utf8');
-    assert(cargo.includes('crate-type = ["cdylib", "staticlib"]'), 'R541: the manifest builds both shapes the shells load');
+    assert(cargo.includes('crate-type = ["cdylib", "staticlib"]'), 'the manifest builds both shapes the shells load');
   }
 
-  // R542: the contract crosses module lines - a class in one lib module
+  // the contract crosses module lines - a class in one lib module
   // implementing an interface another module exports owes the same check an
   // in-module interface gets (methods, properties, signatures). The
   // collector reads the whole tree first; a module's own declarations win.
@@ -11909,7 +11909,7 @@ export class Doc implements Printable {
 `;
     writeFileSync(join(xmProj, 'src', 'lib', 'doc.ts'), satisfied);
     const xmOk = await exportProject('rust', xmProj, { apiBase: 'x', outRoot: join(scratch, 'xm-ok') });
-    assert(!(xmOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'R542: a class satisfying an imported contract is silent');
+    assert(!(xmOk.warnings ?? []).join('\n').includes('contract is not satisfied'), 'a class satisfying an imported contract is silent');
     // Missing members are named across the module line.
     writeFileSync(join(xmProj, 'src', 'lib', 'doc.ts'), `import { Printable } from './contract';
 export class Doc implements Printable {
@@ -11918,7 +11918,7 @@ export class Doc implements Printable {
 `);
     const xmMiss = await exportProject('rust', xmProj, { apiBase: 'x', outRoot: join(scratch, 'xm-miss') });
     const xmWarns = (xmMiss.warnings ?? []).join('\n');
-    assert(xmWarns.includes('implements Printable but method `print` is missing') && xmWarns.includes('property `label` is missing'), 'R542: an imported contract names its missing members');
+    assert(xmWarns.includes('implements Printable but method `print` is missing') && xmWarns.includes('property `label` is missing'), 'an imported contract names its missing members');
     // A signature mismatch declared in the OTHER module is named here.
     writeFileSync(join(xmProj, 'src', 'lib', 'doc.ts'), `import { Printable } from './contract';
 export class Doc implements Printable {
@@ -11927,10 +11927,10 @@ export class Doc implements Printable {
 }
 `);
     const xmSig = await exportProject('rust', xmProj, { apiBase: 'x', outRoot: join(scratch, 'xm-sig') });
-    assert((xmSig.warnings ?? []).join('\n').includes('method `print` has signature string,string=>string, the interface declares string,f64=>string'), 'R542: a cross-module signature mismatch is named');
+    assert((xmSig.warnings ?? []).join('\n').includes('method `print` has signature string,string=>string, the interface declares string,f64=>string'), 'a cross-module signature mismatch is named');
   }
 
-  // R543: the std-only server and the desktop shell ship the SAME two-file
+  // the std-only server and the desktop shell ship the SAME two-file
   // runtime the kernel does (shim + ops): the transpiler's direct calls
   // (concat_v, prop_opt, or_else_v) bind against rustz-ops.rs. And the two
   // semantic cracks are shut: an array spread FOLDS every part in order
@@ -11960,18 +11960,18 @@ export function deep(o: any): any {
     writeFileSync(join(bpProj, 'src', 'pages', 'index.rose'), '<p>batch</p>\n');
     const bpEx = await exportProject('rust', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bp') });
     const bpLib = readFileSync(join(bpEx.outDir, 'src', 'lib', 'batch.rs'), 'utf8');
-    assert(bpLib.includes('rustz::concat_v'), 'R543: the spread spells a concat_v fold');
-    assert(!bpLib.includes('[[spread]]'), 'R543: no spread marker leaks into the emitted Rust');
-    assert(bpLib.includes('rustz::js_str'), 'R543: the template interpolates through the JS coercion');
+    assert(bpLib.includes('rustz::concat_v'), 'the spread spells a concat_v fold');
+    assert(!bpLib.includes('[[spread]]'), 'no spread marker leaks into the emitted Rust');
+    assert(bpLib.includes('rustz::js_str'), 'the template interpolates through the JS coercion');
     const bpRuntime = readFileSync(join(bpEx.outDir, 'src', 'lib', 'rustz.rs'), 'utf8');
     for (const helper of ['pub fn concat_v', 'pub fn prop_opt', 'pub fn or_else_v', 'pub fn js_str']) {
-      assert(bpRuntime.includes(helper), `R543: the shipped runtime defines ${helper}`);
+      assert(bpRuntime.includes(helper), `the shipped runtime defines ${helper}`);
     }
     // The real gate: the semantics the JS had, answered by the transpiled code.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R543: no cargo toolchain on PATH, so the batch semantics are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the batch semantics are not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(bpEx.outDir, 'src', 'lib', 'batch.rs'), `
@@ -11990,11 +11990,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: bpEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('batch_semantics_answer ... ok'), `R543: the batch semantics RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('batch_semantics_answer ... ok'), `the batch semantics RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R544: the JS string coercion, everywhere a value becomes text - a
+  // the JS string coercion, everywhere a value becomes text - a
   // concatenation ('v=' + (n/2)) and a declared String return. The old
   // spelling was the JSON one: 6 came out "6.0" where JS says "6". The
   // runtime's VecIterExt trait also has to EXIST - an impl without the
@@ -12013,14 +12013,14 @@ export function half(n: number): string {
     writeFileSync(join(ctProj, 'src', 'pages', 'index.rose'), '<p>concat</p>\n');
     const ctEx = await exportProject('rust', ctProj, { apiBase: 'x', outRoot: join(scratch, 'ct') });
     const ctLib = readFileSync(join(ctEx.outDir, 'src', 'lib', 'cat.rs'), 'utf8');
-    assert(ctLib.includes('rustz::js_str'), 'R544: the concatenation spells the JS coercion');
+    assert(ctLib.includes('rustz::js_str'), 'the concatenation spells the JS coercion');
     const ctRuntime = readFileSync(join(ctEx.outDir, 'src', 'lib', 'rustz.rs'), 'utf8');
-    assert(ctRuntime.includes('pub trait VecIterExt'), 'R544: the shipped runtime declares the VecIterExt trait');
-    assert(ctRuntime.includes('pub fn js_str'), 'R544: the shipped runtime defines the JS coercion');
+    assert(ctRuntime.includes('pub trait VecIterExt'), 'the shipped runtime declares the VecIterExt trait');
+    assert(ctRuntime.includes('pub fn js_str'), 'the shipped runtime defines the JS coercion');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R544: no cargo toolchain on PATH, so the concat semantics are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the concat semantics are not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(ctEx.outDir, 'src', 'lib', 'cat.rs'), `
@@ -12035,11 +12035,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: ctEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('concat_semantics_answer ... ok'), `R544: the concat semantics RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('concat_semantics_answer ... ok'), `the concat semantics RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R551: `function*` generators now TRANSLATE instead of being skipped.
+  // `function*` generators now TRANSLATE instead of being skipped.
   // The kernel's dynamic domain has no lazy iterator state machine, so a
   // generator becomes a fn returning a Vec<Value> of every yielded value in
   // order: `yield x` is a push, `return x` ends it (x is NOT yielded), and
@@ -12075,15 +12075,15 @@ export function flat(): number[] { return [...g(), 3]; }
     writeFileSync(join(fgProj, 'src', 'pages', 'index.rose'), '<p>gen</p>\n');
     const fgEx = await exportProject('rust', fgProj, { apiBase: 'x', outRoot: join(scratch, 'fg') });
     const fgLib = readFileSync(join(fgEx.outDir, 'src', 'lib', 'gen.rs'), 'utf8');
-    assert(!fgLib.includes('rosezm: skipped'), 'R551: no generator is skipped');
-    assert(/pub fn fib\((?:mut )?n: serde_json::Value\) -> Vec<serde_json::Value>/.test(fgLib), 'R551: a generator returns a Vec of yielded values');
-    assert(fgLib.includes('__yields.push'), 'R551: yield becomes a push');
-    assert(fgLib.includes('return __yields;'), 'R551: an explicit return ends the generator');
-    assert(fgLib.includes('use crate::lib::rustz::VecIterExt;'), 'R551: the runtime iterator trait is in scope');
+    assert(!fgLib.includes('rosezm: skipped'), 'no generator is skipped');
+    assert(/pub fn fib\((?:mut )?n: serde_json::Value\) -> Vec<serde_json::Value>/.test(fgLib), 'a generator returns a Vec of yielded values');
+    assert(fgLib.includes('__yields.push'), 'yield becomes a push');
+    assert(fgLib.includes('return __yields;'), 'an explicit return ends the generator');
+    assert(fgLib.includes('use crate::lib::rustz::VecIterExt;'), 'the runtime iterator trait is in scope');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R551: no cargo toolchain on PATH, so the generators are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the generators are not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(fgEx.outDir, 'src', 'lib', 'gen.rs'), `
@@ -12100,11 +12100,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: fgEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('generators_answer ... ok'), `R551: the generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('generators_answer ... ok'), `the generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R552: `yield* it` DELEGATES - every element of the iterable becomes its
+  // `yield* it` DELEGATES - every element of the iterable becomes its
   // own yielded value, not one nested value. A generator call is already a
   // Vec<Value> (extend directly); a JSON array/string walks through the
   // runtime's js_iter() - the same iterator for-of uses.
@@ -12120,13 +12120,13 @@ export function* fromString(s: string): Generator<string> { yield* s; }
     writeFileSync(join(ysProj, 'src', 'pages', 'index.rose'), '<p>ys</p>\n');
     const ysEx = await exportProject('rust', ysProj, { apiBase: 'x', outRoot: join(scratch, 'ys') });
     const ysLib = readFileSync(join(ysEx.outDir, 'src', 'lib', 'ys.rs'), 'utf8');
-    assert(ysLib.includes('__yields.extend(inner());'), 'R552: a delegated generator extends the result');
-    assert(ysLib.includes('__yields.extend((xs).js_iter());'), 'R552: a delegated JSON iterable walks its elements');
-    assert(!ysLib.includes('push(rustz::val(&(inner())))'), 'R552: delegation is not a single nested push');
+    assert(ysLib.includes('__yields.extend(inner());'), 'a delegated generator extends the result');
+    assert(ysLib.includes('__yields.extend((xs).js_iter());'), 'a delegated JSON iterable walks its elements');
+    assert(!ysLib.includes('push(rustz::val(&(inner())))'), 'delegation is not a single nested push');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R552: no cargo toolchain on PATH, so yield-star is not run here');
+      console.log('ok - no cargo toolchain on PATH, so yield-star is not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(ysEx.outDir, 'src', 'lib', 'ys.rs'), `
@@ -12142,11 +12142,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: ysEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('yield_star_answers ... ok'), `R552: yield-star RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('yield_star_answers ... ok'), `yield-star RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R554: ASYNC generators - `async function*` + `for await...of` are a
+  // ASYNC generators - `async function*` + `for await...of` are a
   // full path in the dynamic domain, not a gap: the async fn returns a
   // Vec<Value> of its yields, `yield await f()` awaits before the push,
   // `yield*` on an async generator awaits and extends, and `for await`
@@ -12184,15 +12184,15 @@ export async function consumeSync(): Promise<number> {
     writeFileSync(join(agProj, 'src', 'pages', 'index.rose'), '<p>ag</p>\n');
     const agEx = await exportProject('rust', agProj, { apiBase: 'x', outRoot: join(scratch, 'ag') });
     const agLib = readFileSync(join(agEx.outDir, 'src', 'lib', 'ag.rs'), 'utf8');
-    assert(/pub async fn ticks/.test(agLib), 'R554: an async generator is an async fn');
-    assert(agLib.includes('__yields.push(rustz::val(&(load(') && agLib.includes('.await'), 'R554: yield await awaits before the push');
-    assert(agLib.includes('__yields.extend(inner().await)'), 'R554: yield* on an async generator awaits and extends');
-    assert(agLib.includes('for v in (sync_gen()).js_iter()'), 'R554: for-await over a sync generator iterates its Vec');
-    assert(!agLib.includes('rosezm: skipped'), 'R554: no async generator path is skipped');
+    assert(/pub async fn ticks/.test(agLib), 'an async generator is an async fn');
+    assert(agLib.includes('__yields.push(rustz::val(&(load(') && agLib.includes('.await'), 'yield await awaits before the push');
+    assert(agLib.includes('__yields.extend(inner().await)'), 'yield* on an async generator awaits and extends');
+    assert(agLib.includes('for v in (sync_gen()).js_iter()'), 'for-await over a sync generator iterates its Vec');
+    assert(!agLib.includes('rosezm: skipped'), 'no async generator path is skipped');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.map((c) => spawnSync(c, ['--version'], { encoding: 'utf8' })).find((r) => !r.error);
     if (!cargoBin) {
-      console.log('ok - R554: no cargo toolchain on PATH, so the async generators are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the async generators are not run here');
     } else {
       const cargo = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error)!;
       appendFileSync(join(agEx.outDir, 'src', 'lib', 'ag.rs'), `
@@ -12213,11 +12213,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargo, ['test', '--release'], { cwd: agEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('async_generators_answer ... ok'), `R554: the async generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('async_generators_answer ... ok'), `the async generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R555: the rust-mobile staticlib is a REAL iOS artifact - not just a
+  // the rust-mobile staticlib is a REAL iOS artifact - not just a
   // cdylib name in a manifest. When an Apple target is installed, the exported
   // crate cross-compiles to libdodovim_mobile.a and the archive is the right
   // architecture. No target -> the gate is honestly skipped (no fake green).
@@ -12226,11 +12226,11 @@ mod rosezm_verify {
     mkdirSync(join(ioProj, 'src', 'pages'), { recursive: true });
     writeFileSync(join(ioProj, 'src', 'pages', 'index.rose'), '<p>ios</p>\n');
     const ioEx = await exportProject('rust-mobile', ioProj, { apiBase: 'x', outRoot: join(scratch, 'io') });
-    assert(existsSync(join(ioEx.outDir, 'ios', 'RosezmKernel', 'RosezmKernel.h')), 'R555: the iOS bridge header ships with the crate');
+    assert(existsSync(join(ioEx.outDir, 'ios', 'RosezmKernel', 'RosezmKernel.h')), 'the iOS bridge header ships with the crate');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R555: no cargo toolchain on PATH, so the iOS cross-build is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the iOS cross-build is not run here');
     } else {
       const targets = spawnSync('rustup', ['target', 'list', '--installed'], { encoding: 'utf8' });
       const installed = (targets.stdout ?? '').split('\n').map((t) => t.trim()).filter(Boolean);
@@ -12240,21 +12240,21 @@ mod rosezm_verify {
       // be the only one present on a CI runner.
       const iosTargets = installed.filter((t) => /^aarch64-apple-ios(-sim)?$/.test(t));
       if (iosTargets.length === 0) {
-        console.log('ok - R555: no Apple iOS Rust target installed, so the cross-build is not run here');
+        console.log('ok - no Apple iOS Rust target installed, so the cross-build is not run here');
       } else {
         for (const iosTarget of iosTargets) {
           const built = spawnSync(cargoBin, ['build', '--release', '--target', iosTarget], { cwd: ioEx.outDir, encoding: 'utf8', timeout: 600_000 });
-          assert(built.status === 0, `R555: the rust-mobile crate cross-compiles for ${iosTarget} (${(built.stderr || '').slice(-400)})`);
+          assert(built.status === 0, `the rust-mobile crate cross-compiles for ${iosTarget} (${(built.stderr || '').slice(-400)})`);
           const lib = join(ioEx.outDir, 'target', iosTarget, 'release', 'libdodovim_mobile.a');
-          assert(existsSync(lib), `R555: the ${iosTarget} build produces libdodovim_mobile.a`);
+          assert(existsSync(lib), `the ${iosTarget} build produces libdodovim_mobile.a`);
           const lipo = spawnSync('lipo', ['-info', lib], { encoding: 'utf8' });
-          assert((lipo.stdout ?? '').includes('arm64'), `R555: the ${iosTarget} archive is arm64 (${(lipo.stdout || lipo.stderr || '').slice(-200)})`);
+          assert((lipo.stdout ?? '').includes('arm64'), `the ${iosTarget} archive is arm64 (${(lipo.stdout || lipo.stderr || '').slice(-200)})`);
         }
       }
     }
   }
 
-  // R556: the rust-mobile crate is a real ANDROID target too. It needs the
+  // the rust-mobile crate is a real ANDROID target too. It needs the
   // NDK's clang as linker (the host cc cannot emit an ELF .so), so the export
   // ships .cargo/config.toml naming the three ABI wrappers. Even without an
   // NDK, `cargo check --target <android>` type-checks the whole crate - no
@@ -12265,27 +12265,27 @@ mod rosezm_verify {
     writeFileSync(join(anProj, 'src', 'pages', 'index.rose'), '<p>android</p>\n');
     const anEx = await exportProject('rust-mobile', anProj, { apiBase: 'x', outRoot: join(scratch, 'an') });
     const cfg = readFileSync(join(anEx.outDir, '.cargo', 'config.toml'), 'utf8');
-    assert(cfg.includes('[target.aarch64-linux-android]') && cfg.includes('aarch64-linux-android24-clang'), 'R556: the arm64 Android linker is configured');
-    assert(cfg.includes('armv7a-linux-androideabi24-clang') && cfg.includes('x86_64-linux-android24-clang'), 'R556: the other two Android ABIs are configured');
-    assert(readFileSync(join(anEx.outDir, 'android', 'README.md'), 'utf8').includes('cargo check --release --target aarch64-linux-android'), 'R556: the README documents the no-NDK type-check gate');
+    assert(cfg.includes('[target.aarch64-linux-android]') && cfg.includes('aarch64-linux-android24-clang'), 'the arm64 Android linker is configured');
+    assert(cfg.includes('armv7a-linux-androideabi24-clang') && cfg.includes('x86_64-linux-android24-clang'), 'the other two Android ABIs are configured');
+    assert(readFileSync(join(anEx.outDir, 'android', 'README.md'), 'utf8').includes('cargo check --release --target aarch64-linux-android'), 'the README documents the no-NDK type-check gate');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R556: no cargo toolchain on PATH, so the Android check is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the Android check is not run here');
     } else {
       const targets = spawnSync('rustup', ['target', 'list', '--installed'], { encoding: 'utf8' });
       const installed = (targets.stdout ?? '').split('\n').map((t) => t.trim()).filter(Boolean);
       const androidTarget = installed.find((t) => /^(aarch64|armv7|x86_64)-linux-android/.test(t) || /^armv7-linux-androideabi$/.test(t));
       if (!androidTarget) {
-        console.log('ok - R556: no Android Rust target installed, so the check is not run here');
+        console.log('ok - no Android Rust target installed, so the check is not run here');
       } else {
         const checked = spawnSync(cargoBin, ['check', '--release', '--target', androidTarget], { cwd: anEx.outDir, encoding: 'utf8', timeout: 600_000 });
-        assert(checked.status === 0, `R556: the rust-mobile crate type-checks for ${androidTarget} (${(checked.stderr || '').slice(-400)})`);
+        assert(checked.status === 0, `the rust-mobile crate type-checks for ${androidTarget} (${(checked.stderr || '').slice(-400)})`);
       }
     }
   }
 
-  // R557: a batch of common TS constructs that reported `clean: true` but
+  // a batch of common TS constructs that reported `clean: true` but
   // did NOT compile (or answered the wrong thing) - Math.max's bare f64_ts,
   // reduce's bare i32 seed, Map.set/Set.add's bare ints, filter's &&Value
   // closure param, and a try/catch whose value was dropped on the floor.
@@ -12308,16 +12308,16 @@ export function tryCatch(x: number): number { try { return x; } catch (e) { retu
     writeFileSync(join(epProj, 'src', 'pages', 'index.rose'), '<p>edge</p>\n');
     const epEx = await exportProject('rust', epProj, { apiBase: 'x', outRoot: join(scratch, 'ep') });
     const epLib = readFileSync(join(epEx.outDir, 'src', 'lib', 'ep.rs'), 'utf8');
-    assert(epLib.includes('rustz::f64_ts('), 'R557: Math.max qualifies its numeric helper');
-    assert(!/[^:]f64_ts\(/.test(epLib.replace(/rustz::f64_ts\(/g, '')), 'R557: no bare f64_ts remains');
-    assert(epLib.includes('fold(serde_json::json!(0)'), 'R557: reduce starts from a domain Value seed');
-    assert(epLib.includes('rustz::includes(&') && epLib.includes('rustz::push_v(&mut'), 'R557: Set has/add walk the dynamic domain');
-    assert(/return Ok\(x(?:\.clone\(\))?\);/.test(epLib), 'R557: a try-block return wraps into the Ok payload');
-    assert(epLib.includes('return __try;'), 'R557: the try value is returned, not dropped');
+    assert(epLib.includes('rustz::f64_ts('), 'Math.max qualifies its numeric helper');
+    assert(!/[^:]f64_ts\(/.test(epLib.replace(/rustz::f64_ts\(/g, '')), 'no bare f64_ts remains');
+    assert(epLib.includes('fold(serde_json::json!(0)'), 'reduce starts from a domain Value seed');
+    assert(epLib.includes('rustz::includes(&') && epLib.includes('rustz::push_v(&mut'), 'Set has/add walk the dynamic domain');
+    assert(/return Ok\(x(?:\.clone\(\))?\);/.test(epLib), 'a try-block return wraps into the Ok payload');
+    assert(epLib.includes('return __try;'), 'the try value is returned, not dropped');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R557: no cargo toolchain on PATH, so the edge batch is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the edge batch is not run here');
     } else {
       appendFileSync(join(epEx.outDir, 'src', 'lib', 'ep.rs'), `
 #[cfg(test)]
@@ -12340,11 +12340,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: epEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('edge_answers ... ok'), `R557: the edge batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('edge_answers ... ok'), `the edge batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R558: three constructs that used to be SKIPPED (clean: false) are now
+  // three constructs that used to be SKIPPED (clean: false) are now
   // translated: `'a' in obj` (has_key), `delete o.a` / `delete o[k]`
   // (js_delete with a mut receiver), and `throw` (None inside a try block
   // -> the catch branch; a panic outside one). The gate is a real cargo
@@ -12364,16 +12364,16 @@ export function happy(x: number): number { return x + 1; }
     writeFileSync(join(stProj, 'src', 'pages', 'index.rose'), '<p>st</p>\n');
     const stEx = await exportProject('rust', stProj, { apiBase: 'x', outRoot: join(scratch, 'st') });
     const stLib = readFileSync(join(stEx.outDir, 'src', 'lib', 'st.rs'), 'utf8');
-    assert(!stLib.includes('rosezm: skipped'), 'R558: no statement is skipped');
-    assert(stLib.includes('rustz::has_key(&') && stLib.includes('serde_json::json!(rustz::has_key'), 'R558: in answers a domain bool');
-    assert(stLib.includes('rustz::js_delete(&mut (o)'), 'R558: delete mutates the receiver');
-    assert(/pub fn del\(mut o: serde_json::Value\)/.test(stLib), 'R558: a deleted receiver is a mut parameter');
-    assert(stLib.includes('return Err('), 'R558: throw inside try carries the payload to the catch');
-    assert(!stLib.includes('return Some(None)'), 'R558: the None error signal is not double-wrapped');
+    assert(!stLib.includes('rosezm: skipped'), 'no statement is skipped');
+    assert(stLib.includes('rustz::has_key(&') && stLib.includes('serde_json::json!(rustz::has_key'), 'in answers a domain bool');
+    assert(stLib.includes('rustz::js_delete(&mut (o)'), 'delete mutates the receiver');
+    assert(/pub fn del\(mut o: serde_json::Value\)/.test(stLib), 'a deleted receiver is a mut parameter');
+    assert(stLib.includes('return Err('), 'throw inside try carries the payload to the catch');
+    assert(!stLib.includes('return Some(None)'), 'the None error signal is not double-wrapped');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R558: no cargo toolchain on PATH, so the statements are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the statements are not run here');
     } else {
       appendFileSync(join(stEx.outDir, 'src', 'lib', 'st.rs'), `
 #[cfg(test)]
@@ -12393,11 +12393,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: stEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('statements_answer ... ok'), `R558: the statements RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('statements_answer ... ok'), `the statements RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R559: three more gaps closed at once. `try/finally` used to DROP the
+  // three more gaps closed at once. `try/finally` used to DROP the
   // finally block (clean:true, wrong answer); `for...in` and array-rest
   // destructuring were skipped outright. A lib file named after a Rust
   // keyword (`fn.ts`) used to emit `pub mod fn;` and break the whole crate -
@@ -12425,18 +12425,18 @@ export function firstOf(xs: number[]): number { const [a, ...rest] = xs; return 
     writeFileSync(join(alProj, 'src', 'pages', 'index.rose'), '<p>all</p>\n');
     const alEx = await exportProject('rust', alProj, { apiBase: 'x', outRoot: join(scratch, 'al') });
     const alMain = readFileSync(join(alEx.outDir, 'src', 'main.rs'), 'utf8');
-    assert(alMain.includes('pub mod r#fn;'), 'R559: a Rust-keyword lib file becomes a raw-identifier module');
-    assert(existsSync(join(alEx.outDir, 'src', 'lib', 'fn.rs')) && !existsSync(join(alEx.outDir, 'src', 'lib', 'r#fn.rs')), 'R559: the file keeps its plain name');
+    assert(alMain.includes('pub mod r#fn;'), 'a Rust-keyword lib file becomes a raw-identifier module');
+    assert(existsSync(join(alEx.outDir, 'src', 'lib', 'fn.rs')) && !existsSync(join(alEx.outDir, 'src', 'lib', 'r#fn.rs')), 'the file keeps its plain name');
     const alFn = readFileSync(join(alEx.outDir, 'src', 'lib', 'fn.rs'), 'utf8');
-    assert(alFn.includes('flag = serde_json::json!(9)'), 'R559: the finally block is emitted, not dropped');
+    assert(alFn.includes('flag = serde_json::json!(9)'), 'the finally block is emitted, not dropped');
     const alRest = readFileSync(join(alEx.outDir, 'src', 'lib', 'rest.rs'), 'utf8');
-    assert(alRest.includes('for __pair in rustz::entries_pairs('), 'R559: for-in walks the object keys');
-    assert(alRest.includes('rustz::slice_v('), 'R559: array rest takes the tail');
-    assert(!alRest.includes('rosezm: skipped'), 'R559: no for-in/rest path is skipped');
+    assert(alRest.includes('for __pair in rustz::entries_pairs('), 'for-in walks the object keys');
+    assert(alRest.includes('rustz::slice_v('), 'array rest takes the tail');
+    assert(!alRest.includes('rosezm: skipped'), 'no for-in/rest path is skipped');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R559: no cargo toolchain on PATH, so the finally/for-in/rest batch is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the finally/for-in/rest batch is not run here');
     } else {
       appendFileSync(join(alEx.outDir, 'src', 'lib', 'fn.rs'), `
 #[cfg(test)]
@@ -12463,44 +12463,44 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: alEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('finally_answers ... ok') && tested.stdout.includes('loops_and_rest_answer ... ok'), `R559: the finally/for-in/rest batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('finally_answers ... ok') && tested.stdout.includes('loops_and_rest_answer ... ok'), `the finally/for-in/rest batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R560: the iOS DEVICE target is not the simulator. When
+  // the iOS DEVICE target is not the simulator. When
   // aarch64-apple-ios is installed, the exported rust-mobile crate must
   // build a staticlib for the device sysroot too - not just the -sim one
-  // R555 happened to find first. The archive is a real arm64 ar archive.
+  // happened to find first. The archive is a real arm64 ar archive.
   {
     const dvProj = join(scratch, 'rust-ios-device');
     mkdirSync(join(dvProj, 'src', 'pages'), { recursive: true });
     writeFileSync(join(dvProj, 'src', 'pages', 'index.rose'), '<p>device</p>\n');
     const dvEx = await exportProject('rust-mobile', dvProj, { apiBase: 'x', outRoot: join(scratch, 'dv') });
     const dvReadme = readFileSync(join(dvEx.outDir, 'ios', 'README.md'), 'utf8');
-    assert(/aarch64-apple-ios/.test(dvReadme) && /simulator|aarch64-apple-ios-sim/i.test(dvReadme), 'R560: the iOS README names both the device and simulator targets');
+    assert(/aarch64-apple-ios/.test(dvReadme) && /simulator|aarch64-apple-ios-sim/i.test(dvReadme), 'the iOS README names both the device and simulator targets');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R560: no cargo toolchain on PATH, so the device build is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the device build is not run here');
     } else {
       const targets = spawnSync('rustup', ['target', 'list', '--installed'], { encoding: 'utf8' });
       const installed = (targets.stdout ?? '').split('\n').map((t) => t.trim()).filter(Boolean);
       if (!installed.includes('aarch64-apple-ios')) {
-        console.log('ok - R560: aarch64-apple-ios is not installed, so the device build is not run here');
+        console.log('ok - aarch64-apple-ios is not installed, so the device build is not run here');
       } else {
         const built = spawnSync(cargoBin, ['build', '--release', '--target', 'aarch64-apple-ios'], { cwd: dvEx.outDir, encoding: 'utf8', timeout: 600_000 });
-        assert(built.status === 0, `R560: the rust-mobile crate builds for the iOS DEVICE target (${(built.stderr || '').slice(-400)})`);
+        assert(built.status === 0, `the rust-mobile crate builds for the iOS DEVICE target (${(built.stderr || '').slice(-400)})`);
         const lib = join(dvEx.outDir, 'target', 'aarch64-apple-ios', 'release', 'libdodovim_mobile.a');
-        assert(existsSync(lib), 'R560: the device build produces libdodovim_mobile.a');
+        assert(existsSync(lib), 'the device build produces libdodovim_mobile.a');
         const lipo = spawnSync('lipo', ['-info', lib], { encoding: 'utf8' });
-        assert((lipo.stdout ?? '').includes('arm64'), 'R560: the device archive is arm64');
+        assert((lipo.stdout ?? '').includes('arm64'), 'the device archive is arm64');
         const ar = spawnSync('file', [lib], { encoding: 'utf8' });
-        assert((ar.stdout ?? '').includes('ar archive'), 'R560: the device artifact is a static archive');
+        assert((ar.stdout ?? '').includes('ar archive'), 'the device artifact is a static archive');
       }
     }
   }
 
-  // R561: the generator subset is EAGER (a Vec<Value> of all yields), so a
+  // the generator subset is EAGER (a Vec<Value> of all yields), so a
   // generator whose body can never terminate would hang the process at the
   // call site. It is now NAMED and refused (skipped stub + warning) instead
   // of being silently emitted. A `while (true)` WITH a break, and a bounded
@@ -12524,14 +12524,14 @@ export function* finite(n: number): Generator<number> {
     writeFileSync(join(infProj, 'src', 'pages', 'index.rose'), '<p>inf</p>\n');
     const infEx = await exportProject('rust', infProj, { apiBase: 'x', outRoot: join(scratch, 'inf') });
     const warns = (infEx.warnings ?? []).join('\n');
-    assert(warns.includes('a generator with an infinite loop cannot be translated'), 'R561: an infinite generator is named, not silently emitted');
+    assert(warns.includes('a generator with an infinite loop cannot be translated'), 'an infinite generator is named, not silently emitted');
     const infLib = readFileSync(join(infEx.outDir, 'src', 'lib', 'inf.rs'), 'utf8');
-    assert(/__unsupported.*forever|skipped forever/.test(infLib), 'R561: the infinite generator gets an explicit stub');
-    assert(infLib.includes('pub fn bounded') && infLib.includes('pub fn finite'), 'R561: bounded generators still translate');
+    assert(/__unsupported.*forever|skipped forever/.test(infLib), 'the infinite generator gets an explicit stub');
+    assert(infLib.includes('pub fn bounded') && infLib.includes('pub fn finite'), 'bounded generators still translate');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R561: no cargo toolchain on PATH, so the bounded generators are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the bounded generators are not run here');
     } else {
       appendFileSync(join(infEx.outDir, 'src', 'lib', 'inf.rs'), `
 #[cfg(test)]
@@ -12547,11 +12547,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: infEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('bounded_generators_answer ... ok'), `R561: the bounded generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('bounded_generators_answer ... ok'), `the bounded generators RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R562: `x instanceof C` was skipped outright (clean: false). The dynamic
+  // `x instanceof C` was skipped outright (clean: false). The dynamic
   // domain has no prototype chain, so the built-in constructors are answered
   // by JSON SHAPE (Array/Object/String/Number/Boolean) and any user class
   // answers false - an honest boundary, not a fabricated type tag.
@@ -12567,12 +12567,12 @@ export function isNumber(x: any): boolean { return x instanceof Number; }
     writeFileSync(join(ioProj, 'src', 'pages', 'index.rose'), '<p>io</p>\n');
     const ioEx = await exportProject('rust', ioProj, { apiBase: 'x', outRoot: join(scratch, 'io2') });
     const ioLib = readFileSync(join(ioEx.outDir, 'src', 'lib', 'io.rs'), 'utf8');
-    assert(!ioLib.includes('__unsupported'), 'R562: instanceof is no longer skipped');
-    assert(ioLib.includes('rustz::js_instance_of(&(x), "Array")'), 'R562: the constructor name is passed to the runtime');
+    assert(!ioLib.includes('__unsupported'), 'instanceof is no longer skipped');
+    assert(ioLib.includes('rustz::js_instance_of(&(x), "Array")'), 'the constructor name is passed to the runtime');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R562: no cargo toolchain on PATH, so instanceof is not run here');
+      console.log('ok - no cargo toolchain on PATH, so instanceof is not run here');
     } else {
       appendFileSync(join(ioEx.outDir, 'src', 'lib', 'io.rs'), `
 #[cfg(test)]
@@ -12590,11 +12590,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: ioEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('instance_of_answers ... ok'), `R562: instanceof RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('instance_of_answers ... ok'), `instanceof RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R563: TS `#private` fields used to emit `self.#secret` (not a Rust
+  // TS `#private` fields used to emit `self.#secret` (not a Rust
   // identifier), an EMPTY struct, and a `computed property skipped` warning.
   // They now become Rust-legal `private_<name>` fields with correct init,
   // reads and writes. `new C()` for a local class also binds a mutable
@@ -12612,15 +12612,15 @@ mod rosezm_verify {
     writeFileSync(join(pfProj, 'src', 'pages', 'index.rose'), '<p>pf</p>\n');
     const pfEx = await exportProject('rust', pfProj, { apiBase: 'x', outRoot: join(scratch, 'pf') });
     const pfLib = readFileSync(join(pfEx.outDir, 'src', 'lib', 'pf.rs'), 'utf8');
-    assert(!/#secret/.test(pfLib) && !/self\.#/.test(pfLib), 'R563: no illegal # identifier is emitted');
-    assert(pfLib.includes('pub private_secret: serde_json::Value'), 'R563: the private field is a real struct field');
-    assert(pfLib.includes('private_secret: serde_json::json!(1)'), 'R563: the private field keeps its initializer');
-    assert(pfLib.includes('"private_secret"') && pfLib.includes('rustz::set_field'), 'R563: private reads and writes go through the runtime');
-    assert(!(pfEx.warnings ?? []).join('\n').includes('computed property skipped'), 'R563: no false computed-property warning');
+    assert(!/#secret/.test(pfLib) && !/self\.#/.test(pfLib), 'no illegal # identifier is emitted');
+    assert(pfLib.includes('pub private_secret: serde_json::Value'), 'the private field is a real struct field');
+    assert(pfLib.includes('private_secret: serde_json::json!(1)'), 'the private field keeps its initializer');
+    assert(pfLib.includes('"private_secret"') && pfLib.includes('rustz::set_field'), 'private reads and writes go through the runtime');
+    assert(!(pfEx.warnings ?? []).join('\n').includes('computed property skipped'), 'no false computed-property warning');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R563: no cargo toolchain on PATH, so the private class is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the private class is not run here');
     } else {
       appendFileSync(join(pfEx.outDir, 'src', 'lib', 'pf.rs'), `
 #[cfg(test)]
@@ -12636,11 +12636,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: pfEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('private_field_answer ... ok'), `R563: the private class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('private_field_answer ... ok'), `the private class RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R564: `c.bump()` on a local class instance was SKIPPED (the array/JSON
+  // `c.bump()` on a local class instance was SKIPPED (the array/JSON
   // method tables have no entry for a user class). describeCall peels it to
   // target=Identifier(c), name='bump', so the call is now emitted as a
   // plain Rust method call; the return of `c.get()` is NOT mistaken for a
@@ -12659,13 +12659,13 @@ export function useC(): number { const c = new C(); c.bump(2); c.bump(3); return
     writeFileSync(join(icProj, 'src', 'pages', 'index.rose'), '<p>ic</p>\n');
     const icEx = await exportProject('rust', icProj, { apiBase: 'x', outRoot: join(scratch, 'ic') });
     const icLib = readFileSync(join(icEx.outDir, 'src', 'lib', 'ic.rs'), 'utf8');
-    assert(!icLib.includes('__unsupported'), 'R564: no instance-call stub remains');
-    assert(icLib.includes('C::new()') && icLib.includes('c.bump('), 'R564: the instance is constructed and its method called');
-    assert(/return c\.get\(\);/.test(icLib) && !/c\.get\(\)\)\.unwrap_or/.test(icLib), 'R564: an instance method return is not unwrapped as an Option');
+    assert(!icLib.includes('__unsupported'), 'no instance-call stub remains');
+    assert(icLib.includes('C::new()') && icLib.includes('c.bump('), 'the instance is constructed and its method called');
+    assert(/return c\.get\(\);/.test(icLib) && !/c\.get\(\)\)\.unwrap_or/.test(icLib), 'an instance method return is not unwrapped as an Option');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R564: no cargo toolchain on PATH, so the instance call is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the instance call is not run here');
     } else {
       appendFileSync(join(icEx.outDir, 'src', 'lib', 'ic.rs'), `
 #[cfg(test)]
@@ -12678,11 +12678,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: icEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('instance_call_answers ... ok'), `R564: the instance call RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('instance_call_answers ... ok'), `the instance call RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R565: `export namespace N { export const x = 1 }` was an unsupported
+  // `export namespace N { export const x = 1 }` was an unsupported
   // top-level declaration (the whole module got a skipped stub). It now
   // becomes a Rust `pub mod n` of zero-arg value accessors, and a bare
   // `N.x` read resolves to `n::x()` instead of a JSON member lookup.
@@ -12697,13 +12697,13 @@ export function h(): string { return N.label; }
     writeFileSync(join(nsProj, 'src', 'pages', 'index.rose'), '<p>ns</p>\n');
     const nsEx = await exportProject('rust', nsProj, { apiBase: 'x', outRoot: join(scratch, 'ns') });
     const nsLib = readFileSync(join(nsEx.outDir, 'src', 'lib', 'ns.rs'), 'utf8');
-    assert(!nsLib.includes('rosezm: skipped - unsupported top-level'), 'R565: the namespace is not skipped');
-    assert(nsLib.includes('pub mod n {') && nsLib.includes('pub fn x() -> serde_json::Value'), 'R565: the namespace emits a Rust module with a value accessor');
-    assert(nsLib.includes('return n::x();') && nsLib.includes('return n::label();'), 'R565: N.x reads resolve to module accessors');
+    assert(!nsLib.includes('rosezm: skipped - unsupported top-level'), 'the namespace is not skipped');
+    assert(nsLib.includes('pub mod n {') && nsLib.includes('pub fn x() -> serde_json::Value'), 'the namespace emits a Rust module with a value accessor');
+    assert(nsLib.includes('return n::x();') && nsLib.includes('return n::label();'), 'N.x reads resolve to module accessors');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R565: no cargo toolchain on PATH, so the namespace is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the namespace is not run here');
     } else {
       appendFileSync(join(nsEx.outDir, 'src', 'lib', 'ns.rs'), `
 #[cfg(test)]
@@ -12717,11 +12717,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: nsEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('namespace_answers ... ok'), `R565: the namespace RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('namespace_answers ... ok'), `the namespace RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R566: namespace FUNCTION members translate into the Rust module (the
+  // namespace FUNCTION members translate into the Rust module (the
   // values-only support left them as a named skip). A function inside the
   // namespace reads its own value members bare (`base` -> `base()`), an
   // outside call `M.add(5)` spells `m::add(...)`, and the module carries
@@ -12740,14 +12740,14 @@ export function directBase(): number { return M.base; }
     writeFileSync(join(nfProj, 'src', 'pages', 'index.rose'), '<p>nf</p>\n');
     const nfEx = await exportProject('rust', nfProj, { apiBase: 'x', outRoot: join(scratch, 'nf') });
     const nfLib = readFileSync(join(nfEx.outDir, 'src', 'lib', 'nsfn.rs'), 'utf8');
-    assert(nfLib.includes('pub fn add(') && nfLib.includes('pub fn base()'), 'R566: value AND function members emit into the module');
-    assert(nfLib.includes('return rustz::js_add(&(base()), &(a));'), 'R566: a bare member read inside the namespace is the accessor call');
-    assert(nfLib.includes('return m::add(serde_json::json!(5));'), 'R566: an outside M.add call spells the module path');
-    assert(nfLib.includes('use super::*;'), 'R566: the nested module re-imports the parent scope');
+    assert(nfLib.includes('pub fn add(') && nfLib.includes('pub fn base()'), 'value AND function members emit into the module');
+    assert(nfLib.includes('return rustz::js_add(&(base()), &(a));'), 'a bare member read inside the namespace is the accessor call');
+    assert(nfLib.includes('return m::add(serde_json::json!(5));'), 'an outside M.add call spells the module path');
+    assert(nfLib.includes('use super::*;'), 'the nested module re-imports the parent scope');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R566: no cargo toolchain on PATH, so the namespace fns are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the namespace fns are not run here');
     } else {
       appendFileSync(join(nfEx.outDir, 'src', 'lib', 'nsfn.rs'), `
 #[cfg(test)]
@@ -12761,11 +12761,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: nfEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(tested.status === 0 && tested.stdout.includes('nsfn_answers ... ok'), `R566: the namespace fns RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('nsfn_answers ... ok'), `the namespace fns RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R568: `x ??= v` / `x ||= v` / `x &&= v` were skipped outright (the
+  // `x ??= v` / `x ||= v` / `x &&= v` were skipped outright (the
   // assignment branch took only `=`/`+=`/...). Rust has no such operator on
   // the dynamic domain, so the short-circuit condition is spelled out - and
   // a MEMBER target goes through prop()/set_prop(), not a bare assignment.
@@ -12780,14 +12780,14 @@ export function h(b: boolean): boolean { b &&= false; return b; }
     writeFileSync(join(naProj, 'src', 'pages', 'index.rose'), '<p>na</p>\n');
     const naEx = await exportProject('rust', naProj, { apiBase: 'x', outRoot: join(scratch, 'na') });
     const naLib = readFileSync(join(naEx.outDir, 'src', 'lib', 'na.rs'), 'utf8');
-    assert(!naLib.includes('__unsupported'), 'R568: conditional assignment is no longer skipped');
-    assert(naLib.includes('if rustz::is_null(&(x)) { x = serde_json::json!(3); }'), 'R568: ??= tests null before writing');
-    assert(naLib.includes('rustz::set_prop(&mut (o), "name", serde_json::json!("anon"))'), 'R568: a member target writes through set_prop');
-    assert(naLib.includes('if rustz::truthy(&(b)) { b = serde_json::json!(false); }'), 'R568: &&= tests truthiness');
+    assert(!naLib.includes('__unsupported'), 'conditional assignment is no longer skipped');
+    assert(naLib.includes('if rustz::is_null(&(x)) { x = serde_json::json!(3); }'), '??= tests null before writing');
+    assert(naLib.includes('rustz::set_prop(&mut (o), "name", serde_json::json!("anon"))'), 'a member target writes through set_prop');
+    assert(naLib.includes('if rustz::truthy(&(b)) { b = serde_json::json!(false); }'), '&&= tests truthiness');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R568: no cargo toolchain on PATH, so the conditional assignments are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the conditional assignments are not run here');
     } else {
       appendFileSync(join(naEx.outDir, 'src', 'lib', 'na.rs'), `
 #[cfg(test)]
@@ -12805,11 +12805,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: naEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('conditional_assign_answers ... ok'), `R568: the conditional assignments RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('conditional_assign_answers ... ok'), `the conditional assignments RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R569: `Object.assign(target, ...sources)` was skipped (the Object
+  // `Object.assign(target, ...sources)` was skipped (the Object
   // namespace branch only knew keys/values/entries). It is a left fold of
   // shallow merges - the same merge_obj the runtime already uses - so later
   // sources win, as in JS.
@@ -12823,12 +12823,12 @@ export function overridden(o: any): any { return Object.assign({}, { a: 1, b: 2 
     writeFileSync(join(oaProj, 'src', 'pages', 'index.rose'), '<p>oa</p>\n');
     const oaEx = await exportProject('rust', oaProj, { apiBase: 'x', outRoot: join(scratch, 'oa') });
     const oaLib = readFileSync(join(oaEx.outDir, 'src', 'lib', 'oa.rs'), 'utf8');
-    assert(!oaLib.includes('__unsupported'), 'R569: Object.assign is no longer skipped');
-    assert(oaLib.includes('rustz::merge_obj('), 'R569: the assignment folds through merge_obj');
+    assert(!oaLib.includes('__unsupported'), 'Object.assign is no longer skipped');
+    assert(oaLib.includes('rustz::merge_obj('), 'the assignment folds through merge_obj');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R569: no cargo toolchain on PATH, so Object.assign is not run here');
+      console.log('ok - no cargo toolchain on PATH, so Object.assign is not run here');
     } else {
       appendFileSync(join(oaEx.outDir, 'src', 'lib', 'oa.rs'), `
 #[cfg(test)]
@@ -12842,11 +12842,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: oaEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('object_assign_answers ... ok'), `R569: Object.assign RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('object_assign_answers ... ok'), `Object.assign RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R570: labeled loops. `outer: for (...)` used to be skipped (only a bare
+  // labeled loops. `outer: for (...)` used to be skipped (only a bare
   // for/while had a case). Rust labels a loop natively (`'outer: for ...`),
   // and `continue outer` / `break outer` map to `continue 'outer` /
   // `break 'outer` - the same control flow the JS had.
@@ -12869,13 +12869,13 @@ mod rosezm_verify {
     writeFileSync(join(lbProj, 'src', 'pages', 'index.rose'), '<p>lb</p>\n');
     const lbEx = await exportProject('rust', lbProj, { apiBase: 'x', outRoot: join(scratch, 'lb') });
     const lbLib = readFileSync(join(lbEx.outDir, 'src', 'lib', 'lb.rs'), 'utf8');
-    assert(!lbLib.includes('__unsupported'), 'R570: a labeled loop is no longer skipped');
-    assert(lbLib.includes("'outer: for a in"), 'R570: the label rides the loop');
-    assert(lbLib.includes("continue 'outer;") && lbLib.includes("break 'outer;"), 'R570: labeled break/continue target the outer loop');
+    assert(!lbLib.includes('__unsupported'), 'a labeled loop is no longer skipped');
+    assert(lbLib.includes("'outer: for a in"), 'the label rides the loop');
+    assert(lbLib.includes("continue 'outer;") && lbLib.includes("break 'outer;"), 'labeled break/continue target the outer loop');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R570: no cargo toolchain on PATH, so the labeled loop is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the labeled loop is not run here');
     } else {
       appendFileSync(join(lbEx.outDir, 'src', 'lib', 'lb.rs'), `
 #[cfg(test)]
@@ -12889,11 +12889,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: lbEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('labeled_loops_answer ... ok'), `R570: the labeled loop RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('labeled_loops_answer ... ok'), `the labeled loop RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R571: three more one-liners that used to skip the whole function:
+  // three more one-liners that used to skip the whole function:
   // `xs.at(i)` (negative indices are index_of_value's JS semantics),
   // `Array.from(x)` (the domain's x already IS a JSON array) and
   // `Object.freeze(x)` (a no-op on a JSON value). A parenthesized `?? -1`
@@ -12911,14 +12911,14 @@ export function lastChar(s: string): string { return s.at(-1) ?? ''; }
     writeFileSync(join(atProj, 'src', 'pages', 'index.rose'), '<p>at</p>\n');
     const atEx = await exportProject('rust', atProj, { apiBase: 'x', outRoot: join(scratch, 'at') });
     const atLib = readFileSync(join(atEx.outDir, 'src', 'lib', 'at.rs'), 'utf8');
-    assert(!atLib.includes('__unsupported'), 'R571: none of the three constructs is skipped');
-    assert(atLib.includes('rustz::index_of_value(&(xs), serde_json::json!(-1))'), 'R571: at() reads through index_of_value');
-    assert(atLib.includes('rustz::or_else_v(&(rustz::index_of_value'), 'R571: a parenthesized ?? fallback lands as a Value');
-    assert(atLib.includes('rustz::val(&(o))'), 'R571: Object.freeze is the identity');
+    assert(!atLib.includes('__unsupported'), 'none of the three constructs is skipped');
+    assert(atLib.includes('rustz::index_of_value(&(xs), serde_json::json!(-1))'), 'at() reads through index_of_value');
+    assert(atLib.includes('rustz::or_else_v(&(rustz::index_of_value'), 'a parenthesized ?? fallback lands as a Value');
+    assert(atLib.includes('rustz::val(&(o))'), 'Object.freeze is the identity');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R571: no cargo toolchain on PATH, so the at/freeze batch is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the at/freeze batch is not run here');
     } else {
       appendFileSync(join(atEx.outDir, 'src', 'lib', 'at.rs'), `
 #[cfg(test)]
@@ -12937,11 +12937,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: atEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('at_answers ... ok'), `R571: the at/freeze batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('at_answers ... ok'), `the at/freeze batch RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R572: three more skipped methods: `s.padEnd(n, c)`, `a.toSorted()`,
+  // three more skipped methods: `s.padEnd(n, c)`, `a.toSorted()`,
   // `a.toReversed()`. The two array copies must NOT mutate the receiver -
   // that is the whole point of the to* names.
   {
@@ -12956,13 +12956,13 @@ export function kept(a: number[]): number { const b = a.toSorted(); return a[0] 
     writeFileSync(join(p2Proj, 'src', 'pages', 'index.rose'), '<p>p2</p>\n');
     const p2Ex = await exportProject('rust', p2Proj, { apiBase: 'x', outRoot: join(scratch, 'p2') });
     const p2Lib = readFileSync(join(p2Ex.outDir, 'src', 'lib', 'p2.rs'), 'utf8');
-    assert(!p2Lib.includes('__unsupported'), 'R572: all three methods translate');
-    assert(p2Lib.includes('rustz::pad_end('), 'R572: padEnd uses the runtime helper');
-    assert(p2Lib.includes('rustz::sort_v(') && p2Lib.includes('rustz::reverse_v('), 'R572: the copies go through sort_v/reverse_v');
+    assert(!p2Lib.includes('__unsupported'), 'all three methods translate');
+    assert(p2Lib.includes('rustz::pad_end('), 'padEnd uses the runtime helper');
+    assert(p2Lib.includes('rustz::sort_v(') && p2Lib.includes('rustz::reverse_v('), 'the copies go through sort_v/reverse_v');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R572: no cargo toolchain on PATH, so the copy methods are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the copy methods are not run here');
     } else {
       appendFileSync(join(p2Ex.outDir, 'src', 'lib', 'p2.rs'), `
 #[cfg(test)]
@@ -12978,11 +12978,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: p2Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('copy_methods_answer ... ok'), `R572: the copy methods RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('copy_methods_answer ... ok'), `the copy methods RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R573: `a.with(i, v)` and `Object.fromEntries(pairs)` were the last two
+  // `a.with(i, v)` and `Object.fromEntries(pairs)` were the last two
   // skipped one-liners in the array/object family. `with` returns a copy
   // (negative index counts from the end); fromEntries is the inverse of
   // object_entries.
@@ -12998,13 +12998,13 @@ export function untouched(a: number[]): number { const b = a.with(0, 9); return 
     writeFileSync(join(p3Proj, 'src', 'pages', 'index.rose'), '<p>p3</p>\n');
     const p3Ex = await exportProject('rust', p3Proj, { apiBase: 'x', outRoot: join(scratch, 'p3') });
     const p3Lib = readFileSync(join(p3Ex.outDir, 'src', 'lib', 'p3.rs'), 'utf8');
-    assert(!p3Lib.includes('__unsupported'), 'R573: with and fromEntries translate');
-    assert(p3Lib.includes('rustz::with_v('), 'R573: with goes through with_v');
-    assert(p3Lib.includes('rustz::from_entries('), 'R573: fromEntries goes through from_entries');
+    assert(!p3Lib.includes('__unsupported'), 'with and fromEntries translate');
+    assert(p3Lib.includes('rustz::with_v('), 'with goes through with_v');
+    assert(p3Lib.includes('rustz::from_entries('), 'fromEntries goes through from_entries');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R573: no cargo toolchain on PATH, so with/fromEntries are not run here');
+      console.log('ok - no cargo toolchain on PATH, so with/fromEntries are not run here');
     } else {
       appendFileSync(join(p3Ex.outDir, 'src', 'lib', 'p3.rs'), `
 #[cfg(test)]
@@ -13020,11 +13020,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: p3Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('with_entries_answer ... ok'), `R573: with/fromEntries RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('with_entries_answer ... ok'), `with/fromEntries RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R657: the kernel-stub migration's first three seams:
+  // the kernel-stub migration's first three seams:
   // destructuring splice, local recursive fns, object-spread
   // precedence). `xs.splice(0, 2)` mutates the receiver and returns the
   // removed array; a self-referencing local fn becomes a nested `fn` item
@@ -13066,19 +13066,19 @@ export async function grab(url: string): Promise<any> {
     writeFileSync(join(spProj, 'src', 'pages', 'index.rose'), '<p>sp</p>\n');
     const spEx = await exportProject('rust', spProj, { apiBase: 'x', outRoot: join(scratch, 'sp') });
     const spLib = readFileSync(join(spEx.outDir, 'src', 'lib', 'sp.rs'), 'utf8');
-    assert(!spLib.includes('__unsupported'), 'R657: none of the four shapes is skipped');
-    assert(spLib.includes('rustz::js_splice(&mut (arr),') , 'R657: splice mutates the receiver through js_splice');
-    assert(spLib.includes('fn go(k: serde_json::Value, acc: serde_json::Value) -> serde_json::Value'), 'R657: the local recursive fn is a nested fn item');
-    assert(spLib.includes('rustz::merge_obj(serde_json::json!({ "size": 10 }), rustz::val(&(opts)))'), 'R657: the static keys lose to a trailing spread');
-    assert(spLib.includes('rustz::merge_obj_ref(&(opts),') && spLib.includes('"tag": "x"'), 'R657: a leading spread loses to the static keys');
-    assert(spLib.includes('rustz::fetch(url') && !spLib.includes('.await'), 'R657: the fetch trio is sync in the runtime (no .await is emitted)');
+    assert(!spLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(spLib.includes('rustz::js_splice(&mut (arr),') , 'splice mutates the receiver through js_splice');
+    assert(spLib.includes('fn go(k: serde_json::Value, acc: serde_json::Value) -> serde_json::Value'), 'the local recursive fn is a nested fn item');
+    assert(spLib.includes('rustz::merge_obj(serde_json::json!({ "size": 10 }), rustz::val(&(opts)))'), 'the static keys lose to a trailing spread');
+    assert(spLib.includes('rustz::merge_obj_ref(&(opts),') && spLib.includes('"tag": "x"'), 'a leading spread loses to the static keys');
+    assert(spLib.includes('rustz::fetch(url') && !spLib.includes('.await'), 'the fetch trio is sync in the runtime (no .await is emitted)');
     const rustz = readFileSync(join(spEx.outDir, 'src', 'lib', 'rustz.rs'), 'utf8');
-    assert(rustz.includes('pub fn js_splice') && rustz.includes('pub fn fetch'), 'R657: the std-only crate ships the ops and the web trio');
-    assert(!rustz.includes('crate::rustz::js_str'), 'R657: the runtime calls its own helpers by plain name');
+    assert(rustz.includes('pub fn js_splice') && rustz.includes('pub fn fetch'), 'the std-only crate ships the ops and the web trio');
+    assert(!rustz.includes('crate::rustz::js_str'), 'the runtime calls its own helpers by plain name');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R657: no cargo toolchain on PATH, so the seam shapes are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the seam shapes are not run here');
     } else {
       appendFileSync(join(spEx.outDir, 'src', 'lib', 'sp.rs'), `
 #[cfg(test)]
@@ -13098,11 +13098,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: spEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('splice_recursion_and_spread_answer ... ok'), `R657: the seam shapes RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('splice_recursion_and_spread_answer ... ok'), `the seam shapes RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R658: the kernel-stub migration's second batch (the wide-construct
+  // the kernel-stub migration's second batch (the wide-construct
   // probe's five seams). `Number.parseInt/parseFloat` statics and
   // `Array.from(xs, fn)` translate through the existing shims; a class
   // instance's member READ is the struct's own field or getter (a runtime
@@ -13144,16 +13144,16 @@ export function tryJson(s: string): any {
     writeFileSync(join(wProj, 'src', 'pages', 'index.rose'), '<p>w2</p>\n');
     const wEx = await exportProject('rust', wProj, { apiBase: 'x', outRoot: join(scratch, 'w2') });
     const wLib = readFileSync(join(wEx.outDir, 'src', 'lib', 'w2.rs'), 'utf8');
-    assert(!wLib.includes('__unsupported'), 'R658: none of the six shapes is skipped');
-    assert(wLib.includes('rustz::parse_int(&('), 'R658: Number.parseInt rides the runtime shim');
-    assert(wLib.includes('.value_get()'), 'R658: the getter read is the struct method, not a runtime lookup');
-    assert(wLib.includes('rustz::array_of(rustz::object_keys('), 'R658: Object.keys binds as a Value array');
-    assert(wLib.includes('index_of_value(&(o), &(k))'), 'R658: the dynamic key read stays the bracket spelling');
-    assert(wLib.includes('ok_or(serde_json::Value::Null)?'), 'R658: a parse failure inside try reaches the catch');
+    assert(!wLib.includes('__unsupported'), 'none of the six shapes is skipped');
+    assert(wLib.includes('rustz::parse_int(&('), 'Number.parseInt rides the runtime shim');
+    assert(wLib.includes('.value_get()'), 'the getter read is the struct method, not a runtime lookup');
+    assert(wLib.includes('rustz::array_of(rustz::object_keys('), 'Object.keys binds as a Value array');
+    assert(wLib.includes('index_of_value(&(o), &(k))'), 'the dynamic key read stays the bracket spelling');
+    assert(wLib.includes('ok_or(serde_json::Value::Null)?'), 'a parse failure inside try reaches the catch');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R658: no cargo toolchain on PATH, so the wide seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide seams are not run here');
     } else {
       appendFileSync(join(wEx.outDir, 'src', 'lib', 'w2.rs'), `
 #[cfg(test)]
@@ -13173,11 +13173,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: wEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide_seams_answer ... ok'), `R658: the wide seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide_seams_answer ... ok'), `the wide seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R659: the kernel-stub migration's third batch (the wide-construct
+  // the kernel-stub migration's third batch (the wide-construct
   // probe's shapes). `[x, y] = pair` destructures an assignment (TS spells
   // the left side an array LITERAL); `Counter.of(5)` dispatches a static
   // method as an associated fn under its PascalCase name; a member write
@@ -13232,17 +13232,17 @@ export function setOps(xs: number[]): number {
     writeFileSync(join(xProj, 'src', 'pages', 'index.rose'), '<p>w4</p>\n');
     const xEx = await exportProject('rust', xProj, { apiBase: 'x', outRoot: join(scratch, 'w4') });
     const xLib = readFileSync(join(xEx.outDir, 'src', 'lib', 'w4.rs'), 'utf8');
-    assert(!xLib.includes('__unsupported'), 'R659: none of the seven shapes is skipped');
-    assert(xLib.includes('__destr_a') && xLib.includes('index_of_value(&(__destr_a)'), 'R659: destructuring assignment binds slots from one RHS');
-    assert(xLib.includes('Counter::of('), 'R659: the static method dispatches as an associated fn');
-    assert(xLib.includes('rustz::set_field(&mut (c), "n"'), 'R659: a member write on an instance goes through set_field');
-    assert(xLib.includes('rustz::prop(&(__d_sub_'), 'R659: the nested pattern chains its prop reads');
-    assert(xLib.includes('use crate::lib::rustz::ValueExt2;'), 'R659: the header imports the ValueExt2 trait');
-    assert(!/iso_from_millis\(&\(\d+\)\)/.test(xLib), 'R659: a bare millis literal carries the f64 suffix');
+    assert(!xLib.includes('__unsupported'), 'none of the seven shapes is skipped');
+    assert(xLib.includes('__destr_a') && xLib.includes('index_of_value(&(__destr_a)'), 'destructuring assignment binds slots from one RHS');
+    assert(xLib.includes('Counter::of('), 'the static method dispatches as an associated fn');
+    assert(xLib.includes('rustz::set_field(&mut (c), "n"'), 'a member write on an instance goes through set_field');
+    assert(xLib.includes('rustz::prop(&(__d_sub_'), 'the nested pattern chains its prop reads');
+    assert(xLib.includes('use crate::lib::rustz::ValueExt2;'), 'the header imports the ValueExt2 trait');
+    assert(!/iso_from_millis\(&\(\d+\)\)/.test(xLib), 'a bare millis literal carries the f64 suffix');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R659: no cargo toolchain on PATH, so the wide3 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide3 seams are not run here');
     } else {
       appendFileSync(join(xEx.outDir, 'src', 'lib', 'w4.rs'), `
 #[cfg(test)]
@@ -13263,11 +13263,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: xEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide3_seams_answer ... ok'), `R659: the wide3 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide3_seams_answer ... ok'), `the wide3 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R660: the kernel-stub migration's fourth batch. JS bitwise ops read
+  // the kernel-stub migration's fourth batch. JS bitwise ops read
   // ToInt32 over the f64 domain; Promise.resolve/all are the sync world's
   // value and array; a constructor parameter property (`constructor(public
   // name)`) IS a field on the owning class, on a subclass that inherits
@@ -13322,17 +13322,17 @@ export function closureCell(): number {
     writeFileSync(join(yProj, 'src', 'pages', 'index.rose'), '<p>w5</p>\n');
     const yEx = await exportProject('rust', yProj, { apiBase: 'x', outRoot: join(scratch, 'w5') });
     const yLib = readFileSync(join(yEx.outDir, 'src', 'lib', 'w5.rs'), 'utf8');
-    assert(!yLib.includes('__unsupported'), 'R660: none of the seven shapes is skipped');
-    assert(yLib.includes('js_num(&(') && /as i32/.test(yLib), 'R660: the bitwise ops read ToInt32 over the domain');
-    assert(yLib.includes('pub struct Dog') && /pub name: serde_json::Value/.test(yLib), 'R660: the inherited param property rides the child struct');
-    assert(yLib.includes('this.__super_ctor_animal(name)'), 'R660: the child new runs the inherited constructor');
-    assert(/__super_ctor_animal[\s\S]*self\.name = name\.clone\(\)/.test(yLib), 'R660: the sugar write lands in the flattened ctor');
-    assert(yLib.includes('set_state(rustz::js_add(&(state())'), 'R660: the module cell writes through its setter');
-    assert(yLib.includes('__cell_rhs'), 'R660: a cell write lands its RHS in a temp before borrowing mut');
+    assert(!yLib.includes('__unsupported'), 'none of the seven shapes is skipped');
+    assert(yLib.includes('js_num(&(') && /as i32/.test(yLib), 'the bitwise ops read ToInt32 over the domain');
+    assert(yLib.includes('pub struct Dog') && /pub name: serde_json::Value/.test(yLib), 'the inherited param property rides the child struct');
+    assert(yLib.includes('this.__super_ctor_animal(name)'), 'the child new runs the inherited constructor');
+    assert(/__super_ctor_animal[\s\S]*self\.name = name\.clone\(\)/.test(yLib), 'the sugar write lands in the flattened ctor');
+    assert(yLib.includes('set_state(rustz::js_add(&(state())'), 'the module cell writes through its setter');
+    assert(yLib.includes('__cell_rhs'), 'a cell write lands its RHS in a temp before borrowing mut');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R660: no cargo toolchain on PATH, so the wide4 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide4 seams are not run here');
     } else {
       appendFileSync(join(yEx.outDir, 'src', 'lib', 'w5.rs'), `
 #[cfg(test)]
@@ -13350,11 +13350,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: yEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide4_seams_answer ... ok'), `R660: the wide4 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide4_seams_answer ... ok'), `the wide4 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R661: the kernel-stub migration's fifth batch (the wide-construct
+  // the kernel-stub migration's fifth batch (the wide-construct
   // probe's shapes). Numeric shim args enter the Value domain (a bare
   // literal is not IntoValue); `new Date('2024-01-15')` parses (date-only
   // text included) and the ISO shim's String lands wrapped; a charAt chain
@@ -13414,15 +13414,15 @@ export function dateParse(): string {
     writeFileSync(join(zProj, 'src', 'pages', 'index.rose'), '<p>w6</p>\n');
     const zEx = await exportProject('rust', zProj, { apiBase: 'x', outRoot: join(scratch, 'w6') });
     const zLib = readFileSync(join(zEx.outDir, 'src', 'lib', 'w6.rs'), 'utf8');
-    assert(!zLib.includes('__unsupported'), 'R661: none of the eight shapes is skipped');
-    assert(zLib.includes('rustz::uniq_v('), 'R661: a seeded Set dedupes through uniq_v');
-    assert(zLib.includes('rustz::map_has('), 'R661: has() reads keys through map_has');
-    assert(zLib.includes('.celsius_set('), 'R661: the declared setter is the write spelling');
-    assert(zLib.includes('rustz::epoch_millis(&("2024-01-15"))'), 'R661: a string date parses through epoch_millis');
+    assert(!zLib.includes('__unsupported'), 'none of the eight shapes is skipped');
+    assert(zLib.includes('rustz::uniq_v('), 'a seeded Set dedupes through uniq_v');
+    assert(zLib.includes('rustz::map_has('), 'has() reads keys through map_has');
+    assert(zLib.includes('.celsius_set('), 'the declared setter is the write spelling');
+    assert(zLib.includes('rustz::epoch_millis(&("2024-01-15"))'), 'a string date parses through epoch_millis');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R661: no cargo toolchain on PATH, so the wide5 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide5 seams are not run here');
     } else {
       appendFileSync(join(zEx.outDir, 'src', 'lib', 'w6.rs'), `
 #[cfg(test)]
@@ -13446,11 +13446,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: zEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide5_seams_answer ... ok'), `R661: the wide5 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide5_seams_answer ... ok'), `the wide5 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R662: the kernel-stub migration's sixth batch. `xs.splice(1, 1, a, b)`
+  // the kernel-stub migration's sixth batch. `xs.splice(1, 1, a, b)`
   // takes the _insert form (removes the range, places the values in JS
   // order) - the old refusal left the initializer dropped and a Null
   // binding in its place; `xs.push(v)` AS AN EXPRESSION is the new length;
@@ -13481,15 +13481,15 @@ export function splitLimit(s: string): string[] {
     writeFileSync(join(s6Proj, 'src', 'pages', 'index.rose'), '<p>w7</p>\n');
     const s6Ex = await exportProject('rust', s6Proj, { apiBase: 'x', outRoot: join(scratch, 'w7') });
     const s6Lib = readFileSync(join(s6Ex.outDir, 'src', 'lib', 'w7.rs'), 'utf8');
-    assert(!s6Lib.includes('__unsupported'), 'R662: none of the five shapes is skipped');
-    assert(s6Lib.includes('rustz::js_splice_insert(&mut (copy)') && s6Lib.includes('&vec!['), 'R662: insert-items take the _insert form');
-    assert(!/removed = serde_json::Value::Null/.test(s6Lib), 'R662: the removed binding is the real splice result, never a dropped Null');
-    assert(s6Lib.includes('rustz::push_v(&mut (xs)'), 'R662: push as an expression answers the new length');
-    assert(s6Lib.includes('(*a).clone()') || s6Lib.includes('(*__'), 'R662: the comparator deref-clones its &Value params');
+    assert(!s6Lib.includes('__unsupported'), 'none of the five shapes is skipped');
+    assert(s6Lib.includes('rustz::js_splice_insert(&mut (copy)') && s6Lib.includes('&vec!['), 'insert-items take the _insert form');
+    assert(!/removed = serde_json::Value::Null/.test(s6Lib), 'the removed binding is the real splice result, never a dropped Null');
+    assert(s6Lib.includes('rustz::push_v(&mut (xs)'), 'push as an expression answers the new length');
+    assert(s6Lib.includes('(*a).clone()') || s6Lib.includes('(*__'), 'the comparator deref-clones its &Value params');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R662: no cargo toolchain on PATH, so the wide6 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide6 seams are not run here');
     } else {
       appendFileSync(join(s6Ex.outDir, 'src', 'lib', 'w7.rs'), `
 #[cfg(test)]
@@ -13508,11 +13508,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s6Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide6_seams_answer ... ok'), `R662: the wide6 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide6_seams_answer ... ok'), `the wide6 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R663: the kernel-stub migration's seventh batch. Array.of spells a
+  // the kernel-stub migration's seventh batch. Array.of spells a
   // JSON array; `void expr` runs the operand and answers Null; Array(n)
   // lands as a Value in both spellings; fill MUTATES the receiver in place
   // (a cloned copy made `a.fill(7)` as a statement a no-op) and honors its
@@ -13551,13 +13551,13 @@ export function getterRead(): any {
     const s7Ex = await exportProject('rust', s7Proj, { apiBase: 'x', outRoot: join(scratch, 'w8'), warnings: [], force: true });
     const warns7 = s7Ex.warnings ?? [];
     const s7Lib = readFileSync(join(s7Ex.outDir, 'src', 'lib', 'w8.rs'), 'utf8');
-    assert(!s7Lib.includes('__unsupported'), 'R663: none of the five shapes is skipped');
-    assert(s7Lib.includes('.ok_or(serde_json::Value::Null)?;') || s7Lib.includes('.ok_or(serde_json::Value::Null)?)'), 'R663: a bare parse statement propagates the Err');
-    assert(warns7.some((w) => w.includes('reads as Null')), `R663: a refused initializer names its collapsed binding (${JSON.stringify(warns7.slice(0, 3))})`);
+    assert(!s7Lib.includes('__unsupported'), 'none of the five shapes is skipped');
+    assert(s7Lib.includes('.ok_or(serde_json::Value::Null)?;') || s7Lib.includes('.ok_or(serde_json::Value::Null)?)'), 'a bare parse statement propagates the Err');
+    assert(warns7.some((w) => w.includes('reads as Null')), `a refused initializer names its collapsed binding (${JSON.stringify(warns7.slice(0, 3))})`);
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R663: no cargo toolchain on PATH, so the wide7 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide7 seams are not run here');
     } else {
       appendFileSync(join(s7Ex.outDir, 'src', 'lib', 'w8.rs'), `
 #[cfg(test)]
@@ -13573,11 +13573,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s7Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide7_seams_answer ... ok'), `R663: the wide7 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide7_seams_answer ... ok'), `the wide7 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R664: the kernel-stub migration's eighth batch. `~x` is the i32
+  // the kernel-stub migration's eighth batch. `~x` is the i32
   // bitwise-not spelled as a number (json!'s `!` is boolean-not); unary
   // `+` is the Number coercion; `catch ({ message })` binds the payload's
   // fields; a class FIELD ARROW is a method in disguise (a closure read
@@ -13631,13 +13631,13 @@ export function splitChars(s: string): number {
     writeFileSync(join(s8Proj, 'src', 'pages', 'index.rose'), '<p>w9</p>\n');
     const s8Ex = await exportProject('rust', s8Proj, { apiBase: 'x', outRoot: join(scratch, 'w9'), warnings: [], force: true });
     const s8Lib = readFileSync(join(s8Ex.outDir, 'src', 'lib', 'w9.rs'), 'utf8');
-    assert(!s8Lib.includes('__unsupported'), 'R664: none of the ten shapes is skipped');
-    assert(s8Lib.includes('pub fn double(&self)'), 'R664: the field arrow rides the impl as a method');
-    assert(s8Lib.includes('rustz::ends_with_at('), 'R664: endsWith with a position checks the prefix');
+    assert(!s8Lib.includes('__unsupported'), 'none of the ten shapes is skipped');
+    assert(s8Lib.includes('pub fn double(&self)'), 'the field arrow rides the impl as a method');
+    assert(s8Lib.includes('rustz::ends_with_at('), 'endsWith with a position checks the prefix');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R664: no cargo toolchain on PATH, so the wide8 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide8 seams are not run here');
     } else {
       appendFileSync(join(s8Ex.outDir, 'src', 'lib', 'w9.rs'), `
 #[cfg(test)]
@@ -13658,11 +13658,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s8Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide8_seams_answer ... ok'), `R664: the wide8 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide8_seams_answer ... ok'), `the wide8 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R665: the kernel-stub migration's ninth batch. A one-param forEach
+  // the kernel-stub migration's ninth batch. A one-param forEach
   // binds only the value (a Set's callback never names the key); a MAP
   // receiver's forEach speaks (value, key) pairs through entries_pairs and
   // a seeded `new Map(entries)` builds from them (the dropped seed left an
@@ -13716,14 +13716,14 @@ export function regexTest(s: string): boolean {
     writeFileSync(join(s9Proj, 'src', 'pages', 'index.rose'), '<p>w10</p>\n');
     const s9Ex = await exportProject('rust', s9Proj, { apiBase: 'x', outRoot: join(scratch, 'w10'), warnings: [], force: true });
     const s9Lib = readFileSync(join(s9Ex.outDir, 'src', 'lib', 'w10.rs'), 'utf8');
-    assert(!s9Lib.includes('__unsupported'), 'R665: none of the eight shapes is skipped');
-    assert(s9Lib.includes('rustz::from_entries(&('), 'R665: a seeded Map builds from its entries');
-    assert(s9Lib.includes('entries_pairs((m).clone())'), 'R665: a map forEach speaks (value, key) pairs');
-    assert(s9Lib.includes('rustz::regex_test(&(s)'), 'R665: the regex handle rides the (s, handle) signature');
+    assert(!s9Lib.includes('__unsupported'), 'none of the eight shapes is skipped');
+    assert(s9Lib.includes('rustz::from_entries(&('), 'a seeded Map builds from its entries');
+    assert(s9Lib.includes('entries_pairs((m).clone())'), 'a map forEach speaks (value, key) pairs');
+    assert(s9Lib.includes('rustz::regex_test(&(s)'), 'the regex handle rides the (s, handle) signature');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R665: no cargo toolchain on PATH, so the wide9 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide9 seams are not run here');
     } else {
       appendFileSync(join(s9Ex.outDir, 'src', 'lib', 'w10.rs'), `
 #[cfg(test)]
@@ -13744,11 +13744,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s9Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide9_seams_answer ... ok'), `R665: the wide9 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide9_seams_answer ... ok'), `the wide9 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R666: the kernel-stub migration's tenth batch. `xs.shift()` AS AN
+  // the kernel-stub migration's tenth batch. `xs.shift()` AS AN
   // EXPRESSION is the removed element (only the statement branch existed,
   // so every `?? fallback` chain stubbed); Number's static constants read
   // as plain members; a find closure deref-clones its &Value item (the
@@ -13786,14 +13786,14 @@ export function flatAll(xs: any[]): any[] {
     writeFileSync(join(s10Proj, 'src', 'pages', 'index.rose'), '<p>w11</p>\n');
     const s10Ex = await exportProject('rust', s10Proj, { apiBase: 'x', outRoot: join(scratch, 'w11'), warnings: [], force: true });
     const s10Lib = readFileSync(join(s10Ex.outDir, 'src', 'lib', 'w11.rs'), 'utf8');
-    assert(!s10Lib.includes('__unsupported'), 'R666: none of the six shapes is skipped');
-    assert(s10Lib.includes('pub fn versio_n()'), 'R666: the static field is an associated fn');
-    assert(s10Lib.includes('Config::versio_n()'), 'R666: the class-name read routes through it');
-    assert(s10Lib.includes('1073741824.0'), 'R666: flat(Infinity) carries a practical bound');
+    assert(!s10Lib.includes('__unsupported'), 'none of the six shapes is skipped');
+    assert(s10Lib.includes('pub fn versio_n()'), 'the static field is an associated fn');
+    assert(s10Lib.includes('Config::versio_n()'), 'the class-name read routes through it');
+    assert(s10Lib.includes('1073741824.0'), 'flat(Infinity) carries a practical bound');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R666: no cargo toolchain on PATH, so the wide10 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide10 seams are not run here');
     } else {
       appendFileSync(join(s10Ex.outDir, 'src', 'lib', 'w11.rs'), `
 #[cfg(test)]
@@ -13811,11 +13811,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s10Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide10_seams_answer ... ok'), `R666: the wide10 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide10_seams_answer ... ok'), `the wide10 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R667: the kernel-stub migration's eleventh batch. startsWith carries a
+  // the kernel-stub migration's eleventh batch. startsWith carries a
   // position (the runtime's _at form) and its bare bool lifts into the
   // Value domain; indexOf on a STRING is a substring search and on an
   // ARRAY an element-equality scan (one runtime helper, both shapes - the
@@ -13838,12 +13838,12 @@ export function indexOfNum(xs: number[]): number {
     writeFileSync(join(s11Proj, 'src', 'pages', 'index.rose'), '<p>w12</p>\n');
     const s11Ex = await exportProject('rust', s11Proj, { apiBase: 'x', outRoot: join(scratch, 'w12'), warnings: [], force: true });
     const s11Lib = readFileSync(join(s11Ex.outDir, 'src', 'lib', 'w12.rs'), 'utf8');
-    assert(!s11Lib.includes('__unsupported'), 'R667: none of the three shapes is skipped');
-    assert(s11Lib.includes('rustz::starts_with_at('), 'R667: startsWith with a position checks the suffix text');
+    assert(!s11Lib.includes('__unsupported'), 'none of the three shapes is skipped');
+    assert(s11Lib.includes('rustz::starts_with_at('), 'startsWith with a position checks the suffix text');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R667: no cargo toolchain on PATH, so the wide11 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide11 seams are not run here');
     } else {
       appendFileSync(join(s11Ex.outDir, 'src', 'lib', 'w12.rs'), `
 #[cfg(test)]
@@ -13860,11 +13860,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: s11Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide11_seams_answer ... ok'), `R667: the wide11 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide11_seams_answer ... ok'), `the wide11 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R668: biometric authentication through the platform authenticator
+  // biometric authentication through the platform authenticator
   // The WebView ships the WebAuthn flow: a
   // conditional-mediation (or platform-authenticator) probe first, then
   // credentials.get with userVerification: 'required' - what pops the
@@ -13878,7 +13878,7 @@ mod rosezm_verify {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.bio', name: 'Bio', version: '1.0.0', slug: 'bio-app' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'bio-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("capability === 'biometric-auth'") && shell.includes("userVerification: 'required'"), 'R668: the biometric branch rides the WebAuthn flow');
+    assert(shell.includes("capability === 'biometric-auth'") && shell.includes("userVerification: 'required'"), 'the biometric branch rides the WebAuthn flow');
     const body = /if \(capability === 'biometric-auth'\) \{([\s\S]*?)\n    \}/.exec(shell)?.[1] ?? '';
     const run = (api: { pk?: unknown; probe: () => Promise<boolean | null> }) => {
       const sandbox: Record<string, unknown> = {
@@ -13910,19 +13910,19 @@ mod rosezm_verify {
       return pk;
     };
     const granted = await run({ pk: probeSandbox(true), probe: async () => true });
-    assert((granted as { verified: boolean }).verified === true, `R668: an available authenticator that verifies answers the assertion (${JSON.stringify(granted)})`);
+    assert((granted as { verified: boolean }).verified === true, `an available authenticator that verifies answers the assertion (${JSON.stringify(granted)})`);
     const probed = await run({ pk: probeSandbox(false), probe: async () => false });
-    assert(probed === null, 'R668: a probe that answers false is null');
+    assert(probed === null, 'a probe that answers false is null');
     const noApi = await run({ pk: undefined, probe: async () => null });
-    assert(noApi === null, 'R668: an engine without WebAuthn is null');
+    assert(noApi === null, 'an engine without WebAuthn is null');
     // The WebView shells stop reporting biometric-auth as a gap.
     const capWarnings: string[] = [];
     await exportProject('capacitor', proj, { outRoot: join(scratch, 'bio-cap'), warnings: capWarnings, force: true });
-    assert(!capWarnings.some((w) => w.includes("useNative('biometric-auth')")), `R668: the shells no longer report biometric-auth as a gap (${JSON.stringify(capWarnings)})`);
-    assert(readFileSync(join(scratch, 'bio-cap', 'capacitor', 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'biometric-auth'"), 'R668: the WebView shells carry the same branch');
+    assert(!capWarnings.some((w) => w.includes("useNative('biometric-auth')")), `the shells no longer report biometric-auth as a gap (${JSON.stringify(capWarnings)})`);
+    assert(readFileSync(join(scratch, 'bio-cap', 'capacitor', 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'biometric-auth'"), 'the WebView shells carry the same branch');
   }
 
-  // R669: the screen-brightness dial (the
+  // the screen-brightness dial (the
   // brightness slot keep-awake already owned half of). The WebView cannot
   // reach the SYSTEM backlight, so the branch says so: a fixed overlay's
   // opacity IS the level, the answer carries system: false, a level
@@ -13935,7 +13935,7 @@ mod rosezm_verify {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.bright', name: 'Bright', version: '1.0.0', slug: 'bright-app' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'bright-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("capability === 'screen-brightness'") && shell.includes("system: false"), 'R669: the branch dims the page and names the honest boundary');
+    assert(shell.includes("capability === 'screen-brightness'") && shell.includes("system: false"), 'the branch dims the page and names the honest boundary');
     const body = /if \(capability === 'screen-brightness'\) \{([\s\S]*?)\n    \}/.exec(shell)?.[1] ?? '';
     const mkRun = () => {
       const created: Array<Record<string, unknown>> = [];
@@ -13956,15 +13956,15 @@ mod rosezm_verify {
     };
     const { created, run } = mkRun();
     const first = await run(0.4) as { level: number; system: boolean };
-    assert(first.level === 0.4 && first.system === false, 'R669: a 0.4 level dims to opacity 0.6 and answers system: false');
-    assert((created[0]['style'] as Record<string, string>)['opacity'] === '0.6', 'R669: the overlay opacity is the inverse of the level');
+    assert(first.level === 0.4 && first.system === false, 'a 0.4 level dims to opacity 0.6 and answers system: false');
+    assert((created[0]['style'] as Record<string, string>)['opacity'] === '0.6', 'the overlay opacity is the inverse of the level');
     await run(0.9);
-    assert(created.length === 1, 'R669: the dial persists - one overlay, re-dimmed');
+    assert(created.length === 1, 'the dial persists - one overlay, re-dimmed');
     const refused = await run(1.5);
-    assert(refused === null, 'R669: a level outside 0..1 is null');
+    assert(refused === null, 'a level outside 0..1 is null');
   }
 
-  // R670: the app-info contract on the NATIVE targets:
+  // the app-info contract on the NATIVE targets:
   // The export
   // knows the identity, so each native kit answers it from what it baked
   // (the manifest / Info.plist / pubspec / assembly) - the page's about
@@ -13987,21 +13987,21 @@ mod rosezm_verify {
     for (const t of targets) {
       const r = await exportProject(t.target as never, proj, { outRoot: join(scratch, `appinfo-${t.target}`), warnings: [], force: true });
       const kit = readFileSync(join(r.outDir, t.file), 'utf8');
-      assert(kit.includes(t.needle), `R670: the ${t.target} kit answers app-info`);
+      assert(kit.includes(t.needle), `the ${t.target} kit answers app-info`);
       if (t.target === 'android') {
         // The Android kit reads the INSTALLED package at runtime (the
         // package name is the id) - the export cannot know it was
         // installed under another id.
-        assert(kit.includes('getPackageInfo') && kit.includes('packageName'), 'R670: the android kit reads the installed package');
+        assert(kit.includes('getPackageInfo') && kit.includes('packageName'), 'the android kit reads the installed package');
       } else if (t.target === 'xcode') {
         // The same for iOS: Bundle.main carries the installed identity.
-        assert(kit.includes('Bundle.main') && kit.includes('CFBundleShortVersionString'), 'R670: the xcode kit reads the installed bundle');
+        assert(kit.includes('Bundle.main') && kit.includes('CFBundleShortVersionString'), 'the xcode kit reads the installed bundle');
       } else {
-        assert(kit.includes('com.example.nativeinfo') && kit.includes('2.3.4'), `R670: the ${t.target} kit carries the baked identity (${kit.includes('com.example.nativeinfo') ? 'id' : 'no id'})`);
+        assert(kit.includes('com.example.nativeinfo') && kit.includes('2.3.4'), `the ${t.target} kit carries the baked identity (${kit.includes('com.example.nativeinfo') ? 'id' : 'no id'})`);
       }
     }
 
-    // R671: the permission contract on the native targets:
+    // the permission contract on the native targets:
     // the runtime permission query and request
     // functions were not implemented for the native 20 targets. Every
     // native kit now answers both: android reads its own
@@ -14027,20 +14027,20 @@ mod rosezm_verify {
     for (const t of permTargets) {
       const r = await exportProject(t.target as never, permProj, { outRoot: join(scratch, `perm-${t.target}`), warnings: [], force: true });
       const kit = readFileSync(join(r.outDir, t.file), 'utf8');
-      assert(kit.includes(t.needle), `R671: the ${t.target} kit answers check-permission`);
+      assert(kit.includes(t.needle), `the ${t.target} kit answers check-permission`);
       const reqNeedle = t.needle.replace('check-permission', 'request-permission');
-      assert(kit.includes(reqNeedle), `R671: the ${t.target} kit answers request-permission`);
-      assert(kit.includes('state') && kit.includes('unknown') || kit.includes('granted'), `R671: the ${t.target} kit answers with a permission state`);
+      assert(kit.includes(reqNeedle), `the ${t.target} kit answers request-permission`);
+      assert(kit.includes('state') && kit.includes('unknown') || kit.includes('granted'), `the ${t.target} kit answers with a permission state`);
     }
     // The android kit reads the REAL runtime permission; the desktop ones
     // admit they have none.
     const androidKit = readFileSync(join(scratch, 'perm-android', 'android', 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
-    assert(androidKit.includes('checkSelfPermission') && androidKit.includes('requestPermissions'), 'R671: the android kit reads and asks for the real permission');
+    assert(androidKit.includes('checkSelfPermission') && androidKit.includes('requestPermissions'), 'the android kit reads and asks for the real permission');
     const pythonKit = readFileSync(join(scratch, 'perm-python', 'python', 'rosezm.py'), 'utf8');
-    assert(pythonKit.includes('unknown'), 'R671: the desktop kit admits it has no runtime permission model');
+    assert(pythonKit.includes('unknown'), 'the desktop kit admits it has no runtime permission model');
   }
 
-  // R672: the encrypted token store
+  // the encrypted token store
   // The WebView half: the token is ENCRYPTED (PBKDF2 ->
   // AES-GCM) with a passphrase the app supplies and the CIPHERTEXT lands
   // in IndexedDB - the plaintext never touches localStorage. A wrong
@@ -14057,11 +14057,11 @@ mod rosezm_verify {
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `secure-${target}`), warnings: [], force: true });
       const bridge = readFileSync(join(r.outDir, 'www', 'rosezm-secure-store.js'), 'utf8');
-      assert(bridge.includes('PBKDF2') && bridge.includes('AES-GCM'), `R672: the ${target} bridge encrypts the token (PBKDF2 -> AES-GCM)`);
-      assert(bridge.includes('indexedDB') && !bridge.includes('localStorage'), `R672: the ${target} bridge keeps the ciphertext in IndexedDB, never localStorage`);
-      assert(bridge.includes('__rosezmSecureStore'), `R672: the ${target} bridge exposes the store`);
-      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'secure-store'"), `R672: the ${target} shell forwards the capability to the bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-secure-store.js'), `R672: the ${target} document carries the bridge tag`);
+      assert(bridge.includes('PBKDF2') && bridge.includes('AES-GCM'), `the ${target} bridge encrypts the token (PBKDF2 -> AES-GCM)`);
+      assert(bridge.includes('indexedDB') && !bridge.includes('localStorage'), `the ${target} bridge keeps the ciphertext in IndexedDB, never localStorage`);
+      assert(bridge.includes('__rosezmSecureStore'), `the ${target} bridge exposes the store`);
+      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'secure-store'"), `the ${target} shell forwards the capability to the bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-secure-store.js'), `the ${target} document carries the bridge tag`);
     }
     // The bridge does NOT ship when no page asks for the capability.
     const plain = join(scratch, 'secure-plain');
@@ -14070,10 +14070,10 @@ mod rosezm_verify {
     mkdirSync(join(plain, 'dist'), { recursive: true });
     writeFileSync(join(plain, 'dist/index.html'), '<!doctype html><html><head><title>p</title></head><body>plain</body></html>');
     const plainEx = await exportProject('capacitor', plain, { outRoot: join(scratch, 'secure-none'), warnings: [], force: true });
-    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-secure-store.js')), 'R672: a project without the capability ships no bridge');
+    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-secure-store.js')), 'a project without the capability ships no bridge');
   }
 
-  // R673: the camera capability's SOURCE
+  // the camera capability's SOURCE
   // The WebView shells answer BOTH: 'camera' takes
   // one frame from the live stream, 'gallery' opens the system photo
   // library through a one-shot file input and reads the picked image as a
@@ -14088,23 +14088,23 @@ mod rosezm_verify {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.cam', name: 'Cam', version: '1.0.0', slug: 'cam-app' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'cam-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("source === 'gallery'") && shell.includes('pickFromGallery'), 'R673: the shell camera branch opens the photo library for the gallery source');
-    assert(shell.includes('readAsDataURL'), 'R673: the picked image is read as a data: URI');
+    assert(shell.includes("source === 'gallery'") && shell.includes('pickFromGallery'), 'the shell camera branch opens the photo library for the gallery source');
+    assert(shell.includes('readAsDataURL'), 'the picked image is read as a data: URI');
     const body = /async function pickFromGallery\(options\) \{([\s\S]*?)\n    \}/.exec(shell)?.[1] ?? '';
-    assert(body.includes('input.type = \'file\'') && body.includes("input.setAttribute('accept', 'image/*')"), 'R673: the gallery picker is a one-shot image file input');
+    assert(body.includes('input.type = \'file\'') && body.includes("input.setAttribute('accept', 'image/*')"), 'the gallery picker is a one-shot image file input');
     // The android kit: the launcher is registered and the source decides.
     const androidEx = await exportProject('android', proj, { outRoot: join(scratch, 'cam-android'), warnings: [], force: true });
     const activity = readFileSync(join(androidEx.outDir, 'app/src/main/java/dev/rosezm/app/MainActivity.kt'), 'utf8');
-    assert(activity.includes('rosePickImage') && activity.includes('ACTION_PICK_IMAGES') && activity.includes('ACTION_IMAGE_CAPTURE'), 'R673: the android activity registers both pickers');
+    assert(activity.includes('rosePickImage') && activity.includes('ACTION_PICK_IMAGES') && activity.includes('ACTION_IMAGE_CAPTURE'), 'the android activity registers both pickers');
     const kit = readFileSync(join(androidEx.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
-    assert(kit.includes('rosePickImage(source)') && kit.includes('data:'), 'R673: the android kit asks the activity and answers the data: URI');
+    assert(kit.includes('rosePickImage(source)') && kit.includes('data:'), 'the android kit asks the activity and answers the data: URI');
     // The arkts kit: the source picks the camera or the library.
     const arktsEx = await exportProject('arkts', proj, { outRoot: join(scratch, 'cam-arkts'), warnings: [], force: true });
     const arktsKit = readFileSync(join(arktsEx.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8');
-    assert(arktsKit.includes('cameraPicker') && arktsKit.includes('PhotoViewPicker'), 'R673: the arkts kit picks the camera or the library by source');
+    assert(arktsKit.includes('cameraPicker') && arktsKit.includes('PhotoViewPicker'), 'the arkts kit picks the camera or the library by source');
   }
 
-  // R674: the push skeleton:
+  // the push skeleton:
   // The token is a CREDENTIAL
   // the app owns - the framework ships the flow around it: the Web Push
   // subscribe (the endpoint IS the token the app reports to its own
@@ -14122,21 +14122,21 @@ mod rosezm_verify {
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `push-${target}`), warnings: [], force: true });
       const bridge = readFileSync(join(r.outDir, 'www', 'rosezm-push.js'), 'utf8');
-      assert(bridge.includes('pushManager.subscribe') && bridge.includes('userVisibleOnly'), `R674: the ${target} bridge asks the PushManager for a subscription`);
-      assert(bridge.includes('rosezm:push'), `R674: the ${target} bridge re-raises the payload`);
+      assert(bridge.includes('pushManager.subscribe') && bridge.includes('userVisibleOnly'), `the ${target} bridge asks the PushManager for a subscription`);
+      assert(bridge.includes('rosezm:push'), `the ${target} bridge re-raises the payload`);
       const worker = readFileSync(join(r.outDir, 'www', 'rosezm-sw-push.js'), 'utf8');
-      assert(worker.includes("addEventListener('push'") && worker.includes('rosezm-push'), `R674: the ${target} service worker receives the push and forwards it`);
-      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'push-subscribe'"), `R674: the ${target} shell forwards the capability`);
+      assert(worker.includes("addEventListener('push'") && worker.includes('rosezm-push'), `the ${target} service worker receives the push and forwards it`);
+      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'push-subscribe'"), `the ${target} shell forwards the capability`);
     }
     // No PushManager, no bridge answer - null, never a crash.
     const plain = join(scratch, 'push-plain');
     mkdirSync(join(plain, 'src/pages'), { recursive: true });
     writeFileSync(join(plain, 'src/pages/index.rose'), '<h1>plain</h1>\n');
     const plainEx = await exportProject('capacitor', plain, { outRoot: join(scratch, 'push-none'), warnings: [], force: true });
-    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-push.js')), 'R674: a project without the capability ships no push bridge');
+    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-push.js')), 'a project without the capability ships no push bridge');
   }
 
-  // R675: the QR-specific scan:
+  // the QR-specific scan:
   // The general scan-code reads every
   // barcode; qr-scan pins the detector to the QR format so a login QR
   // never decodes a stray UPC. The WebView shells run the camera loop
@@ -14150,19 +14150,19 @@ mod rosezm_verify {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.qr', name: 'Qr', version: '1.0.0', slug: 'qr-app' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'qr-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("capability === 'qr-scan'") && shell.includes("formats: ['qr_code']"), 'R675: the shell detector is pinned to the QR format');
-    assert(shell.includes('stream.getTracks()'), 'R675: the camera stream is released after the scan');
+    assert(shell.includes("capability === 'qr-scan'") && shell.includes("formats: ['qr_code']"), 'the shell detector is pinned to the QR format');
+    assert(shell.includes('stream.getTracks()'), 'the camera stream is released after the scan');
     const arktsEx = await exportProject('arkts', proj, { outRoot: join(scratch, 'qr-arkts'), warnings: [], force: true });
     const arktsKit = readFileSync(join(arktsEx.outDir, 'entry/src/main/ets/kit/RoseKit.ets'), 'utf8');
-    assert(arktsKit.includes("capability === 'qr-scan'") && arktsKit.includes('QR_CODE'), 'R675: the arkts scanner is narrowed to QR_CODE');
+    assert(arktsKit.includes("capability === 'qr-scan'") && arktsKit.includes('QR_CODE'), 'the arkts scanner is narrowed to QR_CODE');
     const androidEx = await exportProject('android', proj, { outRoot: join(scratch, 'qr-android'), warnings: [], force: true });
     const activity = readFileSync(join(androidEx.outDir, 'app/src/main/java/dev/rosezm/app/MainActivity.kt'), 'utf8');
-    assert(activity.includes('roseScanQr') && activity.includes('QR_CODE_MODE'), 'R675: the android activity raises the QR-only scan intent');
+    assert(activity.includes('roseScanQr') && activity.includes('QR_CODE_MODE'), 'the android activity raises the QR-only scan intent');
     const kit = readFileSync(join(androidEx.outDir, 'app/src/main/java/dev/rosezm/app/kit/RoseKit.kt'), 'utf8');
-    assert(kit.includes('roseScanQr') && kit.includes('qr-scan'), 'R675: the android kit asks the activity for the QR scan');
+    assert(kit.includes('roseScanQr') && kit.includes('qr-scan'), 'the android kit asks the activity for the QR scan');
   }
 
-  // R676: the signed hot update:
+  // the signed hot update:
   // The
   // APK's assets are READ-ONLY, so the honest answer is a signed OVERLAY:
   // download -> verify the signature over the exact bytes -> version gate
@@ -14177,21 +14177,21 @@ mod rosezm_verify {
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `hot-${target}`), warnings: [], force: true });
       const bridge = readFileSync(join(r.outDir, 'www', 'rosezm-hot-update.js'), 'utf8');
-      assert(bridge.includes('crypto.subtle.verify') && bridge.includes('signature mismatch'), `R676: the ${target} bridge verifies the signature before any write`);
-      assert(bridge.includes('rosezm-www-stage') && bridge.includes('newer('), `R676: the ${target} bridge stages the swap and gates the version`);
-      assert(bridge.includes('rosezm:hot-update-ready'), `R676: the ${target} bridge announces its readiness`);
+      assert(bridge.includes('crypto.subtle.verify') && bridge.includes('signature mismatch'), `the ${target} bridge verifies the signature before any write`);
+      assert(bridge.includes('rosezm-www-stage') && bridge.includes('newer('), `the ${target} bridge stages the swap and gates the version`);
+      assert(bridge.includes('rosezm:hot-update-ready'), `the ${target} bridge announces its readiness`);
       const doc = readFileSync(join(r.outDir, 'www', 'ROSEZM-HOT-UPDATE.md'), 'utf8');
-      assert(doc.includes('openssl dgst -sha256 -sign') && doc.includes('documents'), `R676: the ${target} export ships the signing recipe`);
-      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'hot-update'"), `R676: the ${target} shell forwards the capability`);
+      assert(doc.includes('openssl dgst -sha256 -sign') && doc.includes('documents'), `the ${target} export ships the signing recipe`);
+      assert(readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'hot-update'"), `the ${target} shell forwards the capability`);
     }
     const plain = join(scratch, 'hot-plain');
     mkdirSync(join(plain, 'src/pages'), { recursive: true });
     writeFileSync(join(plain, 'src/pages/index.rose'), '<h1>plain</h1>\n');
     const plainEx = await exportProject('capacitor', plain, { outRoot: join(scratch, 'hot-none'), warnings: [], force: true });
-    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-hot-update.js')), 'R676: a project without the capability ships no hot-update bridge');
+    assert(!existsSync(join(plainEx.outDir, 'www', 'rosezm-hot-update.js')), 'a project without the capability ships no hot-update bridge');
   }
 
-  // R677: the kernel-stub migration's twelfth batch. A local GENERATOR
+  // the kernel-stub migration's twelfth batch. A local GENERATOR
   // (`function* counter()`) rides the eager-Vec domain through
   // transpileFunction (its yield handling and infinite-loop refusal live
   // there); a class declared INSIDE a function emits the same struct +
@@ -14233,14 +14233,14 @@ export function agenUse(): Promise<number[]> {
     writeFileSync(join(gProj, 'src', 'pages', 'index.rose'), '<p>w13</p>\n');
     const gEx = await exportProject('rust', gProj, { apiBase: 'x', outRoot: join(scratch, 'w13'), warnings: [], force: true });
     const gLib = readFileSync(join(gEx.outDir, 'src', 'lib', 'w13.rs'), 'utf8');
-    assert(gLib.includes('__gen_counter') && gLib.includes('__yields'), 'R677: the local generator rides the eager-Vec domain');
-    assert(!gLib.includes('__unsupported": "generatorUse') && !gLib.includes('__unsupported": "classInFn') && !gLib.includes('__unsupported": "keysAssign'), 'R677: the three translatable shapes are not stubs');
-    assert(gLib.includes('struct Box') && gLib.includes('impl Box'), 'R677: the in-function class is a real struct + impl');
-    assert(gLib.includes('for k in (ks).js_iter()'), 'R677: the expression-body forEach is the loop spelling');
+    assert(gLib.includes('__gen_counter') && gLib.includes('__yields'), 'the local generator rides the eager-Vec domain');
+    assert(!gLib.includes('__unsupported": "generatorUse') && !gLib.includes('__unsupported": "classInFn') && !gLib.includes('__unsupported": "keysAssign'), 'the three translatable shapes are not stubs');
+    assert(gLib.includes('struct Box') && gLib.includes('impl Box'), 'the in-function class is a real struct + impl');
+    assert(gLib.includes('for k in (ks).js_iter()'), 'the expression-body forEach is the loop spelling');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R677: no cargo toolchain on PATH, so the wide12 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide12 seams are not run here');
     } else {
       appendFileSync(join(gEx.outDir, 'src', 'lib', 'w13.rs'), `
 #[cfg(test)]
@@ -14257,11 +14257,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: gEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide12_seams_answer ... ok'), `R677: the wide12 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide12_seams_answer ... ok'), `the wide12 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R678: the desktop keep-awake switch (python/dotnet/
+  // the desktop keep-awake switch (python/dotnet/
   // The four desktop kits now answer it with their own OS idle-suppression
   // API: python uses ctypes/caffeinate/xset, .NET a PInvoke plus the same
   // tools, Java a periodic AWT Robot pointer nudge (the JDK has no idle
@@ -14281,16 +14281,16 @@ mod rosezm_verify {
     for (const t of desktopTargets) {
       const r = await exportProject(t.target as never, proj, { outRoot: join(scratch, `awake-${t.target}`), warnings: [], force: true });
       const kit = readFileSync(join(r.outDir, t.file), 'utf8');
-      assert(kit.includes(t.needle) && kit.includes(t.api), `R678: the ${t.target} kit suppresses the OS idle timer`);
-      assert(kit.includes('on') && (kit.includes('False') || kit.includes('false') || kit.includes(' off') || kit.includes('else')), `R678: the ${t.target} kit can release the switch too`);
+      assert(kit.includes(t.needle) && kit.includes(t.api), `the ${t.target} kit suppresses the OS idle timer`);
+      assert(kit.includes('on') && (kit.includes('False') || kit.includes('false') || kit.includes(' off') || kit.includes('else')), `the ${t.target} kit can release the switch too`);
     }
     // The capability matrix advertises it for all four desktop targets.
     for (const name of ['python', 'dotnet', 'java', 'cpp']) {
-      assert(NATIVE_TARGETS[name as keyof typeof NATIVE_TARGETS].capabilities.includes('keep-awake'), `R678: the ${name} matrix advertises keep-awake`);
+      assert(NATIVE_TARGETS[name as keyof typeof NATIVE_TARGETS].capabilities.includes('keep-awake'), `the ${name} matrix advertises keep-awake`);
     }
   }
 
-  // R679: the kernel-stub migration's thirteenth probe batch - fourteen
+  // the kernel-stub migration's thirteenth probe batch - fourteen
   // deep shapes (param mutation, nested spreads, multi-char pad, spread
   // of a Set, chained ternary methods, OR-loop, dynamic member chains,
   // else-if chains, casts, shadowed params, defaulted params, try-return
@@ -14328,11 +14328,11 @@ export function switchFallthroughGroup(v: string): string {
     writeFileSync(join(dProj, 'src', 'pages', 'index.rose'), '<p>w14</p>\n');
     const dEx = await exportProject('rust', dProj, { apiBase: 'x', outRoot: join(scratch, 'w14'), warnings: [], force: true });
     const dLib = readFileSync(join(dEx.outDir, 'src', 'lib', 'w14.rs'), 'utf8');
-    assert(!dLib.includes('__unsupported'), 'R679: none of the four shapes is skipped');
+    assert(!dLib.includes('__unsupported'), 'none of the four shapes is skipped');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R679: no cargo toolchain on PATH, so the wide13 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide13 seams are not run here');
     } else {
       appendFileSync(join(dEx.outDir, 'src', 'lib', 'w14.rs'), `
 #[cfg(test)]
@@ -14351,11 +14351,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: dEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide13_seams_answer ... ok'), `R679: the wide13 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide13_seams_answer ... ok'), `the wide13 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R680: the dynamic VALUE call (the fourteenth probe batch's one seam).
+  // the dynamic VALUE call (the fourteenth probe batch's one seam).
   // A method call on a JSON value with no known method table entry treats
   // the member as the callable the page stored: `obj.onEvent(x)` (and a
   // chain `obj.a.handler(x)` and a call-result read `.c`) dispatch through
@@ -14378,12 +14378,12 @@ export function callDeepRead(o: any): any {
     writeFileSync(join(vProj, 'src', 'pages', 'index.rose'), '<p>w15</p>\n');
     const vEx = await exportProject('rust', vProj, { apiBase: 'x', outRoot: join(scratch, 'w15'), warnings: [], force: true });
     const vLib = readFileSync(join(vEx.outDir, 'src', 'lib', 'w15.rs'), 'utf8');
-    assert(!vLib.includes('__unsupported'), 'R680: none of the three shapes is skipped');
-    assert((vLib.match(/rustz::call_value/g) ?? []).length >= 3, 'R680: the dynamic calls dispatch through call_value');
+    assert(!vLib.includes('__unsupported'), 'none of the three shapes is skipped');
+    assert((vLib.match(/rustz::call_value/g) ?? []).length >= 3, 'the dynamic calls dispatch through call_value');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R680: no cargo toolchain on PATH, so the dynamic calls are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the dynamic calls are not run here');
     } else {
       appendFileSync(join(vEx.outDir, 'src', 'lib', 'w15.rs'), `
 #[cfg(test)]
@@ -14403,11 +14403,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: vEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide14_seams_answer ... ok'), `R680: the dynamic calls RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide14_seams_answer ... ok'), `the dynamic calls RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R681: the kernel-stub migration's fifteenth batch. A local ENUM bakes
+  // the kernel-stub migration's fifteenth batch. A local ENUM bakes
   // each member as a Value constant (`Color.Red` reads that constant); a
   // COMPUTED method call (`o[k](x)`) dispatches the member the key names
   // through call_value; and findLast reads the iterator from the END (the
@@ -14438,14 +14438,14 @@ export function callbackSafe(xs: number[]): number {
     writeFileSync(join(eProj, 'src', 'pages', 'index.rose'), '<p>w16</p>\n');
     const eEx = await exportProject('rust', eProj, { apiBase: 'x', outRoot: join(scratch, 'w16'), warnings: [], force: true });
     const eLib = readFileSync(join(eEx.outDir, 'src', 'lib', 'w16.rs'), 'utf8');
-    assert(!eLib.includes('__unsupported'), 'R681: none of the four shapes is skipped');
-    assert(eLib.includes('let red = serde_json::json!(1)') && eLib.includes('let blue = serde_json::json!(2)'), 'R681: the local enum members bake as constants');
-    assert(eLib.includes('rustz::index_of_value(&(o), &(k))'), 'R681: the computed call reads the member the key names');
-    assert(eLib.includes('.rfind('), 'R681: findLast reads from the end');
+    assert(!eLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(eLib.includes('let red = serde_json::json!(1)') && eLib.includes('let blue = serde_json::json!(2)'), 'the local enum members bake as constants');
+    assert(eLib.includes('rustz::index_of_value(&(o), &(k))'), 'the computed call reads the member the key names');
+    assert(eLib.includes('.rfind('), 'findLast reads from the end');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R681: no cargo toolchain on PATH, so the wide15 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide15 seams are not run here');
     } else {
       appendFileSync(join(eEx.outDir, 'src', 'lib', 'w16.rs'), `
 #[cfg(test)]
@@ -14462,11 +14462,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: eEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide15_seams_answer ... ok'), `R681: the wide15 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide15_seams_answer ... ok'), `the wide15 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R682: the kernel-stub migration's sixteenth batch. `new C().m(x)` lands
+  // the kernel-stub migration's sixteenth batch. `new C().m(x)` lands
   // the construction in a mutable temp and calls the method on it (user
   // classes only - Date/URL/Response keep their own branches);
   // `f(...args)` builds the spread Vec through concat_v and dispatches
@@ -14497,14 +14497,14 @@ export function dateParse(): string {
     writeFileSync(join(nProj, 'src', 'pages', 'index.rose'), '<p>w17</p>\n');
     const nEx = await exportProject('rust', nProj, { apiBase: 'x', outRoot: join(scratch, 'w17'), warnings: [], force: true });
     const nLib = readFileSync(join(nEx.outDir, 'src', 'lib', 'w17.rs'), 'utf8');
-    assert(!nLib.includes('__unsupported'), 'R682: none of the four shapes is skipped');
-    assert(nLib.includes('__new_counter') && nLib.includes('let mut __new_counter'), 'R682: the new-call lands in a mutable temp');
-    assert(nLib.includes('rustz::call_value(&(rustz::val(&(f)))'), 'R682: the spread call dispatches the fn-valued parameter');
-    assert(nLib.includes('iso_from_millis(&(rustz::epoch_millis'), 'R682: the platform Date constructor keeps its own branch');
+    assert(!nLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(nLib.includes('__new_counter') && nLib.includes('let mut __new_counter'), 'the new-call lands in a mutable temp');
+    assert(nLib.includes('rustz::call_value(&(rustz::val(&(f)))'), 'the spread call dispatches the fn-valued parameter');
+    assert(nLib.includes('iso_from_millis(&(rustz::epoch_millis'), 'the platform Date constructor keeps its own branch');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R682: no cargo toolchain on PATH, so the wide16 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide16 seams are not run here');
     } else {
       appendFileSync(join(nEx.outDir, 'src', 'lib', 'w17.rs'), `
 #[cfg(test)]
@@ -14525,11 +14525,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: nEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide16_seams_answer ... ok'), `R682: the wide16 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide16_seams_answer ... ok'), `the wide16 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R683: the kernel-stub migration's seventeenth batch. Thirteen deep
+  // the kernel-stub migration's seventeenth batch. Thirteen deep
   // shapes (method destructuring, a private class field, nested arrow
   // captures, a numeric switch, for-in with an index, chained concat,
   // replaceAll, an object-valued ternary, Object.values().reduce, nested
@@ -14573,12 +14573,12 @@ export function doWhileWithBreak(n: number): number {
     writeFileSync(join(qProj, 'src', 'pages', 'index.rose'), '<p>w18</p>\n');
     const qEx = await exportProject('rust', qProj, { apiBase: 'x', outRoot: join(scratch, 'w18'), warnings: [], force: true });
     const qLib = readFileSync(join(qEx.outDir, 'src', 'lib', 'w18.rs'), 'utf8');
-    assert(!qLib.includes('__unsupported'), 'R683: none of the five shapes is skipped');
-    assert(!qLib.includes('.get()).unwrap_or('), 'R683: the new-call block is a Value, never an Option');
+    assert(!qLib.includes('__unsupported'), 'none of the five shapes is skipped');
+    assert(!qLib.includes('.get()).unwrap_or('), 'the new-call block is a Value, never an Option');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R683: no cargo toolchain on PATH, so the wide17 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide17 seams are not run here');
     } else {
       appendFileSync(join(qEx.outDir, 'src', 'lib', 'w18.rs'), `
 #[cfg(test)]
@@ -14595,11 +14595,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: qEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide17_seams_answer ... ok'), `R683: the wide17 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide17_seams_answer ... ok'), `the wide17 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R684: the kernel-stub migration's eighteenth batch. The COMMA operator
+  // the kernel-stub migration's eighteenth batch. The COMMA operator
   // runs every operand and keeps the last value; an ASSIGNMENT used as a
   // value runs and answers the assigned value; a BLOCK label is dropped
   // (Rust labels loops only) and a `break label` inside it is dropped with
@@ -14633,15 +14633,15 @@ export function commaOperator(a: number, b: number): number {
     writeFileSync(join(cProj, 'src', 'pages', 'index.rose'), '<p>w19</p>\n');
     const cEx = await exportProject('rust', cProj, { apiBase: 'x', outRoot: join(scratch, 'w19'), warnings: [], force: true });
     const cLib = readFileSync(join(cEx.outDir, 'src', 'lib', 'w19.rs'), 'utf8');
-    assert(!cLib.includes('__unsupported'), 'R684: none of the four shapes is skipped');
-    assert(cLib.includes('js_add(&(a)') && cLib.includes('js_add(&(b)'), 'R684: the comma operator runs both assignments');
-    assert(!cLib.includes("break 'block"), 'R684: a block label break is dropped with its label');
-    assert(!/return async_await\([^)]*\)\.await;/.test(cLib) || cLib.includes('pub async fn async_await'), 'R684: await appears only inside the async fn');
-    assert(cLib.includes('let _ = async_await('), 'R684: the sync caller names the promise boundary');
+    assert(!cLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(cLib.includes('js_add(&(a)') && cLib.includes('js_add(&(b)'), 'the comma operator runs both assignments');
+    assert(!cLib.includes("break 'block"), 'a block label break is dropped with its label');
+    assert(!/return async_await\([^)]*\)\.await;/.test(cLib) || cLib.includes('pub async fn async_await'), 'await appears only inside the async fn');
+    assert(cLib.includes('let _ = async_await('), 'the sync caller names the promise boundary');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R684: no cargo toolchain on PATH, so the wide18 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide18 seams are not run here');
     } else {
       appendFileSync(join(cEx.outDir, 'src', 'lib', 'w19.rs'), `
 #[cfg(test)]
@@ -14656,11 +14656,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: cEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide18_seams_answer ... ok'), `R684: the wide18 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide18_seams_answer ... ok'), `the wide18 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R685: the kernel-stub migration's nineteenth batch. A COMPUTED key in
+  // the kernel-stub migration's nineteenth batch. A COMPUTED key in
   // an object literal (`{ [k]: v, ...src }`) writes through set_prop at its
   // SOURCE position (before-spread keys lose to the spread, after-spread
   // keys win) - its old spelling called a helper that never existed; a
@@ -14690,14 +14690,14 @@ export function mapReduceStillWorks(xs: number[]): number {
     writeFileSync(join(gProj, 'src', 'pages', 'index.rose'), '<p>w20</p>\n');
     const gEx = await exportProject('rust', gProj, { apiBase: 'x', outRoot: join(scratch, 'w20'), warnings: [], force: true });
     const gLib = readFileSync(join(gEx.outDir, 'src', 'lib', 'w20.rs'), 'utf8');
-    assert(!gLib.includes('__unsupported'), 'R685: none of the four shapes is skipped');
-    assert(gLib.includes('rustz::set_prop(&mut (__o)'), 'R685: the computed key writes through set_prop');
-    assert(gLib.includes('serde_json::Value::Null') && /json!\(\[.*Null.*3/.test(gLib.replace(/\s+/g, ' ')), 'R685: the sparse slot is Null (length preserved)');
-    assert(gLib.includes('fold(serde_json::json!(0)'), 'R685: the map().reduce() chain keeps its fold spelling');
+    assert(!gLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(gLib.includes('rustz::set_prop(&mut (__o)'), 'the computed key writes through set_prop');
+    assert(gLib.includes('serde_json::Value::Null') && /json!\(\[.*Null.*3/.test(gLib.replace(/\s+/g, ' ')), 'the sparse slot is Null (length preserved)');
+    assert(gLib.includes('fold(serde_json::json!(0)'), 'the map().reduce() chain keeps its fold spelling');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R685: no cargo toolchain on PATH, so the wide19 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide19 seams are not run here');
     } else {
       appendFileSync(join(gEx.outDir, 'src', 'lib', 'w20.rs'), `
 #[cfg(test)]
@@ -14715,11 +14715,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: gEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide19_seams_answer ... ok'), `R685: the wide19 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide19_seams_answer ... ok'), `the wide19 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R686: the kernel-stub migration's twentieth batch - combined shapes
+  // the kernel-stub migration's twentieth batch - combined shapes
   // that each passed alone but exposed seams together. `{ ...classInstance }`
   // serializes the struct (derive(Serialize)) before merging; a TEMPLATE
   // computed key lifts its Rust String via val; destructuring defaults
@@ -14752,14 +14752,14 @@ export function objLiteralMethodUse(): number {
     writeFileSync(join(kProj, 'src', 'pages', 'index.rose'), '<p>w21</p>\n');
     const kEx = await exportProject('rust', kProj, { apiBase: 'x', outRoot: join(scratch, 'w21'), warnings: [], force: true });
     const kLib = readFileSync(join(kEx.outDir, 'src', 'lib', 'w21.rs'), 'utf8');
-    assert(!kLib.includes('__unsupported'), 'R686: none of the four shapes is skipped');
-    assert(kLib.includes('serde_json::json!(c)'), 'R686: the class instance is serialized for the spread');
-    assert(kLib.includes('rustz::or_else_v'), 'R686: destructuring defaults win on Null slots');
-    assert(kLib.includes('rustz::register_fn(') && kLib.includes('__fn'), 'R686: the object method is a registered fn value');
+    assert(!kLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(kLib.includes('serde_json::json!(c)'), 'the class instance is serialized for the spread');
+    assert(kLib.includes('rustz::or_else_v'), 'destructuring defaults win on Null slots');
+    assert(kLib.includes('rustz::register_fn(') && kLib.includes('__fn'), 'the object method is a registered fn value');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R686: no cargo toolchain on PATH, so the wide20 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide20 seams are not run here');
     } else {
       appendFileSync(join(kEx.outDir, 'src', 'lib', 'w21.rs'), `
 #[cfg(test)]
@@ -14777,11 +14777,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: kEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide20_seams_answer ... ok'), `R686: the wide20 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide20_seams_answer ... ok'), `the wide20 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R687: the kernel-stub migration's twenty-first batch. A local class's
+  // the kernel-stub migration's twenty-first batch. A local class's
   // constructor builds `let mut this = Self{...}` - `this.m` reads are
   // rewritten from the stray `self.m` the member path emitted; an object
   // method WITH ARGS compiles to a registered fn whose closure unpacks the
@@ -14815,14 +14815,14 @@ export function chainedObjectLiterals(o: any): any {
     writeFileSync(join(lProj, 'src', 'pages', 'index.rose'), '<p>w22</p>\n');
     const lEx = await exportProject('rust', lProj, { apiBase: 'x', outRoot: join(scratch, 'w22'), warnings: [], force: true });
     const lLib = readFileSync(join(lEx.outDir, 'src', 'lib', 'w22.rs'), 'utf8');
-    assert(!lLib.includes('__unsupported'), 'R687: none of the four shapes is skipped');
-    assert(lLib.includes('this.m') && !lLib.includes('self.m'), 'R687: the constructor reads the local this, not self');
-    assert(lLib.includes('__a.get(0)') && lLib.includes('__a.last()'), 'R687: the object method unpacks args and the receiver');
-    assert(!lLib.includes('if !rustz::includes(&(o)'), 'R687: a plain object add() is not a set insertion');
+    assert(!lLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(lLib.includes('this.m') && !lLib.includes('self.m'), 'the constructor reads the local this, not self');
+    assert(lLib.includes('__a.get(0)') && lLib.includes('__a.last()'), 'the object method unpacks args and the receiver');
+    assert(!lLib.includes('if !rustz::includes(&(o)'), 'a plain object add() is not a set insertion');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R687: no cargo toolchain on PATH, so the wide21 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide21 seams are not run here');
     } else {
       appendFileSync(join(lEx.outDir, 'src', 'lib', 'w22.rs'), `
 #[cfg(test)]
@@ -14840,11 +14840,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: lEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide21_seams_answer ... ok'), `R687: the wide21 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide21_seams_answer ... ok'), `the wide21 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R688: the twenty-second batch. `({ a, ...rest } = o)` is a
+  // the twenty-second batch. `({ a, ...rest } = o)` is a
   // ParenthesizedExpression around a BinaryExpression - it must go through
   // exprStmt (stmt() has no binary arm), assign the REST into the EXISTING
   // binding instead of redeclaring it, and delete the named keys.
@@ -14873,16 +14873,16 @@ export function groupBy(xs: any): any {
     writeFileSync(join(wProj, 'src', 'pages', 'index.rose'), '<p>w23</p>\n');
     const wEx = await exportProject('rust', wProj, { apiBase: 'x', outRoot: join(scratch, 'w23'), warnings: [], force: true });
     const wLib = readFileSync(join(wEx.outDir, 'src', 'lib', 'w23.rs'), 'utf8');
-    assert(!wLib.includes('__unsupported'), 'R688: none of the four shapes is skipped');
-    assert(wLib.includes('rest = rustz::val(&(__destr_o))') && !wLib.includes('let mut rest = rustz::val'), 'R688: object rest assigns the existing binding, not a shadow');
-    assert(wLib.includes('rustz::js_delete(&mut (rest), "a")'), 'R688: object rest deletes the named key');
-    assert(wLib.includes('rustz::val(&(vec![String::from("a') && wLib.includes('rustz::js_str(&(x))'), 'R688: String.raw concatenates raw parts and stringified values');
-    assert(wLib.includes('wrapping_mul'), 'R688: Math.imul is 32-bit wrapping multiplication');
-    assert(wLib.includes('rustz::group_by_v(&(xs), &(|n|'), 'R688: Object.groupBy passes the key closure to the runtime');
+    assert(!wLib.includes('__unsupported'), 'none of the four shapes is skipped');
+    assert(wLib.includes('rest = rustz::val(&(__destr_o))') && !wLib.includes('let mut rest = rustz::val'), 'object rest assigns the existing binding, not a shadow');
+    assert(wLib.includes('rustz::js_delete(&mut (rest), "a")'), 'object rest deletes the named key');
+    assert(wLib.includes('rustz::val(&(vec![String::from("a') && wLib.includes('rustz::js_str(&(x))'), 'String.raw concatenates raw parts and stringified values');
+    assert(wLib.includes('wrapping_mul'), 'Math.imul is 32-bit wrapping multiplication');
+    assert(wLib.includes('rustz::group_by_v(&(xs), &(|n|'), 'Object.groupBy passes the key closure to the runtime');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R688: no cargo toolchain on PATH, so the wide22 seams are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the wide22 seams are not run here');
     } else {
       appendFileSync(join(wEx.outDir, 'src', 'lib', 'w23.rs'), `
 #[cfg(test)]
@@ -14902,11 +14902,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: wEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('wide22_seams_answer ... ok'), `R688: the wide22 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
+      assert(tested.status === 0 && tested.stdout.includes('wide22_seams_answer ... ok'), `the wide22 seams RUN (${(tested.stderr || tested.stdout).slice(-600)})`);
     }
   }
 
-  // R574: Math.cbrt and Object.is were skipped. cbrt is the f64 cube root;
+  // Math.cbrt and Object.is were skipped. cbrt is the f64 cube root;
   // Object.is reads as the domain's equality (JSON cannot carry NaN or -0,
   // the two cases where JS's Object.is differs from ==).
   {
@@ -14920,13 +14920,13 @@ export function diff(a: any, b: any): boolean { return Object.is(a, b); }
     writeFileSync(join(p4Proj, 'src', 'pages', 'index.rose'), '<p>p4</p>\n');
     const p4Ex = await exportProject('rust', p4Proj, { apiBase: 'x', outRoot: join(scratch, 'p4') });
     const p4Lib = readFileSync(join(p4Ex.outDir, 'src', 'lib', 'p4.rs'), 'utf8');
-    assert(!p4Lib.includes('__unsupported'), 'R574: cbrt and Object.is translate');
-    assert(p4Lib.includes('rustz::cbrt_v('), 'R574: cbrt uses the runtime helper');
-    assert(p4Lib.includes('rustz::js_eq('), 'R574: Object.is reads through js_eq');
+    assert(!p4Lib.includes('__unsupported'), 'cbrt and Object.is translate');
+    assert(p4Lib.includes('rustz::cbrt_v('), 'cbrt uses the runtime helper');
+    assert(p4Lib.includes('rustz::js_eq('), 'Object.is reads through js_eq');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R574: no cargo toolchain on PATH, so cbrt/Object.is are not run here');
+      console.log('ok - no cargo toolchain on PATH, so cbrt/Object.is are not run here');
     } else {
       appendFileSync(join(p4Ex.outDir, 'src', 'lib', 'p4.rs'), `
 #[cfg(test)]
@@ -14942,11 +14942,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: p4Ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('cbrt_object_is_answer ... ok'), `R574: cbrt/Object.is RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('cbrt_object_is_answer ... ok'), `cbrt/Object.is RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R575: the Vue 3 / Vite target. The baked Rose site rides public/ and is
+  // the Vue 3 / Vite target. The baked Rose site rides public/ and is
   // served verbatim; App.vue is a real SFC shell, and the Vue layer owns a
   // typed useNative bridge. No Vue runtime is vendored - package.json names
   // the dependency and Vite builds it.
@@ -14956,25 +14956,25 @@ mod rosezm_verify {
     writeFileSync(join(vuProj, 'src', 'pages', 'index.rose'), '<p>vue</p>\n');
     const vuEx = await exportProject('vue', vuProj, { apiBase: 'https://api.example.com', outRoot: join(scratch, 'vu') });
     for (const f of ['package.json', 'vite.config.ts', 'index.html', 'src/main.ts', 'src/App.vue', 'src/rosezm.ts', 'README.md', '.github/workflows/vue.yml']) {
-      assert(existsSync(join(vuEx.outDir, f)), `R575: ${f} ships with the Vue export`);
+      assert(existsSync(join(vuEx.outDir, f)), `${f} ships with the Vue export`);
     }
     const pkg = JSON.parse(readFileSync(join(vuEx.outDir, 'package.json'), 'utf8'));
-    assert(/^\^3/.test(pkg.dependencies.vue), 'R575: the manifest names Vue 3');
-    assert(pkg.scripts.build.includes('vite build'), 'R575: npm run build runs Vite');
+    assert(/^\^3/.test(pkg.dependencies.vue), 'the manifest names Vue 3');
+    assert(pkg.scripts.build.includes('vite build'), 'npm run build runs Vite');
     const sfc = readFileSync(join(vuEx.outDir, 'src', 'App.vue'), 'utf8');
-    assert(sfc.includes('<script setup lang="ts">') && sfc.includes('<template>') && sfc.includes('<style scoped>'), 'R575: App.vue is a real SFC');
-    assert(sfc.includes('iframe') && sfc.includes("frame.value.src = '/rosezm/index.html'"), 'R575: the baked site is framed, not rewritten');
+    assert(sfc.includes('<script setup lang="ts">') && sfc.includes('<template>') && sfc.includes('<style scoped>'), 'App.vue is a real SFC');
+    assert(sfc.includes('iframe') && sfc.includes("frame.value.src = '/rosezm/index.html'"), 'the baked site is framed, not rewritten');
     const bridge = readFileSync(join(vuEx.outDir, 'src', 'rosezm.ts'), 'utf8');
-    assert(bridge.includes('useNative') && bridge.includes('__rosezmNative'), 'R575: the Vue layer has the native bridge');
-    assert(readFileSync(join(vuEx.outDir, 'vite.config.ts'), 'utf8').includes("publicDir: 'public'"), 'R575: Vite serves public/ verbatim');
+    assert(bridge.includes('useNative') && bridge.includes('__rosezmNative'), 'the Vue layer has the native bridge');
+    assert(readFileSync(join(vuEx.outDir, 'vite.config.ts'), 'utf8').includes("publicDir: 'public'"), 'Vite serves public/ verbatim');
     const doc = readFileSync(join(vuEx.outDir, 'public', 'rosezm', 'index.html'), 'utf8');
-    assert(doc.includes('rosezm-shell.js'), 'R575: the baked document keeps the Rose shell bridge');
-    assert(TARGETS.vue.status === 'ready', 'R575: vue is a ready target in the registry');
+    assert(doc.includes('rosezm-shell.js'), 'the baked document keeps the Rose shell bridge');
+    assert(TARGETS.vue.status === 'ready', 'vue is a ready target in the registry');
     const manifest = JSON.parse(readFileSync(join(vuEx.outDir, 'rosezm-export.json'), 'utf8'));
-    assert(manifest.framework === 'rosezm' && manifest.target === 'vue' && manifest.pages.length >= 1, 'R575: the export manifest names the Vue target');
+    assert(manifest.framework === 'rosezm' && manifest.target === 'vue' && manifest.pages.length >= 1, 'the export manifest names the Vue target');
   }
 
-  // R576: five more Rust constructs that used to be skipped: reduceRight,
+  // five more Rust constructs that used to be skipped: reduceRight,
   // Array.flat(depth), String.normalize, findLastIndex and Math.hypot.
   // reduceRight walks the reversed iterator with the SECOND arg as its
   // seed; flat flattens one level per depth step; normalize is the identity
@@ -14993,14 +14993,14 @@ export function hp(a: number, b: number): number { return Math.hypot(a, b); }
     writeFileSync(join(rgProj, 'src', 'pages', 'index.rose'), '<p>rg</p>\n');
     const rgEx = await exportProject('rust', rgProj, { apiBase: 'x', outRoot: join(scratch, 'rg') });
     const rgLib = readFileSync(join(rgEx.outDir, 'src', 'lib', 'rg.rs'), 'utf8');
-    assert(!rgLib.includes('__unsupported'), 'R576: none of the five constructs is skipped');
-    assert(rgLib.includes('rustz::reverse_v(') && rgLib.includes('.fold('), 'R576: reduceRight folds the reversed iterator');
-    assert(rgLib.includes('rustz::flat_v('), 'R576: flat uses flat_v');
-    assert(rgLib.includes('rustz::hypot_v('), 'R576: Math.hypot uses hypot_v');
+    assert(!rgLib.includes('__unsupported'), 'none of the five constructs is skipped');
+    assert(rgLib.includes('rustz::reverse_v(') && rgLib.includes('.fold('), 'reduceRight folds the reversed iterator');
+    assert(rgLib.includes('rustz::flat_v('), 'flat uses flat_v');
+    assert(rgLib.includes('rustz::hypot_v('), 'Math.hypot uses hypot_v');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R576: no cargo toolchain on PATH, so the Rust gaps are not run here');
+      console.log('ok - no cargo toolchain on PATH, so the Rust gaps are not run here');
     } else {
       appendFileSync(join(rgEx.outDir, 'src', 'lib', 'rg.rs'), `
 #[cfg(test)]
@@ -15019,11 +15019,11 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: rgEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('gaps_answer ... ok'), `R576: the Rust gaps RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('gaps_answer ... ok'), `the Rust gaps RUN (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R577: the Vue target must not collide with Vite's own root entry.
+  // the Vue target must not collide with Vite's own root entry.
   // The baked site lives in public/rosezm/ (dist/rosezm/ after build) and
   // the iframe points at /rosezm/index.html. A REAL `npm run build`
   // (vue-tsc + Vite) runs when the toolchain is available; otherwise the
@@ -15033,19 +15033,19 @@ mod rosezm_verify {
     mkdirSync(join(vpProj, 'src', 'pages'), { recursive: true });
     writeFileSync(join(vpProj, 'src', 'pages', 'index.rose'), '<p>paths</p>\n');
     const vpEx = await exportProject('vue', vpProj, { apiBase: 'x', outRoot: join(scratch, 'vp') });
-    assert(!existsSync(join(vpEx.outDir, 'public', 'index.html')), 'R577: no baked index.html sits at the public root');
-    assert(existsSync(join(vpEx.outDir, 'public', 'rosezm', 'index.html')), 'R577: the baked site is under public/rosezm/');
-    assert(existsSync(join(vpEx.outDir, 'index.html')), 'R577: Vite keeps its own root entry');
+    assert(!existsSync(join(vpEx.outDir, 'public', 'index.html')), 'no baked index.html sits at the public root');
+    assert(existsSync(join(vpEx.outDir, 'public', 'rosezm', 'index.html')), 'the baked site is under public/rosezm/');
+    assert(existsSync(join(vpEx.outDir, 'index.html')), 'Vite keeps its own root entry');
     const vpApp = readFileSync(join(vpEx.outDir, 'src', 'App.vue'), 'utf8');
-    assert(vpApp.includes("frame.value.src = '/rosezm/index.html'"), 'R577: the iframe targets the nested site');
-    assert(existsSync(join(vpEx.outDir, 'tsconfig.json')), 'R577: vue-tsc has a config to type-check against');
+    assert(vpApp.includes("frame.value.src = '/rosezm/index.html'"), 'the iframe targets the nested site');
+    assert(existsSync(join(vpEx.outDir, 'tsconfig.json')), 'vue-tsc has a config to type-check against');
     const vpPkg = JSON.parse(readFileSync(join(vpEx.outDir, 'package.json'), 'utf8'));
-    assert(vpPkg.scripts.build.includes('vue-tsc -p tsconfig.json'), 'R577: build type-checks before Vite');
+    assert(vpPkg.scripts.build.includes('vue-tsc -p tsconfig.json'), 'build type-checks before Vite');
     // The real gate: a production Vite build with a Vue 3 toolchain.
     const depsDir = process.env.ROSEZM_VUE_DEPS;
     const hasDeps = depsDir && existsSync(join(depsDir, 'vue', 'package.json')) && existsSync(join(depsDir, '@vitejs', 'plugin-vue', 'package.json')) && existsSync(join(depsDir, '.bin', 'vite'));
     if (!hasDeps) {
-      console.log('ok - R577: no Vue/Vite toolchain available (set ROSEZM_VUE_DEPS), so the production build is not run here');
+      console.log('ok - no Vue/Vite toolchain available (set ROSEZM_VUE_DEPS), so the production build is not run here');
     } else {
       // Link the toolchain without vendoring it into the export.
       const nm = join(vpEx.outDir, 'node_modules');
@@ -15063,18 +15063,18 @@ mod rosezm_verify {
         if (!existsSync(dst)) symlinkSync(join(depsDir, '.bin', b), dst, 'file');
       }
       const built = spawnSync('npm', ['run', 'build'], { cwd: vpEx.outDir, encoding: 'utf8', timeout: 600_000 });
-      assert(built.status === 0, `R577: npm run build passes vue-tsc + Vite (${(built.stderr || built.stdout).slice(-500)})`);
+      assert(built.status === 0, `npm run build passes vue-tsc + Vite (${(built.stderr || built.stdout).slice(-500)})`);
       const distRoot = readFileSync(join(vpEx.outDir, 'dist', 'index.html'), 'utf8');
       const distSite = readFileSync(join(vpEx.outDir, 'dist', 'rosezm', 'index.html'), 'utf8');
-      assert(distRoot.includes('id="app"') && !distRoot.includes('/src/main.ts'), 'R577: dist root is the built Vue entry');
-      assert(distSite.includes('rosezm-shell.js') && distSite !== distRoot, 'R577: dist/rosezm is the untouched baked site');
+      assert(distRoot.includes('id="app"') && !distRoot.includes('/src/main.ts'), 'dist root is the built Vue entry');
+      assert(distSite.includes('rosezm-shell.js') && distSite !== distRoot, 'dist/rosezm is the untouched baked site');
       const assets = readdirSync(join(vpEx.outDir, 'dist', 'assets'));
       const bundle = assets.filter((f) => f.endsWith('.js')).map((f) => readFileSync(join(vpEx.outDir, 'dist', 'assets', f), 'utf8')).join('\n');
-      assert(bundle.includes('/rosezm/index.html'), 'R577: the built bundle keeps the nested iframe URL');
+      assert(bundle.includes('/rosezm/index.html'), 'the built bundle keeps the nested iframe URL');
     }
   }
 
-  // R578: performance + correctness round.
+  // performance + correctness round.
   //  (a) the compile gate reuses ONE target dir across passes and runs
   //      cargo offline (deps are cached) - a fresh dir per pass rebuilt
   //      every dependency 3x and online registry lookups added seconds;
@@ -15083,8 +15083,8 @@ mod rosezm_verify {
   //      or `.all` gets a Value where Rust requires bool (E0308).
   {
     const perfSrc = readFileSync(join(process.cwd(), 'src', 'export', 'rust-app.ts'), 'utf8');
-    assert(!/for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE[^]*?\)\s*\{[\s\S]{0,400}?mkdtempSync/.test(perfSrc), 'R578: the kernel gate creates its temp dir once, not per pass');
-    assert(perfSrc.includes('env: gateEnv()'), 'R578: cargo gates pass an offline env');
+    assert(!/for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE[^]*?\)\s*\{[\s\S]{0,400}?mkdtempSync/.test(perfSrc), 'the kernel gate creates its temp dir once, not per pass');
+    assert(perfSrc.includes('env: gateEnv()'), 'cargo gates pass an offline env');
     const evProj = join(scratch, 'rust-predicate');
     mkdirSync(join(evProj, 'src', 'lib'), { recursive: true });
     mkdirSync(join(evProj, 'src', 'pages'), { recursive: true });
@@ -15099,12 +15099,12 @@ mod rosezm_verify {
     const evEx = await exportProject('rust', evProj, { apiBase: 'x', outRoot: join(scratch, 'ev') });
     const evLib = readFileSync(join(evEx.outDir, 'src', 'lib', 'ev.rs'), 'utf8');
     const returns = [...evLib.matchAll(/return\s+([^;]+);/g)].map((m) => m[1].trim());
-    assert(returns.filter((r) => r.includes('js_eq')).every((r) => r.includes('rustz::truthy')), 'R578: an early predicate return is a Rust bool');
-    assert(/rustz::truthy\(&\(serde_json::json!\(true\)\)\)/.test(evLib), 'R578: the predicate tail expr is a Rust bool');
+    assert(returns.filter((r) => r.includes('js_eq')).every((r) => r.includes('rustz::truthy')), 'an early predicate return is a Rust bool');
+    assert(/rustz::truthy\(&\(serde_json::json!\(true\)\)\)/.test(evLib), 'the predicate tail expr is a Rust bool');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R578: no cargo toolchain on PATH, so the predicate is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the predicate is not run here');
     } else {
       appendFileSync(join(evEx.outDir, 'src', 'lib', 'ev.rs'), `
 #[cfg(test)]
@@ -15119,18 +15119,18 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: evEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('predicate_answer ... ok'), `R578: the predicate RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('predicate_answer ... ok'), `the predicate RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R579: `export all` builds the SAME project into nine shell fronts. A
+  // `export all` builds the SAME project into nine shell fronts. A
   // batch scope builds once and copies nine times; outside a batch (a
   // single-target export) no reuse happens, so no stale build can leak.
   {
     const shellSrc = readFileSync(join(process.cwd(), 'src', 'export', 'desktop-shell.ts'), 'utf8');
-    assert(shellSrc.includes('export function beginStageBatch(') && shellSrc.includes('export function endStageBatch('), 'R579: the staging batch scope exists');
+    assert(shellSrc.includes('export function beginStageBatch(') && shellSrc.includes('export function endStageBatch('), 'the staging batch scope exists');
     const cliSrc = readFileSync(join(process.cwd(), 'src', 'cli', 'index.ts'), 'utf8');
-    assert(cliSrc.includes('beginStageBatch(projectRootAll)') && /finally \{[\s\S]{0,80}?endStageBatch\(\)/.test(cliSrc), 'R579: export all opens and closes the batch');
+    assert(cliSrc.includes('beginStageBatch(projectRootAll)') && /finally \{[\s\S]{0,80}?endStageBatch\(\)/.test(cliSrc), 'export all opens and closes the batch');
     // A batch must not change what lands on disk: two exports of the same
     // project, one batched, produce byte-identical frontend documents.
     const bpProj = join(scratch, 'batch-parity');
@@ -15143,21 +15143,21 @@ mod rosezm_verify {
     try { batched = await exportProject('vue', bpProj, { apiBase: 'x', outRoot: join(scratch, 'bp-batch') }); }
     finally { endStageBatch(); }
     const doc = join('public', 'rosezm', 'index.html');
-    assert(readFileSync(join(plain.outDir, doc), 'utf8') === readFileSync(join(batched.outDir, doc), 'utf8'), 'R579: a batched build is byte-identical to a plain one');
+    assert(readFileSync(join(plain.outDir, doc), 'utf8') === readFileSync(join(batched.outDir, doc), 'utf8'), 'a batched build is byte-identical to a plain one');
   }
 
-  // R580: performance round 3 - the compile gates must NOT keep separate
+  // performance round 3 - the compile gates must NOT keep separate
   // cargo dependency caches. A fresh temp target and a `rosezm-final-gate`
   // dir each rebuilt every dependency (~2.4s) while checking the same .rs
   // bytes; both now share the crate's default target (cargo fingerprints
   // by content).
   {
     const appSrc = readFileSync(join(process.cwd(), 'src', 'export', 'rust-app.ts'), 'utf8');
-    assert(!appSrc.includes("'rosezm-final-gate'"), 'R580: no separate final-gate cargo target dir remains');
-    assert(appSrc.includes("'--target-dir', kernelTargetDir(kernelDir)"), 'R580: the snapshot gate shares the crate target dir');
+    assert(!appSrc.includes("'rosezm-final-gate'"), 'no separate final-gate cargo target dir remains');
+    assert(appSrc.includes("'--target-dir', kernelTargetDir(kernelDir)"), 'the snapshot gate shares the crate target dir');
   }
 
-  // R582: the Android NDK REAL-LINK gate. With an NDK clang wrapper and the
+  // the Android NDK REAL-LINK gate. With an NDK clang wrapper and the
   // aarch64-linux-android Rust target installed, rust-mobile must produce a
   // real .so (not just a cargo check). Without them, the gate reports the
   // exact blocker instead of pretending - and the emitter still ships the
@@ -15168,8 +15168,8 @@ mod rosezm_verify {
     writeFileSync(join(ndProj, 'src', 'pages', 'index.rose'), '<p>ndk</p>\n');
     const ndEx = await exportProject('rust-mobile', ndProj, { apiBase: 'x', outRoot: join(scratch, 'nd') });
     const ndCfg = readFileSync(join(ndEx.outDir, '.cargo', 'config.toml'), 'utf8');
-    assert(ndCfg.includes('linker = "aarch64-linux-android24-clang"'), 'R582: the emitted crate names the NDK clang wrapper');
-    assert(readFileSync(join(ndEx.outDir, 'android', 'README.md'), 'utf8').includes('cargo build --release --target aarch64-linux-android'), 'R582: the README documents the NDK build command');
+    assert(ndCfg.includes('linker = "aarch64-linux-android24-clang"'), 'the emitted crate names the NDK clang wrapper');
+    assert(readFileSync(join(ndEx.outDir, 'android', 'README.md'), 'utf8').includes('cargo build --release --target aarch64-linux-android'), 'the README documents the NDK build command');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     const clang = process.env.ROSEZM_NDK_CLANG
@@ -15182,7 +15182,7 @@ mod rosezm_verify {
         cargoBin ? null : 'cargo', hasClang ? null : `NDK clang (${clang || 'ANDROID_NDK_HOME/ROSEZM_NDK_CLANG unset'})`,
         hasTarget ? null : 'rustup target aarch64-linux-android',
       ].filter(Boolean).join(', ');
-      console.log(`ok - R582: NDK real-link gate skipped, blockers: ${blockers} (the emitted config + README are still asserted)`);
+      console.log(`ok - NDK real-link gate skipped, blockers: ${blockers} (the emitted config + README are still asserted)`);
     } else {
       // Point cargo at the NDK's bin dir so the wrapper resolves, then link.
       const ndkBin = clang!.replace(/\/aarch64-linux-android24-clang$/, '');
@@ -15190,15 +15190,15 @@ mod rosezm_verify {
         cwd: ndEx.outDir, encoding: 'utf8', timeout: 600_000,
         env: { ...process.env, CARGO_NET_OFFLINE: 'true', PATH: `${ndkBin}:${process.env.PATH ?? ''}` },
       });
-      assert(built.status === 0, `R582: rust-mobile links a real Android .so with the NDK (${(built.stderr || built.stdout).slice(-500)})`);
+      assert(built.status === 0, `rust-mobile links a real Android .so with the NDK (${(built.stderr || built.stdout).slice(-500)})`);
       const lib = join(ndEx.outDir, 'target', 'aarch64-linux-android', 'release', 'libdodovim_mobile.so');
-      assert(existsSync(lib), 'R582: libdodovim_mobile.so is produced');
+      assert(existsSync(lib), 'libdodovim_mobile.so is produced');
       const info = spawnSync('file', [lib], { encoding: 'utf8' });
-      assert(/ELF.*aarch64|ARM aarch64/i.test(info.stdout ?? ''), `R582: the .so is an aarch64 ELF (${(info.stdout || info.stderr || '').slice(-200)})`);
+      assert(/ELF.*aarch64|ARM aarch64/i.test(info.stdout ?? ''), `the .so is an aarch64 ELF (${(info.stdout || info.stderr || '').slice(-200)})`);
     }
   }
 
-  // R585: the rust-ts AST cache is keyed by SOURCE CONTENT, not by file
+  // the rust-ts AST cache is keyed by SOURCE CONTENT, not by file
   // name. The kernel emitters parse the same module several times (contracts,
   // arities, transpile); a cache avoids that work but must never serve a
   // stale AST when the source changes. Two near-identical modules must emit
@@ -15215,13 +15215,13 @@ mod rosezm_verify {
     writeFileSync(join(pcProj, 'src', 'lib', 'step.ts'), body(2));
     const two = await exportProject('rust', pcProj, { apiBase: 'x', outRoot: join(scratch, 'pc-two') });
     const twoRs = readFileSync(join(two.outDir, 'src', 'lib', 'step.rs'), 'utf8');
-    assert(oneRs !== twoRs, 'R585: a changed source is not served a cached AST');
-    assert(/json!\(1\)/.test(oneRs) && /json!\(2\)/.test(twoRs), 'R585: both translations keep their own literal');
+    assert(oneRs !== twoRs, 'a changed source is not served a cached AST');
+    assert(/json!\(1\)/.test(oneRs) && /json!\(2\)/.test(twoRs), 'both translations keep their own literal');
     // Real behavior: the first crate answers 3, the second 4.
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R585: no cargo toolchain on PATH, so the parse-cache behavior is not run here');
+      console.log('ok - no cargo toolchain on PATH, so the parse-cache behavior is not run here');
     } else {
       for (const [ex, expect] of [[one, 3], [two, 4]] as Array<[{ outDir: string }, number]>) {
         appendFileSync(join(ex.outDir, 'src', 'lib', 'step.rs'), `
@@ -15235,7 +15235,7 @@ mod rosezm_verify {
 }
 `);
         const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: ex.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-        assert(tested.status === 0 && tested.stdout.includes('step_answers ... ok'), `R585: the changed module RUNS with its own value (${(tested.stderr || tested.stdout).slice(-400)})`);
+        assert(tested.status === 0 && tested.stdout.includes('step_answers ... ok'), `the changed module RUNS with its own value (${(tested.stderr || tested.stdout).slice(-400)})`);
       }
     }
   }
@@ -15347,8 +15347,8 @@ mod rosezm_verify {
     const okReal = mixed ? misses === mutated && hits > 0 && staleEdits === 0 : misses === 0;
     // The wall-clock half of the old `ok` (secondPassMs <= firstPassMs)
     // only holds for a COLD first pass. In-process the mixed call follows
-    // R593's warm pass over the same corpus, so the first pass here is
-    // already hot and the timing carries no signal - R593 asserts the
+    // 's warm pass over the same corpus, so the first pass here is
+    // already hot and the timing carries no signal - the earlier pass asserts the
     // cold-vs-warm property where it is real.
     return {
       ok: okReal && real.length >= 40, files: real.length, totalKb, mutated, staleEdits,
@@ -15395,53 +15395,53 @@ mod rosezm_verify {
     return { identical: rust1 === rust2, structEmitted: rust1.includes('pub struct decoCls'), implEmitted: rust1.includes('impl decoCls') };
   };
 
-  // R586: the >512-module parse-cache benchmark. A working set larger
+  // the >512-module parse-cache benchmark. A working set larger
   // than the old 512-entry cap used to clear the whole cache in waves;
   // LRU eviction + a 2048 cap keeps a large project's second pass at
   // 100% hits. 600 distinct modules parse twice through the SAME
   // helpers the emitters use.
   {
     const r = benchAllCached();
-    assert(r.ok, `R586: the >512-module benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
-    assert(r.modules > 512, 'R586: 600 distinct modules fit in the cache');
-    assert(r.secondPassMisses === 0 && Number(r.hitRate) === 1, `R586: the second pass is 100% cache hits (${JSON.stringify(r)})`);
-    assert(r.cacheSize <= 2048 && r.secondPassMs < r.firstPassMs, 'R586: the cache stays bounded and the hot pass is faster');
+    assert(r.ok, `the >512-module benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
+    assert(r.modules > 512, '600 distinct modules fit in the cache');
+    assert(r.secondPassMisses === 0 && Number(r.hitRate) === 1, `the second pass is 100% cache hits (${JSON.stringify(r)})`);
+    assert(r.cacheSize <= 2048 && r.secondPassMs < r.firstPassMs, 'the cache stays bounded and the hot pass is faster');
   }
 
-  // R587/R588: MIXED change mode and the change-RATIO curve, one warm
+  // the earlier pass: MIXED change mode and the earlier pass-RATIO curve, one warm
   // pass. In a large working set where only a fraction of the modules
   // change, unchanged sources must still hit, changed ones must miss
   // exactly once, and a changed source must NEVER be served the old
   // AST (content key, not file name). Sweeping 5% / 20% / 50% edits,
-  // misses must grow strictly with the change ratio and no stale AST
+  // misses must grow strictly with the earlier pass ratio and no stale AST
   // may appear at any point.
   {
     const runner = benchRatioRunner();
     const mixed = runner.ratioPass(0.2);
-    assert(mixed.changed === 120 && mixed.misses === mixed.changed, `R587: exactly the changed modules miss the cache (${JSON.stringify(mixed)})`);
-    assert(mixed.hits > 0 && mixed.staleDetected === false, 'R587: unchanged modules hit and no stale AST is served');
-    assert(mixed.size <= 2048 && mixed.ms <= runner.firstMs, 'R587: the mixed pass stays bounded and is not slower');
+    assert(mixed.changed === 120 && mixed.misses === mixed.changed, `exactly the changed modules miss the cache (${JSON.stringify(mixed)})`);
+    assert(mixed.hits > 0 && mixed.staleDetected === false, 'unchanged modules hit and no stale AST is served');
+    assert(mixed.size <= 2048 && mixed.ms <= runner.firstMs, 'the mixed pass stays bounded and is not slower');
     // A separate runner (its own seed -> its own cold warm pass) keeps the
     // curve's per-ratio misses clean of the mixed pass above.
     const curveRunner = benchRatioRunner(600, 77);
     const curve = [0.05, 0.2, 0.5].map((ratio) => ({ ratio, ...curveRunner.ratioPass(ratio) }));
-    assert(curve.length === 3, 'R588: the curve sweeps three ratios');
-    assert(JSON.stringify(curve.map((c) => c.ratio)) === JSON.stringify([0.05, 0.2, 0.5]), 'R588: the curve covers 5% / 20% / 50%');
+    assert(curve.length === 3, 'the curve sweeps three ratios');
+    assert(JSON.stringify(curve.map((c) => c.ratio)) === JSON.stringify([0.05, 0.2, 0.5]), 'the curve covers 5% / 20% / 50%');
     const misses = curve.map((c) => c.misses);
-    assert(misses[0] < misses[1] && misses[1] < misses[2], `R588: misses grow with the change ratio (${misses.join(' < ')})`);
-    assert(curve.every((c) => !c.staleDetected && c.misses >= c.changed && c.hits > 0), 'R588: no stale AST and no under-count at any ratio');
+    assert(misses[0] < misses[1] && misses[1] < misses[2], `misses grow with the earlier pass ratio (${misses.join(' < ')})`);
+    assert(curve.every((c) => !c.staleDetected && c.misses >= c.changed && c.hits > 0), 'no stale AST and no under-count at any ratio');
   }
 
-  // R589: the final compile gate is SKIPPED when the snapshot gate's last
+  // the final compile gate is SKIPPED when the snapshot gate's last
   // check already came back green. The snapshot is re-copied from src/ at
   // the top of every pass, so a green final check proves the live crate
   // compiles — re-running the identical check was pure repeat (~0.7s per
   // export). A degraded/stubbed snapshot still reaches the final gate.
   {
     const appSrc = readFileSync(join(process.cwd(), 'src', 'export', 'rust-app.ts'), 'utf8');
-    assert(appSrc.includes('let snapshotGreen = false;'), 'R589: the snapshot gate records its last check result');
-    assert(/if \(check\.status === 0\) \{ snapshotGreen = true; gateChecks\+\+; cargoRuns\+\+; break; \}/.test(appSrc), 'R589: a green snapshot check sets the flag (and counts the check)');
-    assert(appSrc.includes('if (!process.env.ROSEZM_NO_KERNEL_GATE && !snapshotGreen) {'), 'R589: the final gate is skipped when the snapshot verified the crate');
+    assert(appSrc.includes('let snapshotGreen = false;'), 'the snapshot gate records its last check result');
+    assert(/if \(check\.status === 0\) \{ snapshotGreen = true; gateChecks\+\+; cargoRuns\+\+; break; \}/.test(appSrc), 'a green snapshot check sets the flag (and counts the check)');
+    assert(appSrc.includes('if (!process.env.ROSEZM_NO_KERNEL_GATE && !snapshotGreen) {'), 'the final gate is skipped when the snapshot verified the crate');
     // Real gate: export, then cargo check the shipped crate. Even in the
     // stub path (demo-auth makes the gate stub modules), the crate must be
     // green AFTER the skip.
@@ -15455,12 +15455,12 @@ mod rosezm_verify {
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R589: no cargo toolchain on PATH, so the shipped crate is not checked here');
+      console.log('ok - no cargo toolchain on PATH, so the shipped crate is not checked here');
     } else {
       const checked = spawnSync(cargoBin, ['check', '--manifest-path', join(skEx.outDir, 'Cargo.toml'), '--message-format=short'], {
         cwd: skEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' },
       });
-      assert(checked.status === 0, `R589: the shipped crate compiles after the final-gate skip (${(checked.stderr || checked.stdout).slice(-400)})`);
+      assert(checked.status === 0, `the shipped crate compiles after the final-gate skip (${(checked.stderr || checked.stdout).slice(-400)})`);
       // And the translated fn still answers.
       // rust-core flattens kernel modules into src/ (kernelRoot src/lib is the TS side).
       appendFileSync(join(skEx.outDir, 'src', 'calc.rs'), `
@@ -15474,24 +15474,24 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: skEx.outDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('double_answers ... ok'), `R589: the translated fn RUNS after the skip (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('double_answers ... ok'), `the translated fn RUNS after the skip (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R590: the rust-web injection path runs ONE gate loop, not two. After
+  // the rust-web injection path runs ONE gate loop, not two. After
   // the api dispatch lands in lib.rs, a single loop both stubs untypable
   // api routes AND degrades/stubs kernel modules the injected dispatch
   // broke — the old code ran finalKernelGate (up to 12 checks) followed by
   // a second 3-check loop over the identical crate.
   {
     const appSrc = readFileSync(join(process.cwd(), 'src', 'export', 'rust-app.ts'), 'utf8');
-    assert(appSrc.includes('ONE gate loop handles both failure kinds'), 'R590: the injection path documents the merged gate');
-    assert(!/finalKernelGate\(opts\.kernelPath, opts\);[\s\S]{0,600}?for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE \? 0 : 3\)\);/.test(appSrc.replace(/\n/g, '\n')), 'R590: no double gate follows the injection');
+    assert(appSrc.includes('ONE gate loop handles both failure kinds'), 'the injection path documents the merged gate');
+    assert(!/finalKernelGate\(opts\.kernelPath, opts\);[\s\S]{0,600}?for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE \? 0 : 3\)\);/.test(appSrc.replace(/\n/g, '\n')), 'no double gate follows the injection');
     const loopStart = appSrc.indexOf('ROSEZM_NO_KERNEL_GATE ? 0 : 12');
-    assert(loopStart !== -1, 'R590: the injection gate has a 12-pass budget');
+    assert(loopStart !== -1, 'the injection gate has a 12-pass budget');
     const loopBody = appSrc.slice(loopStart, loopStart + 3000);
-    assert(loopBody.includes('stubApiModule'), 'R590: the single loop stubs api routes');
-    assert(loopBody.includes('degradeBrokenFunctions'), 'R590: the single loop also degrades kernel modules');
+    assert(loopBody.includes('stubApiModule'), 'the single loop stubs api routes');
+    assert(loopBody.includes('degradeBrokenFunctions'), 'the single loop also degrades kernel modules');
     // Real gate: rust-web export, then the shipped kernel crate compiles.
     const wgProj = join(scratch, 'rust-web-merged');
     mkdirSync(join(wgProj, 'src', 'pages', 'api'), { recursive: true });
@@ -15504,17 +15504,17 @@ mod rosezm_verify {
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R590: no cargo toolchain on PATH, so the merged gate crate is not checked here');
+      console.log('ok - no cargo toolchain on PATH, so the merged gate crate is not checked here');
     } else {
       const crateDir = existsSync(join(wgEx.outDir, 'kernel', 'Cargo.toml')) ? join(wgEx.outDir, 'kernel') : wgEx.outDir;
       const checked = spawnSync(cargoBin, ['check', '--manifest-path', join(crateDir, 'Cargo.toml'), '--message-format=short'], {
         cwd: crateDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' },
       });
-      assert(checked.status === 0, `R590: the shipped kernel crate compiles after the merged gate (${(checked.stderr || checked.stdout).slice(-400)})`);
+      assert(checked.status === 0, `the shipped kernel crate compiles after the merged gate (${(checked.stderr || checked.stdout).slice(-400)})`);
     }
   }
 
-  // R591: the merged injection gate handles api-route AND kernel failures
+  // the merged injection gate handles api-route AND kernel failures
   // in ONE crate: an untypable api route is stubbed with an
   // explicit web-response error, the kernel modules stay intact (emitKernel
   // already gated them), and the shipped crate compiles green afterwards.
@@ -15533,18 +15533,18 @@ mod rosezm_verify {
     const warnings = (dlEx.warnings ?? []).join('\n');
     const kernelDir = existsSync(join(dlEx.outDir, 'kernel')) ? join(dlEx.outDir, 'kernel') : dlEx.outDir;
     const apiFile = join(kernelDir, 'src', 'api__fail.rs');
-    assert(existsSync(apiFile), 'R591: the failing api route module is emitted');
-    assert(readFileSync(apiFile, 'utf8').includes('did not type-check'), 'R591: the failing api route is an explicit stub');
-    assert(existsSync(join(kernelDir, 'src', 'kept.rs')), 'R591: the kernel business module survives the merged gate');
+    assert(existsSync(apiFile), 'the failing api route module is emitted');
+    assert(readFileSync(apiFile, 'utf8').includes('did not type-check'), 'the failing api route is an explicit stub');
+    assert(existsSync(join(kernelDir, 'src', 'kept.rs')), 'the kernel business module survives the merged gate');
     const cargoPaths = ['cargo', join(process.env.HOME ?? '', '.cargo', 'bin', 'cargo')];
     const cargoBin = cargoPaths.find((c) => !spawnSync(c, ['--version'], { encoding: 'utf8' }).error);
     if (!cargoBin) {
-      console.log('ok - R591: no cargo toolchain on PATH, so the dual-stub crate is not checked here');
+      console.log('ok - no cargo toolchain on PATH, so the dual-stub crate is not checked here');
     } else {
       const checked = spawnSync(cargoBin, ['check', '--manifest-path', join(kernelDir, 'Cargo.toml'), '--message-format=short'], {
         cwd: kernelDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' },
       });
-      assert(checked.status === 0, `R591: the crate compiles after the merged gate handled both kinds (${(checked.stderr || checked.stdout).slice(-400)})`);
+      assert(checked.status === 0, `the crate compiles after the merged gate handled both kinds (${(checked.stderr || checked.stdout).slice(-400)})`);
       appendFileSync(join(kernelDir, 'src', 'kept.rs'), `
 #[cfg(test)]
 mod rosezm_verify {
@@ -15556,23 +15556,23 @@ mod rosezm_verify {
 }
 `);
       const tested = spawnSync(cargoBin, ['test', '--release'], { cwd: kernelDir, encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: 'true' } });
-      assert(tested.status === 0 && tested.stdout.includes('kept_answers ... ok'), `R591: the surviving kernel fn RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
+      assert(tested.status === 0 && tested.stdout.includes('kept_answers ... ok'), `the surviving kernel fn RUNS (${(tested.stderr || tested.stdout).slice(-400)})`);
     }
   }
 
-  // R593: the parse-cache benchmark on the framework's REAL sources — the
+  // the parse-cache benchmark on the framework's REAL sources — the
   // ~50 files / ~4.8MB of dense TypeScript the emitter itself parses on
   // every export. No synthetic corpus can fake their shape. Two passes
   // must show a 100%-hit warm pass that is faster than the cold one.
   {
     const r = benchReal(false);
-    assert(r.ok, `R593: the real-source benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
-    assert(r.files >= 40 && r.totalKb >= 4000, `R593: the corpus is the real workload (${r.files} files, ${r.totalKb}KB)`);
-    assert(r.secondPassMisses === 0 && r.secondPassHits >= r.files * 3, `R593: the warm pass is 100% hits (${r.secondPassHits}/${r.secondPassMisses})`);
-    assert(r.secondPassMs < r.firstPassMs, `R593: the warm pass is faster (${r.secondPassMs}ms vs ${r.firstPassMs}ms)`);
+    assert(r.ok, `the real-source benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
+    assert(r.files >= 40 && r.totalKb >= 4000, `the corpus is the real workload (${r.files} files, ${r.totalKb}KB)`);
+    assert(r.secondPassMisses === 0 && r.secondPassHits >= r.files * 3, `the warm pass is 100% hits (${r.secondPassHits}/${r.secondPassMisses})`);
+    assert(r.secondPassMs < r.firstPassMs, `the warm pass is faster (${r.secondPassMs}ms vs ${r.firstPassMs}ms)`);
   }
 
-  // R594/R595: REAL sources + MIXED changes — the exact pattern of a
+  // the earlier pass: REAL sources + MIXED changes — the exact pattern of a
   // re-export after editing one page. The corpus is the framework's own
   // files, warmed, then 1/5 edited with a REAL semantic edit (a new
   // exported const the transpiler must turn into `pub fn __bench_edit_i`).
@@ -15580,14 +15580,14 @@ mod rosezm_verify {
   // translation is ever served, and the warm pass stays bounded.
   {
     const r = benchReal(true);
-    assert(r.ok, `R594: the real+mixed benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
-    assert(r.files >= 40 && r.mutated >= 8, `R594: the corpus is real (${r.files} files) and ${r.mutated} files were edited`);
-    assert(r.secondPassMisses === r.mutated, `R594: exactly the edited files miss the cache (${r.secondPassMisses}/${r.mutated})`);
-    assert(r.secondPassHits > 0 && r.cacheSize <= 2048, 'R594: unchanged files hit and the cache stays bounded');
-    assert(r.mutated >= 8 && r.staleEdits === 0, `R595: all ${r.mutated} semantic edits produce fresh translations (${r.staleEdits} stale)`);
+    assert(r.ok, `the real+mixed benchmark completes (${JSON.stringify(r).slice(0, 300)})`);
+    assert(r.files >= 40 && r.mutated >= 8, `the corpus is real (${r.files} files) and ${r.mutated} files were edited`);
+    assert(r.secondPassMisses === r.mutated, `exactly the edited files miss the cache (${r.secondPassMisses}/${r.mutated})`);
+    assert(r.secondPassHits > 0 && r.cacheSize <= 2048, 'unchanged files hit and the cache stays bounded');
+    assert(r.mutated >= 8 && r.staleEdits === 0, `all ${r.mutated} semantic edits produce fresh translations (${r.staleEdits} stale)`);
   }
 
-  // R596: four REAL TS edit kinds against the rust-ts transpiler, each
+  // four REAL TS edit kinds against the rust-ts transpiler, each
   // with its own honest expectation:
   //   method-body change  -> Rust CHANGES (js_add appears)
   //   type widen          -> Rust IDENTICAL (the dynamic domain erases types)
@@ -15597,26 +15597,26 @@ mod rosezm_verify {
   // hit would break the last.
   {
     const r = benchEditKinds();
-    assert(r.kinds.length === 6, 'R596: all six edit kinds are probed');
+    assert(r.kinds.length === 6, 'all six edit kinds are probed');
     const byKind = (k: string) => r.kinds.find((x: { kind: string }) => x.kind === k);
-    assert(byKind('method-body')!.changed && byKind('method-body')!.hasNew, 'R596: a method-body edit changes the Rust');
-    assert(!byKind('type-widen')!.changed, 'R596: a type widen is erased by the dynamic domain (Rust identical)');
-    assert(byKind('rename-export')!.changed && byKind('rename-export')!.hasNew && byKind('rename-export')!.dropped, 'R596: a rename swaps the fn names');
-    assert(byKind('delete-stmt')!.changed && byKind('delete-stmt')!.dropped, 'R596: a statement deletion removes the return');
-    assert(byKind('opt-chain-assign')!.changed && byKind('opt-chain-assign')!.hasNew, 'R596: an optional-chain assignment reaches set_prop');
-    assert(!byKind('decorator-removal')!.changed && !byKind('decorator-removal')!.hasNew, 'R596: decorator removal is erased (Rust identical)');
+    assert(byKind('method-body')!.changed && byKind('method-body')!.hasNew, 'a method-body edit changes the Rust');
+    assert(!byKind('type-widen')!.changed, 'a type widen is erased by the dynamic domain (Rust identical)');
+    assert(byKind('rename-export')!.changed && byKind('rename-export')!.hasNew && byKind('rename-export')!.dropped, 'a rename swaps the fn names');
+    assert(byKind('delete-stmt')!.changed && byKind('delete-stmt')!.dropped, 'a statement deletion removes the return');
+    assert(byKind('opt-chain-assign')!.changed && byKind('opt-chain-assign')!.hasNew, 'an optional-chain assignment reaches set_prop');
+    assert(!byKind('decorator-removal')!.changed && !byKind('decorator-removal')!.hasNew, 'decorator removal is erased (Rust identical)');
   }
 
-  // R597: a decorator that STAYS is erased honestly — the Rust output is
+  // a decorator that STAYS is erased honestly — the Rust output is
   // byte-identical with and without the decorator, the class itself still
   // translates to its struct + impl, and the decorator call never appears.
   {
     const r = benchDecoratorKeep();
-    assert(r.identical, 'R597: a kept decorator is erased (Rust output identical with and without it)');
-    assert(r.structEmitted && r.implEmitted, 'R597: the decorated class still emits its struct and impl');
+    assert(r.identical, 'a kept decorator is erased (Rust output identical with and without it)');
+    assert(r.structEmitted && r.implEmitted, 'the decorated class still emits its struct and impl');
   }
 
-  // R598: the compile gate's memo. The gate is the export's dominant cost
+  // the compile gate's memo. The gate is the export's dominant cost
   // (cargo re-checks ~50 modules ≈ 2s) and emitKernel rewrites every .rs
   // each export, so cargo re-derives "unchanged" from scratch every time.
   // The gate now records, per crate, the EMITTED bytes it approved plus
@@ -15640,22 +15640,22 @@ mod rosezm_verify {
     };
     await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
     const first = readRec();
-    assert(first !== null && first.checks >= 1, 'R598: the first export runs the gate and records it');
-    assert(first.files >= 2, 'R598: the record captures the crate as approved (Cargo.toml + sources)');
+    assert(first !== null && first.checks >= 1, 'the first export runs the gate and records it');
+    assert(first.files >= 2, 'the record captures the crate as approved (Cargo.toml + sources)');
     const greetRs1 = readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8');
     // An unchanged re-export: the memo answers, cargo does not run.
     await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
     const second = readRec();
-    assert(second !== null && second.checks === first.checks, `R598: an unchanged re-export skips the cargo checks (${first.checks} -> ${second?.checks})`);
-    assert(readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8') === greetRs1, 'R598: the re-export restores the approved bytes verbatim');
+    assert(second !== null && second.checks === first.checks, `an unchanged re-export skips the cargo checks (${first.checks} -> ${second?.checks})`);
+    assert(readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8') === greetRs1, 'the re-export restores the approved bytes verbatim');
     // A real source edit: the memo's fingerprint no longer matches the new
     // emission, the gate runs again, and the record moves to the new bytes.
     writeFileSync(join(proj, 'src/lib/greet.ts'), 'export function greet(n: string): string { return "hello " + n; }\n');
     await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
     const third = readRec();
-    assert(third !== null && third.fingerprint !== first.fingerprint, 'R598: a source edit invalidates the memo (new emission, new fingerprint)');
-    assert(third.checks >= 1, `R598: the gate re-ran after the edit (${third?.checks} checks)`);
-    assert(readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8').includes('hello'), 'R598: the edited module reaches the Rust output');
+    assert(third !== null && third.fingerprint !== first.fingerprint, 'a source edit invalidates the memo (new emission, new fingerprint)');
+    assert(third.checks >= 1, `the gate re-ran after the edit (${third?.checks} checks)`);
+    assert(readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8').includes('hello'), 'the edited module reaches the Rust output');
     // A forged memo must not put unapproved bytes into the shipped crate.
     // Two forgery shapes: a wrong FINGERPRINT (the cold-path srcFp still
     // matches, and the restored bytes are the filesFp-verified approved
@@ -15669,16 +15669,16 @@ mod rosezm_verify {
     writeFileSync(recPath, JSON.stringify(forged), 'utf8');
     await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
     let greetRs = readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8');
-    assert(greetRs.includes('hello') && greetRs.includes('pub fn __kernel_call('), 'R598: a forged fingerprint cannot put unapproved bytes into the crate');
+    assert(greetRs.includes('hello') && greetRs.includes('pub fn __kernel_call('), 'a forged fingerprint cannot put unapproved bytes into the crate');
     const forgedSrc = JSON.parse(readFileSync(recPath, 'utf8'));
     forgedSrc.srcFp = '0'.repeat(64);
     writeFileSync(recPath, JSON.stringify(forgedSrc), 'utf8');
     await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
     greetRs = readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8');
-    assert(greetRs.includes('hello') && greetRs.includes('pub fn __kernel_call('), 'R598: a forged srcFp cannot put unapproved bytes into the crate');
+    assert(greetRs.includes('hello') && greetRs.includes('pub fn __kernel_call('), 'a forged srcFp cannot put unapproved bytes into the crate');
   }
 
-  // R599: the shared-kernel injection path carries the same memo. A
+  // the shared-kernel injection path carries the same memo. A
   // rust-web export with --kernel injects its api routes INTO the shared
   // crate and runs the gate there; the injection is deterministic and the
   // shared crate is not re-emitted between exports, so an unchanged
@@ -15691,7 +15691,7 @@ mod rosezm_verify {
     await exportProject('rust-core', coreProj, { outRoot: coreOut, warnings: [] });
     const kernelPath = join(coreOut, 'rust-core');
     const recPath = join(kernelPath, 'target', '.rosezm-gate.json');
-    assert(existsSync(recPath), 'R599: the shared crate records its own green check');
+    assert(existsSync(recPath), 'the shared crate records its own green check');
 
     const webProj = join(scratch, 'inject-web-proj');
     mkdirSync(join(webProj, 'src/pages/api'), { recursive: true });
@@ -15700,15 +15700,15 @@ mod rosezm_verify {
     const webOut = join(scratch, 'inject-web-out');
     await exportProject('rust-web', webProj, { outRoot: webOut, warnings: [], kernelPath });
     const afterInject = JSON.parse(readFileSync(recPath, 'utf8'));
-    assert(existsSync(join(kernelPath, 'src', 'api__ping.rs')), 'R599: the api route module is injected into the shared crate');
-    assert(readFileSync(join(kernelPath, 'src', 'lib.rs'), 'utf8').includes('/// The api dispatch table (rosezm rust-web):'), 'R599: lib.rs carries the injected dispatch table');
-    assert(afterInject.green === true && afterInject.checks >= 1, 'R599: the injection gate records its green check');
+    assert(existsSync(join(kernelPath, 'src', 'api__ping.rs')), 'the api route module is injected into the shared crate');
+    assert(readFileSync(join(kernelPath, 'src', 'lib.rs'), 'utf8').includes('/// The api dispatch table (rosezm rust-web):'), 'lib.rs carries the injected dispatch table');
+    assert(afterInject.green === true && afterInject.checks >= 1, 'the injection gate records its green check');
     await exportProject('rust-web', webProj, { outRoot: webOut, warnings: [], kernelPath });
     const afterReexport = JSON.parse(readFileSync(recPath, 'utf8'));
-    assert(afterReexport.checks === afterInject.checks, `R599: an unchanged re-export skips the injection cargo loop (${afterInject.checks} -> ${afterReexport.checks})`);
+    assert(afterReexport.checks === afterInject.checks, `an unchanged re-export skips the injection cargo loop (${afterInject.checks} -> ${afterReexport.checks})`);
   }
 
-  // R600: the COLD-PROCESS fast path. A CLI export is a fresh process —
+  // the COLD-PROCESS fast path. A CLI export is a fresh process —
   // its parse cache is empty and re-translating every kernel module costs
   // ~1s before the gates. The record's srcFp (framework emitter files +
   // the project's kernel TS sources) lets the second export skip the
@@ -15730,16 +15730,16 @@ console.log('MEMO:' + (r.warnings ?? []).some((x) => x.includes('restored from t
 `);
     const run = (): string => {
       const r = spawnSync(join(process.cwd(), 'node_modules', '.bin', 'tsx'), [runner, proj, out], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-      assert(r.status === 0, `R600: the cold export completes (${(r.stderr || r.stdout).slice(-300)})`);
+      assert(r.status === 0, `the cold export completes (${(r.stderr || r.stdout).slice(-300)})`);
       return (r.stdout ?? '').split('\n').filter((l) => l.startsWith('MEMO:')).pop() ?? '';
     };
-    assert(run() === 'MEMO:false', 'R600: the first cold export translates and gates (no memo notice)');
-    assert(run() === 'MEMO:true', 'R600: the second cold process restores the crate from the memo');
+    assert(run() === 'MEMO:false', 'the first cold export translates and gates (no memo notice)');
+    assert(run() === 'MEMO:true', 'the second cold process restores the crate from the memo');
     const greetRs = readFileSync(join(out, 'rust-native', 'kernel', 'src', 'greet.rs'), 'utf8');
-    assert(greetRs.includes('cold') && greetRs.includes('pub fn __kernel_call('), 'R600: the restored crate carries the translated module');
+    assert(greetRs.includes('cold') && greetRs.includes('pub fn __kernel_call('), 'the restored crate carries the translated module');
   }
 
-  // R601: the Node process object translates for real. A health-check
+  // the Node process object translates for real. A health-check
   // handler (`return { ok: true, uptime: Math.round(process.uptime()) }` —
   // the api template's own code) used to stub the whole fn __unsupported,
   // and `const c = process.cwd()` used to degrade to a silent Null with no
@@ -15763,13 +15763,13 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R601: the process probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the process probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(!out.health.includes('__unsupported') && out.health.includes('rustz::process_uptime()') && out.health.includes('rustz::round_v'), 'R601: the api template health handler translates to a real uptime call');
-    assert(out.pid.includes('rustz::process_pid()'), 'R601: process.pid() reaches the runtime helper');
-    assert(out.cwd.includes('rustz::process_cwd()'), 'R601: process.cwd() reaches the runtime helper (no silent Null)');
-    assert(out.exit.includes('rustz::process_exit(1)'), 'R601: process.exit(1) reaches the runtime helper');
-    assert(out.unknown.includes('__unsupported'), 'R601: an unknown process member still fails honestly');
+    assert(!out.health.includes('__unsupported') && out.health.includes('rustz::process_uptime()') && out.health.includes('rustz::round_v'), 'the api template health handler translates to a real uptime call');
+    assert(out.pid.includes('rustz::process_pid()'), 'process.pid() reaches the runtime helper');
+    assert(out.cwd.includes('rustz::process_cwd()'), 'process.cwd() reaches the runtime helper (no silent Null)');
+    assert(out.exit.includes('rustz::process_exit(1)'), 'process.exit(1) reaches the runtime helper');
+    assert(out.unknown.includes('__unsupported'), 'an unknown process member still fails honestly');
     // End to end: the api template's own health route exports without a
     // translation warning any more.
     const apiProj = join(scratch, 'api-health-proj');
@@ -15777,10 +15777,10 @@ console.log(JSON.stringify(out));
     const apiOut = join(scratch, 'api-health-out');
     const w: string[] = [];
     await exportProject('rust-core', apiProj, { outRoot: apiOut, warnings: w });
-    assert(!w.some((x) => x.includes('health.rose') && x.includes('did not translate')), `R601: the api template's health route exports clean (${w.filter((x) => x.includes('health')).length} health warnings)`);
+    assert(!w.some((x) => x.includes('health.rose') && x.includes('did not translate')), `the api template's health route exports clean (${w.filter((x) => x.includes('health')).length} health warnings)`);
   }
 
-  // R603: the batch's SHARED cargo target dir. `export all` sets
+  // the batch's SHARED cargo target dir. `export all` sets
   // ROSEZM_KERNEL_TARGET_DIR so the four kernel targets compile the
   // serde/serde_json/regex dependency tree ONCE instead of once per target,
   // and each crate's gate memo lives beside it (keyed by the crate's real
@@ -15799,27 +15799,27 @@ console.log(JSON.stringify(out));
       await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
       await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
       const recs = readdirSync(shared).filter((f) => f.startsWith('.rosezm-gate-'));
-      assert(recs.length === 2, `R603: one gate record per kernel crate beside the shared target dir (${recs.length})`);
-      assert(!existsSync(join(out, 'rust-core', 'target')) && !existsSync(join(out, 'rust-native', 'kernel', 'target')), 'R603: the crates use the shared dir, no per-target cargo cache remains');
+      assert(recs.length === 2, `one gate record per kernel crate beside the shared target dir (${recs.length})`);
+      assert(!existsSync(join(out, 'rust-core', 'target')) && !existsSync(join(out, 'rust-native', 'kernel', 'target')), 'the crates use the shared dir, no per-target cargo cache remains');
       for (const rec of recs) {
         const r = JSON.parse(readFileSync(join(shared, rec), 'utf8'));
-        assert(r.green === true && r.checks >= 1, `R603: ${rec.slice(14, 30)} records a green check`);
+        assert(r.green === true && r.checks >= 1, `${rec.slice(14, 30)} records a green check`);
       }
       // Re-export both: the memo answers under the shared layout too.
       await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
       await exportProject('rust-native', proj, { outRoot: out, warnings: [] });
       const checks = recs.map((rec) => JSON.parse(readFileSync(join(shared, rec), 'utf8')).checks);
-      assert(checks.every((c: number) => c >= 1), `R603: the memo hits across re-exports (checks ${checks.join(',')})`);
+      assert(checks.every((c: number) => c >= 1), `the memo hits across re-exports (checks ${checks.join(',')})`);
       // The CLI batch wires the shared dir itself and keeps it out of git.
       const cliSrc = readFileSync(join(process.cwd(), 'src', 'cli', 'index.ts'), 'utf8');
-      assert(cliSrc.includes('process.env.ROSEZM_KERNEL_TARGET_DIR = path.join(manifestRoot'), 'R603: export all points the kernel targets at the shared dir');
-      assert(cliSrc.includes("'.rosezm-kernel-target/'"), 'R603: the shared cargo cache is git-ignored');
+      assert(cliSrc.includes('process.env.ROSEZM_KERNEL_TARGET_DIR = path.join(manifestRoot'), 'export all points the kernel targets at the shared dir');
+      assert(cliSrc.includes("'.rosezm-kernel-target/'"), 'the shared cargo cache is git-ignored');
     } finally {
       delete process.env.ROSEZM_KERNEL_TARGET_DIR;
     }
   }
 
-  // R604: the TRANSLATION memo. A kernel batch re-translates the same
+  // the TRANSLATION memo. A kernel batch re-translates the same
   // modules once per kernel target; transpileModule is a pure function of
   // (asyncMode, arities, fileName, source), so the finished result is
   // memoized and repeats become map hits. Warnings ride the memo (a hit
@@ -15854,15 +15854,15 @@ transpileModule({ source: 'export function h(x: number): number { return otherFn
 const arityKeyed = transpileMemoStats().hits === before;
 console.log(JSON.stringify({ same, warnReplay, editedFresh, arityKeyed, stats: transpileMemoStats() }));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R604: the memo probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the memo probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(out.same === true, 'R604: a repeat translation returns the identical result');
-    assert(out.warnReplay === true, 'R604: a cache hit replays the first translation warnings verbatim');
-    assert(out.editedFresh === true, 'R604: an edited source misses the memo and translates fresh');
-    assert(out.arityKeyed === true, 'R604: different external arities are different memo keys');
+    assert(out.same === true, 'a repeat translation returns the identical result');
+    assert(out.warnReplay === true, 'a cache hit replays the first translation warnings verbatim');
+    assert(out.editedFresh === true, 'an edited source misses the memo and translates fresh');
+    assert(out.arityKeyed === true, 'different external arities are different memo keys');
   }
 
-  // R613: the per-target rosezm-export.json carries the gate count too —
+  // the per-target rosezm-export.json carries the gate count too —
   // the machine-readable manifest says what the console line says.
   {
     const proj = join(scratch, 'json-gate-proj');
@@ -15871,13 +15871,13 @@ console.log(JSON.stringify({ same, warnReplay, editedFresh, arityKeyed, stats: t
     const out = join(scratch, 'json-gate-out');
     await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
     const j1 = JSON.parse(readFileSync(join(out, 'rust-core', 'rosezm-export.json'), 'utf8'));
-    assert(j1.kernelChecks !== undefined && j1.kernelChecks >= 1, `R613: the manifest records the gate's cargo checks (${j1.kernelChecks})`);
+    assert(j1.kernelChecks !== undefined && j1.kernelChecks >= 1, `the manifest records the gate's cargo checks (${j1.kernelChecks})`);
     await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
     const j2 = JSON.parse(readFileSync(join(out, 'rust-core', 'rosezm-export.json'), 'utf8'));
-    assert(j2.kernelChecks === 0, `R613: a memo-answered re-export records 0 (${j2.kernelChecks})`);
+    assert(j2.kernelChecks === 0, `a memo-answered re-export records 0 (${j2.kernelChecks})`);
   }
 
-  // R614: kernel_call normalizes BOTH halves of a camelCase method. The
+  // kernel_call normalizes BOTH halves of a camelCase method. The
   // original retry only snake-cased the func, so "blockEdit.moveBlock"
   // still hit `unknown module: blockEdit`. A real exported crate must
   // compile and answer the camelCase call with the module's real result.
@@ -15893,8 +15893,8 @@ console.log(JSON.stringify({ same, warnReplay, editedFresh, arityKeyed, stats: t
     await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
     const crate = join(out, 'rust-core');
     const lib = readFileSync(join(crate, 'src', 'lib.rs'), 'utf8');
-    assert(lib.includes('let m = camel_to_snake(module);') && lib.includes('dispatch(&m, &f)'), 'R614: the dispatch retries with BOTH halves normalized');
-    assert(lib.includes('"move_block" => move_block::__kernel_call'), 'R614: the hyphenated module is registered snake_case');
+    assert(lib.includes('let m = camel_to_snake(module);') && lib.includes('dispatch(&m, &f)'), 'the dispatch retries with BOTH halves normalized');
+    assert(lib.includes('"move_block" => move_block::__kernel_call'), 'the hyphenated module is registered snake_case');
     // Real cargo proof: a test that calls the camelCase method compiles and
     // gets the module's real answer (not an unknown-module error).
     const testDir = join(crate, 'tests');
@@ -15910,10 +15910,10 @@ fn camel_module_call() {
     const cargo = spawnSync(process.env.CARGO || join(process.env.HOME ?? '', '.cargo/bin/cargo'), ['test', '--manifest-path', join(crate, 'Cargo.toml'), '--test', 'camel', '--', '--nocapture'], {
       encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: process.env.CARGO_NET_OFFLINE ?? 'true' },
     });
-    assert(cargo.status === 0, `R614: the camelCase call reaches the real module (${(cargo.stderr || cargo.stdout).slice(-400)})`);
+    assert(cargo.status === 0, `the camelCase call reaches the real module (${(cargo.stderr || cargo.stdout).slice(-400)})`);
   }
 
-  // R615: two real gaps
+  // two real gaps
   // remained: the JS comma sequence (`a, b`) had NO translation, and ++/--
   // worked only as STATEMENTS — `return x++` / `(x++, y)` stubbed the whole
   // fn. Both now translate with JS value semantics (postfix = old value,
@@ -15939,14 +15939,14 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R615: the comma/unary probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the comma/unary probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(out.comma.includes('let _ =') && !out.comma.includes('__unsupported'), 'R615: a comma sequence evaluates the left side and returns the right');
-    assert(out.commaChain.includes('js_add') && !out.commaChain.includes('__unsupported'), 'R615: chained commas with increments translate (historical P1 syntax)');
-    assert(out.postfix.includes('__inc_old') && !out.postfix.includes('__unsupported'), 'R615: postfix ++ as an expression returns the old value');
-    assert(out.prefix.includes('x.clone()') && !out.prefix.includes('__unsupported'), 'R615: prefix ++ as an expression returns the new value');
-    assert(out.propInc.includes('__unsupported'), 'R615: a property place stays an honest refusal (no silent Null)');
-    assert(out.negate.includes('neg_v'), 'R615: unary negation is unaffected by the new prefix branch');
+    assert(out.comma.includes('let _ =') && !out.comma.includes('__unsupported'), 'a comma sequence evaluates the left side and returns the right');
+    assert(out.commaChain.includes('js_add') && !out.commaChain.includes('__unsupported'), 'chained commas with increments translate (historical P1 syntax)');
+    assert(out.postfix.includes('__inc_old') && !out.postfix.includes('__unsupported'), 'postfix ++ as an expression returns the old value');
+    assert(out.prefix.includes('x.clone()') && !out.prefix.includes('__unsupported'), 'prefix ++ as an expression returns the new value');
+    assert(out.propInc.includes('__unsupported'), 'a property place stays an honest refusal (no silent Null)');
+    assert(out.negate.includes('neg_v'), 'unary negation is unaffected by the new prefix branch');
     // End to end: real Rust execution — postfix returns 5, prefix returns 7.
     const proj = join(scratch, 'comma-proj');
     mkdirSync(join(proj, 'src/pages'), { recursive: true });
@@ -15957,7 +15957,7 @@ console.log(JSON.stringify(out));
     await exportProject('rust-core', proj, { outRoot: outDir, warnings: [] });
     const crate = join(outDir, 'rust-core');
     const inc = readFileSync(join(crate, 'src', 'inc.rs'), 'utf8');
-    assert(inc.includes('__inc_old'), 'R615: the exported module carries the postfix value form');
+    assert(inc.includes('__inc_old'), 'the exported module carries the postfix value form');
     const testDir = join(crate, 'tests');
     mkdirSync(testDir, { recursive: true });
     writeFileSync(join(testDir, 'inc.rs'), `#![allow(unused)]
@@ -15970,11 +15970,11 @@ fn inc_values() {
     const cargo = spawnSync(process.env.CARGO || join(process.env.HOME ?? '', '.cargo/bin/cargo'), ['test', '--manifest-path', join(crate, 'Cargo.toml'), '--test', 'inc'], {
       encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: process.env.CARGO_NET_OFFLINE ?? 'true' },
     });
-    assert(cargo.status === 0, `R615: the real Rust module returns the JS values (${(cargo.stderr || cargo.stdout).slice(-400)})`);
+    assert(cargo.status === 0, `the real Rust module returns the JS values (${(cargo.stderr || cargo.stdout).slice(-400)})`);
   }
 
-  // R616: consumer-owned cargo integration tests must never enter the gate
-  // memo. The R614/R615 checks write tests/*.rs into the exported crate
+  // consumer-owned cargo integration tests must never enter the gate
+  // memo. The change checks write tests/*.rs into the exported crate
   // AFTER the export; if the memo's fingerprint/files set included them,
   // a later re-export would "restore" test code INTO the shipped product.
   {
@@ -15992,14 +15992,14 @@ fn inc_values() {
     await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
     const recPath = join(crate, 'target', '.rosezm-gate.json');
     const rec = JSON.parse(readFileSync(recPath, 'utf8'));
-    assert(!Object.keys(rec.files).some((k) => k.startsWith('tests/')), 'R616: the memo file set excludes consumer tests');
+    assert(!Object.keys(rec.files).some((k) => k.startsWith('tests/')), 'the memo file set excludes consumer tests');
     const fp = rec.fingerprint;
     await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
     const rec2 = JSON.parse(readFileSync(recPath, 'utf8'));
-    assert(rec2.fingerprint === fp && !Object.keys(rec2.files).some((k) => k.startsWith('tests/')), 'R616: a memo hit cannot resurrect test code into the product');
+    assert(rec2.fingerprint === fp && !Object.keys(rec2.files).some((k) => k.startsWith('tests/')), 'a memo hit cannot resurrect test code into the product');
   }
 
-  // R618: the process surface gaps —
+  // the process surface gaps —
   // stdout.write was fixed in r597; argv was already honest; hrtime still
   // stubbed the whole handler. Both hrtime spellings now reach real runtime
   // helpers. Also: DesktopWindow.titleBarStyle was USED by the desktop
@@ -16022,12 +16022,12 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R618: the hrtime probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the hrtime probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(out.tuple.includes('rustz::process_hrtime()') && !out.tuple.includes('__unsupported'), 'R618: process.hrtime() reaches the runtime tuple helper');
-    assert(out.ns.includes('rustz::process_hrtime_ns()') && !out.ns.includes('__unsupported'), 'R618: process.hrtime.bigint() reaches the nanosecond helper (f64 in the dynamic domain)');
-    assert(!out.args.includes('__unsupported'), 'R618: an hrtime arg reaches the elapsed-time form (r620)');
-    assert(!out.argv.includes('__unsupported'), 'R618: process.argv keeps its honest JSON lookup');
+    assert(out.tuple.includes('rustz::process_hrtime()') && !out.tuple.includes('__unsupported'), 'process.hrtime() reaches the runtime tuple helper');
+    assert(out.ns.includes('rustz::process_hrtime_ns()') && !out.ns.includes('__unsupported'), 'process.hrtime.bigint() reaches the nanosecond helper (f64 in the dynamic domain)');
+    assert(!out.args.includes('__unsupported'), 'an hrtime arg reaches the elapsed-time form (r620)');
+    assert(!out.argv.includes('__unsupported'), 'process.argv keeps its honest JSON lookup');
     // End to end: real Rust execution — tuple[1] is the nanos, and the
     // nanosecond form is a positive number.
     const proj = join(scratch, 'hrtime-proj');
@@ -16039,7 +16039,7 @@ console.log(JSON.stringify(out));
     await exportProject('rust-core', proj, { outRoot: outDir, warnings: [] });
     const crate = join(outDir, 'rust-core');
     const clock = readFileSync(join(crate, 'src', 'clock.rs'), 'utf8');
-    assert(clock.includes('process_hrtime()') && clock.includes('process_hrtime_ns()'), 'R618: the exported module carries both hrtime forms');
+    assert(clock.includes('process_hrtime()') && clock.includes('process_hrtime_ns()'), 'the exported module carries both hrtime forms');
     const testDir = join(crate, 'tests');
     mkdirSync(testDir, { recursive: true });
     writeFileSync(join(testDir, 'clock.rs'), `#![allow(unused)]
@@ -16054,12 +16054,12 @@ fn hrtime_works() {
     const cargo = spawnSync(process.env.CARGO || join(process.env.HOME ?? '', '.cargo/bin/cargo'), ['test', '--manifest-path', join(crate, 'Cargo.toml'), '--test', 'clock'], {
       encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: process.env.CARGO_NET_OFFLINE ?? 'true' },
     });
-    assert(cargo.status === 0, `R618: the real Rust hrtime helpers run (${(cargo.stderr || cargo.stdout).slice(-400)})`);
+    assert(cargo.status === 0, `the real Rust hrtime helpers run (${(cargo.stderr || cargo.stdout).slice(-400)})`);
     const identity = readFileSync(join(process.cwd(), 'src', 'export', 'app-identity.ts'), 'utf8');
-    assert(/interface DesktopWindow \{[\s\S]{0,400}?titleBarStyle\?: string;/.test(identity), 'R618: DesktopWindow declares the titleBarStyle the emitter uses');
+    assert(/interface DesktopWindow \{[\s\S]{0,400}?titleBarStyle\?: string;/.test(identity), 'DesktopWindow declares the titleBarStyle the emitter uses');
   }
 
-  // R620: process.hrtime(start) — the elapsed-time form. A start tuple
+  // process.hrtime(start) — the elapsed-time form. A start tuple
   // taken NOW, measured against LATER, yields a positive [s, ns] tuple
   // whose total is <= the wall time between the two calls. Real Rust run.
   {
@@ -16072,7 +16072,7 @@ fn hrtime_works() {
     await exportProject('rust-core', proj, { outRoot: outDir, warnings: [] });
     const crate = join(outDir, 'rust-core');
     const sw = readFileSync(join(crate, 'src', 'stopwatch.rs'), 'utf8');
-    assert(sw.includes('process_hrtime_diff'), 'R620: the exported module carries the elapsed-time form');
+    assert(sw.includes('process_hrtime_diff'), 'the exported module carries the elapsed-time form');
     const testDir = join(crate, 'tests');
     mkdirSync(testDir, { recursive: true });
     writeFileSync(join(testDir, 'stopwatch.rs'), `#![allow(unused)]
@@ -16104,10 +16104,10 @@ pub fn __kernel_methods() -> Vec<String> { vec![] }
     const cargo = spawnSync(process.env.CARGO || join(process.env.HOME ?? '', '.cargo/bin/cargo'), ['test', '--manifest-path', join(crate, 'Cargo.toml'), '--test', 'stopwatch'], {
       encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: process.env.CARGO_NET_OFFLINE ?? 'true' },
     });
-    assert(cargo.status === 0, `R620: the real Rust elapsed-time form runs (${(cargo.stderr || cargo.stdout).slice(-400)})`);
+    assert(cargo.status === 0, `the real Rust elapsed-time form runs (${(cargo.stderr || cargo.stdout).slice(-400)})`);
   }
 
-  // R621: the remaining console face. `table`, `trace`, `assert`, `count`,
+  // the remaining console face. `table`, `trace`, `assert`, `count`,
   // `countReset`, `time`, `timeEnd` all used to stub the WHOLE handler
   // (only log/info/debug/warn/error reached the stderr sink). Now each has
   // a real runtime helper with process-local counters/timers; `timeLog`
@@ -16131,14 +16131,14 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R621: the console probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the console probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(out.table.includes('rustz::console_table(') && !out.table.includes('__unsupported'), 'R621: console.table reaches the text-table helper');
-    assert(out.trace.includes('rustz::console_log(') && !out.trace.includes('__unsupported'), 'R621: console.trace reaches the log sink');
-    assert(out.assert.includes('rustz::console_assert(') && !out.assert.includes('__unsupported'), 'R621: console.assert reaches the assertion helper');
-    assert(out.count.includes('rustz::console_count(') && out.count.includes('rustz::console_count_reset('), 'R621: console.count / countReset share the counter table');
-    assert(out.time.includes('rustz::console_time(') && out.time.includes('rustz::console_time_end('), 'R621: console.time / timeEnd share the timer table');
-    assert(out.timeLog.includes('__unsupported'), 'R621: console.timeLog stays an honest refusal (it must not clear the timer)');
+    assert(out.table.includes('rustz::console_table(') && !out.table.includes('__unsupported'), 'console.table reaches the text-table helper');
+    assert(out.trace.includes('rustz::console_log(') && !out.trace.includes('__unsupported'), 'console.trace reaches the log sink');
+    assert(out.assert.includes('rustz::console_assert(') && !out.assert.includes('__unsupported'), 'console.assert reaches the assertion helper');
+    assert(out.count.includes('rustz::console_count(') && out.count.includes('rustz::console_count_reset('), 'console.count / countReset share the counter table');
+    assert(out.time.includes('rustz::console_time(') && out.time.includes('rustz::console_time_end('), 'console.time / timeEnd share the timer table');
+    assert(out.timeLog.includes('__unsupported'), 'console.timeLog stays an honest refusal (it must not clear the timer)');
     // End to end: a real exported crate calls all helpers and compiles.
     const proj = join(scratch, 'console-face-proj');
     mkdirSync(join(proj, 'src/pages'), { recursive: true });
@@ -16158,7 +16158,7 @@ console.log(JSON.stringify(out));
     await exportProject('rust-core', proj, { outRoot: outDir, warnings: [] });
     const crate = join(outDir, 'rust-core');
     const auditRs = readFileSync(join(crate, 'src', 'audit.rs'), 'utf8');
-    assert(auditRs.includes('console_table(') && auditRs.includes('console_assert(') && auditRs.includes('console_time_end('), 'R621: the exported module calls all the new console helpers');
+    assert(auditRs.includes('console_table(') && auditRs.includes('console_assert(') && auditRs.includes('console_time_end('), 'the exported module calls all the new console helpers');
     const testDir = join(crate, 'tests');
     mkdirSync(testDir, { recursive: true });
     writeFileSync(join(testDir, 'face.rs'), `#![allow(unused)]
@@ -16171,10 +16171,10 @@ fn console_face_runs() {
     const cargo = spawnSync(process.env.CARGO || join(process.env.HOME ?? '', '.cargo/bin/cargo'), ['test', '--manifest-path', join(crate, 'Cargo.toml'), '--test', 'face'], {
       encoding: 'utf8', timeout: 600_000, env: { ...process.env, CARGO_NET_OFFLINE: process.env.CARGO_NET_OFFLINE ?? 'true' },
     });
-    assert(cargo.status === 0, `R621: the console helpers compile and run in the real crate (${(cargo.stderr || cargo.stdout).slice(-400)})`);
+    assert(cargo.status === 0, `the console helpers compile and run in the real crate (${(cargo.stderr || cargo.stdout).slice(-400)})`);
   }
 
-  // R622: the WebView shells' error collector:
+  // the WebView shells' error collector:
   // A WebView app has no server log: an uncaught
   // exception used to be visible only with a debugger attached. The
   // collector ships with EVERY WebView shell (capacitor / cordova /
@@ -16192,23 +16192,23 @@ fn console_face_runs() {
       const r = await exportProject(target, proj, { outRoot: out, warnings: [] });
       const www = join(r.outDir, 'www');
       const collector = join(www, 'rosezm-errors.js');
-      assert(existsSync(collector), `R622: ${target} ships the error collector`);
+      assert(existsSync(collector), `${target} ships the error collector`);
       const html = readFileSync(join(www, 'index.html'), 'utf8');
-      assert(html.includes('rosezm-errors.js'), `R622: ${target} tags every document with the collector`);
+      assert(html.includes('rosezm-errors.js'), `${target} tags every document with the collector`);
       const js = readFileSync(collector, 'utf8');
-      assert(js.includes("addEventListener('error'"), `R622: ${target} captures uncaught exceptions`);
-      assert(js.includes("addEventListener('unhandledrejection'"), `R622: ${target} captures unhandled rejections`);
-      assert(js.includes("record('resource'"), `R622: ${target} captures failed resource loads`);
-      assert(js.includes('rosezm-errors.log') && js.includes('Filesystem'), `R622: ${target} writes the app log file through the Filesystem plugin`);
-      assert(js.includes('console.error'), `R622: ${target} mirrors every line to the console (the fallback without the plugin)`);
-      assert(js.includes('MAX_LINES = 500'), `R622: ${target} bounds the log file`);
+      assert(js.includes("addEventListener('error'"), `${target} captures uncaught exceptions`);
+      assert(js.includes("addEventListener('unhandledrejection'"), `${target} captures unhandled rejections`);
+      assert(js.includes("record('resource'"), `${target} captures failed resource loads`);
+      assert(js.includes('rosezm-errors.log') && js.includes('Filesystem'), `${target} writes the app log file through the Filesystem plugin`);
+      assert(js.includes('console.error'), `${target} mirrors every line to the console (the fallback without the plugin)`);
+      assert(js.includes('MAX_LINES = 500'), `${target} bounds the log file`);
     }
     // The Capacitor shell carries the plugin the file write needs.
     const capPkg = JSON.parse(readFileSync(join(scratch, 'error-bridge-capacitor', 'capacitor', 'package.json'), 'utf8'));
-    assert(capPkg.dependencies['@capacitor/filesystem'], 'R622: the capacitor shell depends on the Filesystem plugin');
+    assert(capPkg.dependencies['@capacitor/filesystem'], 'the capacitor shell depends on the Filesystem plugin');
   }
 
-  // R623: the external-link policy of the WebView shells:
+  // the external-link policy of the WebView shells:
   // A WebView has
   // no second window and no browser to hand a url to, so a _blank link
   // used to do NOTHING - the tap died silently. The project now decides:
@@ -16232,9 +16232,9 @@ fn console_face_runs() {
         const out = join(scratch, `link-policy-out-${target}-${declared ?? 'default'}`);
         const r = await exportProject(target, proj, { outRoot: out, warnings: [] });
         const js = readFileSync(join(r.outDir, 'www', 'rosezm-links.js'), 'utf8');
-        assert(js.includes(`var POLICY = '${expected}'`), `R623: ${target} applies the ${expected} policy (declared ${declared ?? 'none'})`);
-        assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-links.js'), `R623: ${target} tags every document with the link policy`);
-        assert(js.includes("'_blank'") && js.includes('openExternal'), `R623: ${target} intercepts _blank links and window.open`);
+        assert(js.includes(`var POLICY = '${expected}'`), `${target} applies the ${expected} policy (declared ${declared ?? 'none'})`);
+        assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-links.js'), `${target} tags every document with the link policy`);
+        assert(js.includes("'_blank'") && js.includes('openExternal'), `${target} intercepts _blank links and window.open`);
       }
     }
     // A typo is refused at build time, not shipped as a dead policy.
@@ -16245,10 +16245,10 @@ fn console_face_runs() {
     } catch (err) {
       refused = String(err).includes('externalLinks');
     }
-    assert(refused, 'R623: an unknown externalLinks value is refused at build time');
+    assert(refused, 'an unknown externalLinks value is refused at build time');
   }
 
-  // R624: the HarmonyOS compatibility gap report:
+  // the HarmonyOS compatibility gap report:
   // The README used
   // to carry only THIS export's warnings - a porting team had no way to
   // see the framework-level ArkUI/web gaps before a page hit them. Every
@@ -16261,29 +16261,29 @@ fn console_face_runs() {
     const out = join(scratch, 'arkts-compat-out');
     const r = await exportProject('arkts', proj, { outRoot: out, warnings: [] });
     const reportPath = join(r.outDir, 'arkts-compat.json');
-    assert(existsSync(reportPath), 'R624: every arkts export ships arkts-compat.json');
+    assert(existsSync(reportPath), 'every arkts export ships arkts-compat.json');
     const report = JSON.parse(readFileSync(reportPath, 'utf8'));
-    assert(report.framework === 'rosezm' && report.target === 'arkts', 'R624: the report identifies the framework and target');
-    assert(Array.isArray(report.gaps) && report.gaps.length >= 10, `R624: the FULL framework-level gap list is shipped (${report.gaps?.length})`);
+    assert(report.framework === 'rosezm' && report.target === 'arkts', 'the report identifies the framework and target');
+    assert(Array.isArray(report.gaps) && report.gaps.length >= 10, `the FULL framework-level gap list is shipped (${report.gaps?.length})`);
     for (const g of report.gaps) {
-      assert(typeof g.id === 'string' && typeof g.capability === 'string' && typeof g.source === 'string', 'R624: every gap names the emitter branch that owns it');
-      assert(['dropped', 'placeholder', 'degraded', 'refused'].includes(g.behavior), 'R624: every gap has a declared behavior');
+      assert(typeof g.id === 'string' && typeof g.capability === 'string' && typeof g.source === 'string', 'every gap names the emitter branch that owns it');
+      assert(['dropped', 'placeholder', 'degraded', 'refused'].includes(g.behavior), 'every gap has a declared behavior');
     }
-    assert(report.sdkFloor.includes('API 12'), 'R624: the report names the HarmonyOS NEXT SDK floor');
+    assert(report.sdkFloor.includes('API 12'), 'the report names the HarmonyOS NEXT SDK floor');
     const readme = readFileSync(join(r.outDir, 'README.md'), 'utf8');
-    assert(readme.includes('## HarmonyOS compatibility gaps (framework-level)') && readme.includes('| `css-unsupported`'), 'R624: the README carries the human gap table');
-    assert(readme.includes('This export triggered none') || readme.includes('This export triggered:'), 'R624: the README names the triggered subset');
+    assert(readme.includes('## HarmonyOS compatibility gaps (framework-level)') && readme.includes('| `css-unsupported`'), 'the README carries the human gap table');
+    assert(readme.includes('This export triggered none') || readme.includes('This export triggered:'), 'the README names the triggered subset');
     // A project that DOES hit a gap reports it (font-face-missing).
     const trigProj = join(scratch, 'arkts-compat-trig-proj');
     mkdirSync(join(trigProj, 'src/pages'), { recursive: true });
     writeFileSync(join(trigProj, 'src/pages/index.rose'), '<style>.x { font-family: MissingFont; }</style>\n<p class="x">hi</p>\n');
     const trig = await exportProject('arkts', trigProj, { outRoot: join(scratch, 'arkts-compat-trig-out'), warnings: [] });
     const trigReport = JSON.parse(readFileSync(join(trig.outDir, 'arkts-compat.json'), 'utf8'));
-    assert(trigReport.triggered.includes('font-face-missing'), `R624: a real gap hit is reported (${JSON.stringify(trigReport.triggered)})`);
-    assert(trigReport.warnings.some((w: string) => w.includes('has no @font-face')), 'R624: the report keeps the exporter warnings verbatim for the audit trail');
+    assert(trigReport.triggered.includes('font-face-missing'), `a real gap hit is reported (${JSON.stringify(trigReport.triggered)})`);
+    assert(trigReport.warnings.some((w: string) => w.includes('has no @font-face')), 'the report keeps the exporter warnings verbatim for the audit trail');
   }
 
-  // R625: cold-start first-frame instrumentation:
+  // cold-start first-frame instrumentation:
   // The staged site gets an inline collector at the earliest possible point
   // (before any asset); bakeShellDocuments can rewrite html afterwards, so
   // the exporter re-applies it after every emitter finishes. The manifest
@@ -16297,28 +16297,28 @@ fn console_face_runs() {
     const shell = await exportProject('vue', proj, { outRoot: join(scratch, 'perf-bridge-vue'), warnings: [] });
     const shellManifest = JSON.parse(readFileSync(join(shell.outDir, 'rosezm-export.json'), 'utf8'));
     const base = shellManifest.perfBaseline;
-    assert(base && typeof base.budgetMs === 'number' && base.budgetMs > 0, 'R625: the export manifest carries a first-frame budget');
-    assert(base.instrumented === true, 'R625: a staged site reports itself instrumented');
-    assert(base.exposure.includes('__rosezmFirstFrameMs') && base.exposure.includes('rosezm:first-frame'), 'R625: the report says where the runtime number is exposed');
+    assert(base && typeof base.budgetMs === 'number' && base.budgetMs > 0, 'the export manifest carries a first-frame budget');
+    assert(base.instrumented === true, 'a staged site reports itself instrumented');
+    assert(base.exposure.includes('__rosezmFirstFrameMs') && base.exposure.includes('rosezm:first-frame'), 'the report says where the runtime number is exposed');
     const siteIndex = readFileSync(join(shell.outDir, 'public', 'rosezm', 'index.html'), 'utf8');
-    assert(siteIndex.includes('__rosezmPerfStart'), 'R625: the baked site document carries the collector (bake did not wash it out)');
-    assert(siteIndex.indexOf('__rosezmPerfStart') < siteIndex.indexOf('</head>'), 'R625: the collector is in <head>, before any other asset');
-    assert(siteIndex.includes('requestAnimationFrame') && siteIndex.includes('DOMContentLoaded'), 'R625: the metric is navigation start -> first painted frame');
-    assert(siteIndex.includes('CustomEvent("rosezm:first-frame"'), 'R625: the host can listen for the measured number');
-    assert(siteIndex.includes('console.log'), 'R625: the shell logcat sees the number too');
+    assert(siteIndex.includes('__rosezmPerfStart'), 'the baked site document carries the collector (bake did not wash it out)');
+    assert(siteIndex.indexOf('__rosezmPerfStart') < siteIndex.indexOf('</head>'), 'the collector is in <head>, before any other asset');
+    assert(siteIndex.includes('requestAnimationFrame') && siteIndex.includes('DOMContentLoaded'), 'the metric is navigation start -> first painted frame');
+    assert(siteIndex.includes('CustomEvent("rosezm:first-frame"'), 'the host can listen for the measured number');
+    assert(siteIndex.includes('console.log'), 'the shell logcat sees the number too');
     // A kernel-only target has no staged site: honest instrumented:false,
     // never a fake measurement.
     const core = await exportProject('rust-core', proj, { outRoot: join(scratch, 'perf-bridge-core'), warnings: [] });
     const coreManifest = JSON.parse(readFileSync(join(core.outDir, 'rosezm-export.json'), 'utf8'));
-    assert(coreManifest.perfBaseline && coreManifest.perfBaseline.instrumented === false, 'R625: a target with no staged site reports instrumented:false');
-    assert(coreManifest.perfBaseline.budgetMs === base.budgetMs, 'R625: the budget is one framework-wide constant');
+    assert(coreManifest.perfBaseline && coreManifest.perfBaseline.instrumented === false, 'a target with no staged site reports instrumented:false');
+    assert(coreManifest.perfBaseline.budgetMs === base.budgetMs, 'the budget is one framework-wide constant');
     // Idempotence: a re-export does not double-tag the document.
     await exportProject('vue', proj, { outRoot: join(scratch, 'perf-bridge-vue'), warnings: [] });
     const again = readFileSync(join(shell.outDir, 'public', 'rosezm', 'index.html'), 'utf8');
-    assert((again.match(/window\.__rosezmPerfStart=performance\.now\(\)/g) ?? []).length === 1, 'R625: re-exporting does not stack collectors');
+    assert((again.match(/window\.__rosezmPerfStart=performance\.now\(\)/g) ?? []).length === 1, 're-exporting does not stack collectors');
   }
 
-  // R626: the app-store data safety / privacy template:
+  // the app-store data safety / privacy template:
   // Play Data
   // safety and App Store privacy labels are mandatory; the framework can
   // state its own facts (app identity, --api endpoint, no analytics) but
@@ -16333,26 +16333,26 @@ fn console_face_runs() {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `privacy-${target}`), warnings: [], apiBase: 'https://api.example.com' });
       const mdPath = join(r.outDir, 'PRIVACY.md');
       const jsonPath = join(r.outDir, 'data-safety.json');
-      assert(existsSync(mdPath) && existsSync(jsonPath), `R626: ${target} ships both privacy files`);
+      assert(existsSync(mdPath) && existsSync(jsonPath), `${target} ships both privacy files`);
       const md = readFileSync(mdPath, 'utf8');
       const report = JSON.parse(readFileSync(jsonPath, 'utf8'));
-      assert(md.includes('Privacy App') && md.includes('com.example.privacy') && md.includes('2.1.0'), `R626: ${target} template carries the real app identity`);
-      assert(md.includes('https://api.example.com'), `R626: ${target} template names the --api endpoint the shell talks to`);
-      assert(md.includes('TEMPLATE') && md.includes('- [ ]'), `R626: ${target} is an honest template with developer TODOs`);
-      assert(report.framework === 'rosezm' && report.app === 'Privacy App' && report.complete === false, `R626: ${target} machine report is not falsely complete`);
-      assert(Array.isArray(report.todo) && report.todo.length >= 4, `R626: ${target} names the required declarations`);
-      assert(report.facts.frameworkFacts.some((f: string) => f.includes('does not add analytics')), `R626: ${target} states the framework's no-analytics fact`);
+      assert(md.includes('Privacy App') && md.includes('com.example.privacy') && md.includes('2.1.0'), `${target} template carries the real app identity`);
+      assert(md.includes('https://api.example.com'), `${target} template names the --api endpoint the shell talks to`);
+      assert(md.includes('TEMPLATE') && md.includes('- [ ]'), `${target} is an honest template with developer TODOs`);
+      assert(report.framework === 'rosezm' && report.app === 'Privacy App' && report.complete === false, `${target} machine report is not falsely complete`);
+      assert(Array.isArray(report.todo) && report.todo.length >= 4, `${target} names the required declarations`);
+      assert(report.facts.frameworkFacts.some((f: string) => f.includes('does not add analytics')), `${target} states the framework's no-analytics fact`);
     }
     // A non-store target keeps its own shape (no bogus store declaration).
     const weapp = await exportProject('weapp', proj, { outRoot: join(scratch, 'privacy-weapp'), warnings: [] });
-    assert(!existsSync(join(weapp.outDir, 'PRIVACY.md')), 'R626: web-only targets do not get a store declaration');
+    assert(!existsSync(join(weapp.outDir, 'PRIVACY.md')), 'web-only targets do not get a store declaration');
     // An offline export states that explicitly instead of implying a backend.
     const offline = await exportProject('rust-core', proj, { outRoot: join(scratch, 'privacy-offline'), warnings: [] });
     const offlineMd = readFileSync(join(offline.outDir, 'PRIVACY.md'), 'utf8');
-    assert(offlineMd.includes('No --api base was set'), 'R626: an offline export says so honestly');
+    assert(offlineMd.includes('No --api base was set'), 'an offline export says so honestly');
   }
 
-  // R627: the WebView remote-debugging switch
+  // the WebView remote-debugging switch
   // rosezm.app.json -> webviewDebug: 'auto' | 'on' | 'off'.
   // 'auto' (the default) omits the shell keys so each platform's own
   // build-type behavior stands; 'on'/'off' pin it for EVERY build type —
@@ -16372,29 +16372,29 @@ fn console_face_runs() {
     // capacitor: the official android.webContentsDebuggingEnabled key.
     const capDefault = await exportProject('capacitor', mkProj(), { outRoot: join(scratch, 'wdebug-cap-default'), warnings: [], force: true });
     const capCfg = JSON.parse(readFileSync(join(capDefault.outDir, 'capacitor.config.json'), 'utf8'));
-    assert(!capCfg.android, 'R627: auto omits the android key (the platform build-type behavior stands)');
+    assert(!capCfg.android, 'auto omits the android key (the platform build-type behavior stands)');
     const capOn = await exportProject('capacitor', mkProj('on'), { outRoot: join(scratch, 'wdebug-cap-on'), warnings: [], force: true });
-    assert(JSON.parse(readFileSync(join(capOn.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === true, 'R627: on forces debugging in every build');
+    assert(JSON.parse(readFileSync(join(capOn.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === true, 'on forces debugging in every build');
     const capOff = await exportProject('capacitor', mkProj('off'), { outRoot: join(scratch, 'wdebug-cap-off'), warnings: [], force: true });
-    assert(JSON.parse(readFileSync(join(capOff.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === false, 'R627: off forbids debugging in every build');
+    assert(JSON.parse(readFileSync(join(capOff.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === false, 'off forbids debugging in every build');
     // cordova: the AndroidWebContentsDebuggingEnabled preference.
     const cordOn = await exportProject('cordova', mkProj('on'), { outRoot: join(scratch, 'wdebug-cord-on'), warnings: [], force: true });
     const cordXml = readFileSync(join(cordOn.outDir, 'config.xml'), 'utf8');
-    assert(cordXml.includes('AndroidWebContentsDebuggingEnabled" value="true"'), 'R627: cordova carries the on preference');
+    assert(cordXml.includes('AndroidWebContentsDebuggingEnabled" value="true"'), 'cordova carries the on preference');
     const cordOff = await exportProject('cordova', mkProj('off'), { outRoot: join(scratch, 'wdebug-cord-off'), warnings: [], force: true });
-    assert(readFileSync(join(cordOff.outDir, 'config.xml'), 'utf8').includes('AndroidWebContentsDebuggingEnabled" value="false"'), 'R627: cordova carries the off preference');
+    assert(readFileSync(join(cordOff.outDir, 'config.xml'), 'utf8').includes('AndroidWebContentsDebuggingEnabled" value="false"'), 'cordova carries the off preference');
     // ionic is capacitor-based: same config shape.
     const ionOff = await exportProject('ionic', mkProj('off'), { outRoot: join(scratch, 'wdebug-ion-off'), warnings: [], force: true });
-    assert(JSON.parse(readFileSync(join(ionOff.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === false, 'R627: ionic pins the off key like capacitor');
+    assert(JSON.parse(readFileSync(join(ionOff.outDir, 'capacitor.config.json'), 'utf8')).android?.webContentsDebuggingEnabled === false, 'ionic pins the off key like capacitor');
     // A typo is refused at build time.
     let refused = false;
     try {
       await exportProject('capacitor', mkProj('sideways'), { outRoot: join(scratch, 'wdebug-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('webviewDebug'); }
-    assert(refused, 'R627: an unknown webviewDebug value is refused at build time');
+    assert(refused, 'an unknown webviewDebug value is refused at build time');
   }
 
-  // R628: the shell-message locale switch
+  // the shell-message locale switch
   // ). The framework's
   // own user-facing strings (the back-button exit note today) now ship in
   // the declared language; an explicit exitNote still wins; an unknown
@@ -16414,23 +16414,23 @@ fn console_face_runs() {
       return js.match(/__EXIT_MSG__|'(?:[^'\\]|\\.)*'/g)?.pop() ?? js;
     };
     const en = await exportProject('capacitor', mkProj(), { outRoot: join(scratch, 'locale-en'), warnings: [], force: true });
-    assert(readFileSync(join(en.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('Press back again to exit'), 'R628: no locale ships the English default');
+    assert(readFileSync(join(en.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('Press back again to exit'), 'no locale ships the English default');
     const zh = await exportProject('capacitor', mkProj({ locale: 'zh' }), { outRoot: join(scratch, 'locale-zh'), warnings: [], force: true });
-    assert(readFileSync(join(zh.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('再按一次返回键退出'), 'R628: locale zh ships the Chinese exit note');
+    assert(readFileSync(join(zh.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('再按一次返回键退出'), 'locale zh ships the Chinese exit note');
     const ja = await exportProject('cordova', mkProj({ locale: 'ja' }), { outRoot: join(scratch, 'locale-ja'), warnings: [], force: true });
-    assert(readFileSync(join(ja.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('もう一度戻るボタンを押すと終了します'), 'R628: locale ja works through the cordova shell too');
+    assert(readFileSync(join(ja.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('もう一度戻るボタンを押すと終了します'), 'locale ja works through the cordova shell too');
     const custom = await exportProject('ionic', mkProj({ locale: 'zh', exitNote: '自定义提示' }), { outRoot: join(scratch, 'locale-custom'), warnings: [], force: true });
-    assert(readFileSync(join(custom.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('自定义提示'), 'R628: an explicit exitNote beats the locale translation');
+    assert(readFileSync(join(custom.outDir, 'www', 'rosezm-back.js'), 'utf8').includes('自定义提示'), 'an explicit exitNote beats the locale translation');
     // An unknown locale tag is refused at build time.
     let refused = false;
     try {
       await exportProject('capacitor', mkProj({ locale: 'not a locale!' }), { outRoot: join(scratch, 'locale-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('locale'); }
-    assert(refused, 'R628: a malformed locale is refused at build time');
+    assert(refused, 'a malformed locale is refused at build time');
     void readExitNote;
   }
 
-  // R629: the iOS-style edge-swipe back gesture:
+  // the iOS-style edge-swipe back gesture:
   // The back bridge already dispatched a cancelable rosezm:back event for
   // the hardware button; a rightward drag starting in the left edge strip
   // now raises the SAME contract. Run the real shipped script in a VM to
@@ -16446,7 +16446,7 @@ fn console_face_runs() {
       const out = join(scratch, `swipe-${target}`);
       const r = await exportProject(target, proj, { outRoot: out, warnings: [], force: true });
       const js = readFileSync(join(r.outDir, 'www', 'rosezm-back.js'), 'utf8');
-      assert(js.includes('touchstart') && js.includes('SWIPE_EDGE') && /touchend[\s\S]*goBack/.test(js), `R629: ${target} ships the edge-swipe gesture on the back bridge`);
+      assert(js.includes('touchstart') && js.includes('SWIPE_EDGE') && /touchend[\s\S]*goBack/.test(js), `${target} ships the edge-swipe gesture on the back bridge`);
     }
     // Execute the shipped script against a minimal DOM and dispatch touches.
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'swipe-run'), warnings: [], force: true });
@@ -16476,20 +16476,20 @@ fn console_face_runs() {
     listeners['touchstart']!({ touches: [touch(10, 200)] });
     listeners['touchmove']!({ touches: [touch(90, 205)] });
     listeners['touchend']!({ changedTouches: [touch(100, 205)] });
-    assert(backFired === 1, `R629: an edge swipe dispatches exactly one rosezm:back (${backFired})`);
+    assert(backFired === 1, `an edge swipe dispatches exactly one rosezm:back (${backFired})`);
     backFired = 0;
     listeners['touchstart']!({ touches: [touch(10, 200)] });
     listeners['touchmove']!({ touches: [touch(20, 400)] });
     listeners['touchend']!({ changedTouches: [touch(20, 500)] });
-    assert(backFired === 0, 'R629: a vertical scroll never raises a back event');
+    assert(backFired === 0, 'a vertical scroll never raises a back event');
     backFired = 0;
     listeners['touchstart']!({ touches: [touch(200, 200)] });
     listeners['touchend']!({ changedTouches: [touch(300, 200)] });
-    assert(backFired === 0, 'R629: a swipe away from the left edge never raises a back event');
+    assert(backFired === 0, 'a swipe away from the left edge never raises a back event');
     void Script;
   }
 
-  // R630: the splash-to-first-frame handshake
+  // the splash-to-first-frame handshake
   // ). The native splash used to vanish on
   // a timer (launchShowDuration: 0) leaving a white flash before the page
   // painted. Now a splash-declaring project gets launchAutoHide:false and
@@ -16510,14 +16510,14 @@ fn console_face_runs() {
     for (const target of ['capacitor', 'ionic'] as const) {
       const declared = await exportProject(target, mkProj(true), { outRoot: join(scratch, `splash-${target}`), warnings: [], force: true });
       const cfg = JSON.parse(readFileSync(join(declared.outDir, 'capacitor.config.json'), 'utf8'));
-      assert(cfg.plugins?.SplashScreen?.launchAutoHide === false, `R630: ${target} hands splash hiding to the handshake`);
+      assert(cfg.plugins?.SplashScreen?.launchAutoHide === false, `${target} hands splash hiding to the handshake`);
       const js = readFileSync(join(declared.outDir, 'www', 'rosezm-splash.js'), 'utf8');
-      assert(js.includes('rosezm:first-frame') && js.includes('SAFETY_MS = 3000'), `R630: ${target} hides on the first-frame event with a safety timer`);
-      assert(readFileSync(join(declared.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-splash.js'), `R630: ${target} tags every document with the bridge`);
+      assert(js.includes('rosezm:first-frame') && js.includes('SAFETY_MS = 3000'), `${target} hides on the first-frame event with a safety timer`);
+      assert(readFileSync(join(declared.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-splash.js'), `${target} tags every document with the bridge`);
       // A project without a splash declaration keeps the platform default.
       const plain = await exportProject(target, mkProj(false), { outRoot: join(scratch, `splash-plain-${target}`), warnings: [], force: true });
       const plainCfg = JSON.parse(readFileSync(join(plain.outDir, 'capacitor.config.json'), 'utf8'));
-      assert(plainCfg.plugins?.SplashScreen?.launchAutoHide === undefined, `R630: ${target} keeps the platform default without a splash declaration`);
+      assert(plainCfg.plugins?.SplashScreen?.launchAutoHide === undefined, `${target} keeps the platform default without a splash declaration`);
     }
     // Execute the shipped bridge in a VM: the first-frame event hides the
     // splash once; the safety timer cannot double-hide.
@@ -16539,12 +16539,12 @@ fn console_face_runs() {
     let firstFrameListener: (() => void) | null = null;
     createContext(sandbox);
     runInContext(js, sandbox);
-    assert(typeof firstFrameListener === 'function', 'R630: the bridge listens for the first-frame event');
+    assert(typeof firstFrameListener === 'function', 'the bridge listens for the first-frame event');
     firstFrameListener!();
     firstFrameListener!();
-    assert(hides === 1, `R630: the splash hides exactly once on the first frame (${hides})`);
+    assert(hides === 1, `the splash hides exactly once on the first frame (${hides})`);
     for (const t of timers) t();
-    assert(hides === 1, 'R630: the safety timer cannot double-hide after the first frame');
+    assert(hides === 1, 'the safety timer cannot double-hide after the first frame');
     // And with no first frame, the safety timer hides it anyway.
     hides = 0;
     const late = JSON.parse(JSON.stringify(sandbox)) as typeof sandbox;
@@ -16557,10 +16557,10 @@ fn console_face_runs() {
     };
     createContext(sandbox2);
     runInContext(js, sandbox2);
-    assert(hides >= 1, 'R630: the safety timer hides the splash when no first frame arrives');
+    assert(hides >= 1, 'the safety timer hides the splash when no first frame arrives');
   }
 
-  // R631: the page-transition policy:
+  // the page-transition policy:
   // The baked site
   // already wraps route paints in document.startViewTransition; the shells
   // now carry the policy bridge: 'web' (default) ships the default
@@ -16583,17 +16583,17 @@ fn console_face_runs() {
       // framework's cross-fade snapshot styling.
       const web = await exportProject(target, mkProj(), { outRoot: join(scratch, `transitions-${target}-web`), warnings: [], force: true });
       const webJs = readFileSync(join(web.outDir, 'www', 'rosezm-transitions.js'), 'utf8');
-      assert(webJs.includes("var POLICY = 'web'"), `R631: ${target} defaults to the web policy`);
-      assert(webJs.includes('animation-duration: 120ms'), `R631: ${target} ships the default cross-fade snapshot CSS`);
-      assert(readFileSync(join(web.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-transitions.js'), `R631: ${target} tags every document with the policy bridge`);
+      assert(webJs.includes("var POLICY = 'web'"), `${target} defaults to the web policy`);
+      assert(webJs.includes('animation-duration: 120ms'), `${target} ships the default cross-fade snapshot CSS`);
+      assert(readFileSync(join(web.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-transitions.js'), `${target} tags every document with the policy bridge`);
       // 'none': the bridge strips the visual transition, and the android
       // config tells the host shell a native animation is unopposed.
       const none = await exportProject(target, mkProj('none'), { outRoot: join(scratch, `transitions-${target}-none`), warnings: [], force: true });
       const noneJs = readFileSync(join(none.outDir, 'www', 'rosezm-transitions.js'), 'utf8');
-      assert(noneJs.includes("var POLICY = 'none'") && noneJs.includes('animation: none'), `R631: ${target} none paints the new route instantly`);
+      assert(noneJs.includes("var POLICY = 'none'") && noneJs.includes('animation: none'), `${target} none paints the new route instantly`);
       if (target !== 'cordova') {
         const cfg = JSON.parse(readFileSync(join(none.outDir, 'capacitor.config.json'), 'utf8'));
-        assert(cfg.android?.transitionPolicy === 'native', `R631: ${target} tells the host shell the native layer is unopposed`);
+        assert(cfg.android?.transitionPolicy === 'native', `${target} tells the host shell the native layer is unopposed`);
       }
     }
     // A typo is refused at build time.
@@ -16601,10 +16601,10 @@ fn console_face_runs() {
     try {
       await exportProject('capacitor', mkProj('sideways'), { outRoot: join(scratch, 'transitions-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('pageTransitions'); }
-    assert(refused, 'R631: an unknown pageTransitions value is refused at build time');
+    assert(refused, 'an unknown pageTransitions value is refused at build time');
   }
 
-  // R632: the offline-start Service Worker
+  // the offline-start Service Worker
   // ). Opt-in per
   // project (offline: { serviceWorker: true }): the worker answers
   // navigation requests cache-first so an already-baked route paints its
@@ -16630,22 +16630,22 @@ fn console_face_runs() {
       const hasSw = existsSync(join(r.outDir, 'www', 'rosezm-sw.js'));
       const hasReg = existsSync(join(r.outDir, 'www', 'rosezm-offline.js'));
       const tagged = readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-offline.js');
-      assert(hasSw === want && hasReg === want && tagged === want, `R632: capacitor with offline.serviceWorker=${String(declared)} ${want ? 'ships the worker and tags every document' : 'ships no worker'}`);
+      assert(hasSw === want && hasReg === want && tagged === want, `capacitor with offline.serviceWorker=${String(declared)} ${want ? 'ships the worker and tags every document' : 'ships no worker'}`);
       if (want) {
         const worker = readFileSync(join(r.outDir, 'www', 'rosezm-sw.js'), 'utf8');
-        assert(worker.includes("req.mode === 'navigate'"), 'R632: the worker special-cases navigation requests');
-        assert(worker.includes('caches.match(req)'), 'R632: a baked route paints its first frame from cache');
-        assert(worker.includes('fetch(req)') && worker.includes('caches.open'), 'R632: assets go network-first with a cache fallback');
-        assert(worker.includes('MAX_ENTRIES') || worker.includes('60'), 'R632: the cache is bounded');
-        assert(worker.includes('CACHE_VERSION') || worker.includes('rosezm-offline-v1'), 'R632: the cache is versioned with the export');
+        assert(worker.includes("req.mode === 'navigate'"), 'the worker special-cases navigation requests');
+        assert(worker.includes('caches.match(req)'), 'a baked route paints its first frame from cache');
+        assert(worker.includes('fetch(req)') && worker.includes('caches.open'), 'assets go network-first with a cache fallback');
+        assert(worker.includes('MAX_ENTRIES') || worker.includes('60'), 'the cache is bounded');
+        assert(worker.includes('CACHE_VERSION') || worker.includes('rosezm-offline-v1'), 'the cache is versioned with the export');
         const reg = readFileSync(join(r.outDir, 'www', 'rosezm-offline.js'), 'utf8');
-        assert(reg.includes("register('/rosezm-sw.js', { scope: '/' })"), 'R632: the registrar registers at the root scope');
-        assert(reg.includes('.catch'), 'R632: a registration failure is an honest no-op, not a broken app');
+        assert(reg.includes("register('/rosezm-sw.js', { scope: '/' })"), 'the registrar registers at the root scope');
+        assert(reg.includes('.catch'), 'a registration failure is an honest no-op, not a broken app');
       }
     }
     // Works through the ionic shell too (same capacitor config family).
     const ion = await exportProject('ionic', mkProj(true), { outRoot: join(scratch, 'offline-ion'), warnings: [], force: true });
-    assert(existsSync(join(ion.outDir, 'www', 'rosezm-sw.js')) && readFileSync(join(ion.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-offline.js'), 'R632: ionic ships the worker the same way');
+    assert(existsSync(join(ion.outDir, 'www', 'rosezm-sw.js')) && readFileSync(join(ion.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-offline.js'), 'ionic ships the worker the same way');
     // A wrong shape is refused at build time.
     const bad = mkProj();
     writeFileSync(join(bad, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.offline', name: 'Offline', version: '1.0.0', slug: 'offline-app', offline: 'yes' }));
@@ -16653,10 +16653,10 @@ fn console_face_runs() {
     try {
       await exportProject('capacitor', bad, { outRoot: join(scratch, 'offline-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('offline'); }
-    assert(refused, 'R632: a malformed offline policy is refused at build time');
+    assert(refused, 'a malformed offline policy is refused at build time');
   }
 
-  // R634: the optional HTML-loading progress bar:
+  // the optional HTML-loading progress bar:
   // It is
   // HONEST: a WebView gives no byte-level progress, so the bar advances
   // through real milestones (8% start / 35% DOM / 70% load / 100% first
@@ -16678,16 +16678,16 @@ fn console_face_runs() {
       const r = await exportProject('capacitor', mkProj(declared), { outRoot: join(scratch, `progress-${String(declared)}-cap`), warnings: [], force: true });
       const has = existsSync(join(r.outDir, 'www', 'rosezm-progress.js'));
       const tagged = readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-progress.js');
-      assert(has === want && tagged === want, `R634: showLoadProgress=${String(declared)} ${want ? 'ships and tags the bar' : 'keeps the default (no bar)'}`);
+      assert(has === want && tagged === want, `showLoadProgress=${String(declared)} ${want ? 'ships and tags the bar' : 'keeps the default (no bar)'}`);
     }
     // Every WebView shell ships it when enabled.
     for (const target of ['cordova', 'ionic'] as const) {
       const r = await exportProject(target, mkProj(true), { outRoot: join(scratch, `progress-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-progress.js')), `R634: ${target} ships the optional bar too`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-progress.js')), `${target} ships the optional bar too`);
     }
     const shell = await exportProject('capacitor', mkProj(true), { outRoot: join(scratch, 'progress-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-progress.js'), 'utf8');
-    assert(js.includes('SAFETY_MS = 12000') && js.includes('rosezm:first-frame'), 'R634: the bar ends on the painted frame with a safety timer');
+    assert(js.includes('SAFETY_MS = 12000') && js.includes('rosezm:first-frame'), 'the bar ends on the painted frame with a safety timer');
     const listeners: Record<string, () => void> = {};
     const el: { id: string; style: Record<string, string>; setAttribute(k: string, v: string): void; parentNode: unknown } = {
       id: '', style: {}, setAttribute() {}, parentNode: null,
@@ -16707,13 +16707,13 @@ fn console_face_runs() {
     };
     createContext(sandbox);
     runInContext(js, sandbox);
-    assert(el.style.width === '8%', 'R634: the bar starts at the script milestone');
+    assert(el.style.width === '8%', 'the bar starts at the script milestone');
     listeners['DOMContentLoaded']();
-    assert(el.style.width === '35%', 'R634: DOMContentLoaded advances the bar');
+    assert(el.style.width === '35%', 'DOMContentLoaded advances the bar');
     listeners['load']();
-    assert(el.style.width === '70%', 'R634: window.load advances the bar');
+    assert(el.style.width === '70%', 'window.load advances the bar');
     listeners['rosezm:first-frame']();
-    assert(el.style.width === '100%' && el.style.opacity === '0', 'R634: the first painted frame ends and fades the bar');
+    assert(el.style.width === '100%' && el.style.opacity === '0', 'the first painted frame ends and fades the bar');
     // A wrong shape is refused at build time.
     const bad = mkProj();
     writeFileSync(join(bad, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.progress', name: 'Progress', version: '1.0.0', slug: 'progress-app', showLoadProgress: 'yes' }));
@@ -16721,10 +16721,10 @@ fn console_face_runs() {
     try {
       await exportProject('capacitor', bad, { outRoot: join(scratch, 'progress-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('showLoadProgress'); }
-    assert(refused, 'R634: a malformed showLoadProgress is refused at build time');
+    assert(refused, 'a malformed showLoadProgress is refused at build time');
   }
 
-  // R636: the iOS manual-verification checklist:
+  // the iOS manual-verification checklist:
   // The framework cannot run an iOS build here — a gate it
   // will not fake — so every iOS-capable export attaches the exact human
   // checklist, generated from the project's REAL declarations.
@@ -16743,23 +16743,23 @@ fn console_face_runs() {
     for (const target of ['capacitor', 'flutter'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `ios-verify-${target}`), warnings: [], force: true });
       const mdPath = join(r.outDir, 'IOS-VERIFY.md');
-      assert(existsSync(mdPath), `R636: ${target} ships the iOS verification checklist`);
+      assert(existsSync(mdPath), `${target} ships the iOS verification checklist`);
       const md = readFileSync(mdPath, 'utf8');
-      assert(md.includes('IosV') && md.includes('com.example.iosv') && md.includes('3.2.1'), `R636: ${target} names the real app identity`);
-      assert(md.includes('rosezm-splash.js handshake'), `R636: ${target} names the splash handshake step`);
-      assert(md.includes('iosv:///'), `R636: ${target} names the project's own deep-link scheme`);
-      assert(md.includes('airplane mode'), `R636: ${target} includes the offline-start step (the project enables the SW)`);
-      assert(md.includes('2px top bar'), `R636: ${target} includes the load-bar step (the project enables it)`);
-      assert(md.includes('`ignore`'), `R636: ${target} states the externalLinks policy the tester should see`);
-      assert(md.includes('will not fake') || md.includes('not fake'), `R636: ${target} says honestly that no device run happened`);
-      assert(md.includes('Do not ship a build that skipped a step'), `R636: ${target} ends with the shipping gate`);
+      assert(md.includes('IosV') && md.includes('com.example.iosv') && md.includes('3.2.1'), `${target} names the real app identity`);
+      assert(md.includes('rosezm-splash.js handshake'), `${target} names the splash handshake step`);
+      assert(md.includes('iosv:///'), `${target} names the project's own deep-link scheme`);
+      assert(md.includes('airplane mode'), `${target} includes the offline-start step (the project enables the SW)`);
+      assert(md.includes('2px top bar'), `${target} includes the load-bar step (the project enables it)`);
+      assert(md.includes('`ignore`'), `${target} states the externalLinks policy the tester should see`);
+      assert(md.includes('will not fake') || md.includes('not fake'), `${target} says honestly that no device run happened`);
+      assert(md.includes('Do not ship a build that skipped a step'), `${target} ends with the shipping gate`);
     }
     // A non-iOS target does not get a store-declaration-shaped checklist.
     const core = await exportProject('rust-core', proj, { outRoot: join(scratch, 'ios-verify-core'), warnings: [], force: true });
-    assert(!existsSync(join(core.outDir, 'IOS-VERIFY.md')), 'R636: non-iOS targets ship no iOS checklist');
+    assert(!existsSync(join(core.outDir, 'IOS-VERIFY.md')), 'non-iOS targets ship no iOS checklist');
   }
 
-  // R637: clipboard hygiene:
+  // clipboard hygiene:
   // Opt-in per project; the bridge clears
   // copied text after N seconds ONLY when a read-back confirms the
   // clipboard still holds the exact value this app wrote - never wipes a
@@ -16781,15 +16781,15 @@ fn console_face_runs() {
       const r = await exportProject('capacitor', mkProj(secs), { outRoot: join(scratch, `clip-${String(secs)}-cap`), warnings: [], force: true });
       const has = existsSync(join(r.outDir, 'www', 'rosezm-clipboard.js'));
       const tagged = readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-clipboard.js');
-      assert(has === want && tagged === want, `R637: clipboardClearSeconds=${String(secs)} ${want ? 'ships and tags the bridge' : 'keeps the default (no bridge)'}`);
+      assert(has === want && tagged === want, `clipboardClearSeconds=${String(secs)} ${want ? 'ships and tags the bridge' : 'keeps the default (no bridge)'}`);
       if (want) {
         const js = readFileSync(join(r.outDir, 'www', 'rosezm-clipboard.js'), 'utf8');
-        assert(js.includes('SECONDS = 30') && js.includes('readText') && js.includes("nativeWrite('')"), 'R637: the bridge carries the configured delay and the guarded clear');
+        assert(js.includes('SECONDS = 30') && js.includes('readText') && js.includes("nativeWrite('')"), 'the bridge carries the configured delay and the guarded clear');
       }
     }
     for (const target of ['cordova', 'ionic'] as const) {
       const r = await exportProject(target, mkProj(15), { outRoot: join(scratch, `clip-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-clipboard.js')), `R637: ${target} ships the clipboard hygiene bridge`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-clipboard.js')), `${target} ships the clipboard hygiene bridge`);
     }
     // Execute the real script: three honesty scenarios.
     const shell = await exportProject('capacitor', mkProj(30), { outRoot: join(scratch, 'clip-run'), warnings: [], force: true });
@@ -16814,15 +16814,15 @@ fn console_face_runs() {
     await same.clip.writeText('secret');
     same.timers.forEach((t) => t());
     await new Promise((done) => setTimeout(done, 1));
-    assert(same.writes.includes(''), 'R637: the exact value this app copied is cleared after the delay');
+    assert(same.writes.includes(''), 'the exact value this app copied is cleared after the delay');
     const other = run('different');
     await other.clip.writeText('secret');
     other.timers.forEach((t) => t());
     await new Promise((done) => setTimeout(done, 1));
-    assert(!other.writes.includes(''), 'R637: a value the user copied elsewhere is never wiped');
+    assert(!other.writes.includes(''), 'a value the user copied elsewhere is never wiped');
     const noRead = run('secret', false);
     await noRead.clip.writeText('secret');
-    assert(noRead.timers.length === 0, 'R637: no readText means no blind wipe');
+    assert(noRead.timers.length === 0, 'no readText means no blind wipe');
     // A malformed / unbounded delay is refused at build time.
     const bad = mkProj();
     writeFileSync(join(bad, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.clip', name: 'Clip', version: '1.0.0', slug: 'clip-app', clipboardClearSeconds: 999999 }));
@@ -16830,10 +16830,10 @@ fn console_face_runs() {
     try {
       await exportProject('capacitor', bad, { outRoot: join(scratch, 'clip-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('clipboardClearSeconds'); }
-    assert(refused, 'R637: an unbounded clipboard delay is refused at build time');
+    assert(refused, 'an unbounded clipboard delay is refused at build time');
   }
 
-  // R638: resume-after-kill:
+  // resume-after-kill:
   // The
   // bridge saves the route + scroll + focused field on pagehide, restores
   // the position on pageshow WITHOUT reloading, and after a process kill
@@ -16847,12 +16847,12 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'dist/index.html'), '<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `resume-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-resume.js')), `R638: ${target} ships the resume bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-resume.js'), `R638: ${target} tags every document with it`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-resume.js')), `${target} ships the resume bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-resume.js'), `${target} tags every document with it`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'resume-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-resume.js'), 'utf8');
-    assert(js.includes("'pagehide'") && js.includes("'pageshow'") && js.includes('visibilitychange'), 'R638: the bridge listens to both the kill and the background paths');
+    assert(js.includes("'pagehide'") && js.includes("'pageshow'") && js.includes('visibilitychange'), 'the bridge listens to both the kill and the background paths');
     const run = (seed: Record<string, string> | null, at = '/') => {
       const listeners: Record<string, (e?: unknown) => void> = {};
       const store = new Map<string, string>(Object.entries(seed ?? {}));
@@ -16886,24 +16886,24 @@ fn console_face_runs() {
       return { listeners, store, scrolls, appended };
     };
     const same = run({ 'rosezm:resume': JSON.stringify({ path: '/', scroll: 420, at: Date.now() }) });
-    assert(same.scrolls.includes(420) && same.appended.length === 0, 'R638: the same route restores the position silently (no bar, no jump)');
+    assert(same.scrolls.includes(420) && same.appended.length === 0, 'the same route restores the position silently (no bar, no jump)');
     const other = run({ 'rosezm:resume': JSON.stringify({ path: '/blog/7', scroll: 10, at: Date.now() }) });
-    assert(other.appended.length === 1, 'R638: a different route offers one honest line instead of jumping');
+    assert(other.appended.length === 1, 'a different route offers one honest line instead of jumping');
     const saver = run(null, '/article/3');
     saver.listeners['pagehide']!();
     const saved = JSON.parse(saver.store.get('rosezm:resume') ?? '{}');
-    assert(saved.path === '/article/3' && saved.scroll === 420, 'R638: leaving the page saves the route and the scroll position');
+    assert(saved.path === '/article/3' && saved.scroll === 420, 'leaving the page saves the route and the scroll position');
     const back = run({ 'rosezm:resume': JSON.stringify({ path: '/article/3', scroll: 77, at: Date.now() }) }, '/article/3');
     back.listeners['pageshow']!({ persisted: true });
-    assert(back.scrolls.includes(77) && back.appended.length === 0, 'R638: coming back to the foreground restores the position without a reload');
+    assert(back.scrolls.includes(77) && back.appended.length === 0, 'coming back to the foreground restores the position without a reload');
     const stale = run({ 'rosezm:resume': JSON.stringify({ path: '/x', scroll: 1, at: Date.now() - 40 * 60 * 1000 }) });
-    assert(stale.appended.length === 0 && stale.scrolls.length === 0, 'R638: a snapshot older than half an hour is dropped');
+    assert(stale.appended.length === 0 && stale.scrolls.length === 0, 'a snapshot older than half an hour is dropped');
   }
 
-  // R639: the viewport-change passthrough
+  // the viewport-change passthrough
   // A foldable WebView can change its viewport WITHOUT delivering the
   // window resize the CSS breakpoints wait for. The bridge watches every
-  // size signal, reports the change once as `rosezm:viewport`, and
+  // size signal, reports the earlier pass once as `rosezm:viewport`, and
   // re-dispatches a resize so the breakpoints react even when the shell
   // swallowed the original event.
   {
@@ -16914,12 +16914,12 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'dist/index.html'), '<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `viewport-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-viewport.js')), `R639: ${target} ships the viewport bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-viewport.js'), `R639: ${target} tags every document with it`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-viewport.js')), `${target} ships the viewport bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-viewport.js'), `${target} tags every document with it`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'viewport-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-viewport.js'), 'utf8');
-    assert(js.includes("'rosezm:viewport'") && js.includes('ResizeObserver') && js.includes('visualViewport'), 'R639: the bridge watches every size signal');
+    assert(js.includes("'rosezm:viewport'") && js.includes('ResizeObserver') && js.includes('visualViewport'), 'the bridge watches every size signal');
     const run = () => {
       const listeners: Record<string, (e?: unknown) => void> = {};
       const events: Array<{ type: string; detail?: { width: number; height: number; orientation: string; changed: boolean } }> = [];
@@ -16948,20 +16948,20 @@ fn console_face_runs() {
     a.setSize(900, 500);
     a.listeners['resize']!();
     const vp = a.events.filter((e) => e.type === 'rosezm:viewport');
-    assert(vp.length === 1, `R639: a size change is reported once (${vp.length})`);
-    assert(vp[0]?.detail?.width === 900 && vp[0]?.detail?.orientation === 'landscape' && vp[0]?.detail?.changed === true, 'R639: the viewport event carries the new size and orientation');
-    assert(a.events.some((e) => e.type === 'resize'), 'R639: a resize is re-dispatched so the CSS breakpoints react');
+    assert(vp.length === 1, `a size change is reported once (${vp.length})`);
+    assert(vp[0]?.detail?.width === 900 && vp[0]?.detail?.orientation === 'landscape' && vp[0]?.detail?.changed === true, 'the viewport event carries the new size and orientation');
+    assert(a.events.some((e) => e.type === 'resize'), 'a resize is re-dispatched so the CSS breakpoints react');
     a.listeners['resize']!();
-    assert(a.events.filter((e) => e.type === 'rosezm:viewport').length === 1, 'R639: the same size is not reported twice');
+    assert(a.events.filter((e) => e.type === 'rosezm:viewport').length === 1, 'the same size is not reported twice');
     const b = run();
     b.setSize(400, 800);
     (b.sandbox as { __roCb?: () => void }).__roCb!();
     const vp2 = b.events.filter((e) => e.type === 'rosezm:viewport');
-    assert(vp2.length === 1 && vp2[0]?.detail?.orientation === 'portrait', 'R639: a swallowed resize is caught by the observer path');
-    assert(b.events.some((e) => e.type === 'resize'), 'R639: the observer path re-dispatches the resize too');
+    assert(vp2.length === 1 && vp2[0]?.detail?.orientation === 'portrait', 'a swallowed resize is caught by the observer path');
+    assert(b.events.some((e) => e.type === 'resize'), 'the observer path re-dispatches the resize too');
   }
 
-  // R640: the WebView engine version reporting:
+  // the WebView engine version reporting:
   // The export knows the
   // app's identity but cannot know which OS WebView will run it, so the
   // app-info answer now reads the UA at RUNTIME and reports the engine +
@@ -16974,8 +16974,8 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.appinfo', name: 'AppInfo', version: '4.5.6', slug: 'appinfo' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'appinfo-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("capability === 'app-info'") && shell.includes('info.webview'), 'R640: the app-info branch reports the webview engine');
-    assert(shell.includes("engine = 'chromium'") && shell.includes("engine = 'webkit'") && shell.includes("'unknown'"), 'R640: chromium / webkit / unknown are the three honest outcomes');
+    assert(shell.includes("capability === 'app-info'") && shell.includes('info.webview'), 'the app-info branch reports the webview engine');
+    assert(shell.includes("engine = 'chromium'") && shell.includes("engine = 'webkit'") && shell.includes("'unknown'"), 'chromium / webkit / unknown are the three honest outcomes');
     const body = /if \(capability === 'app-info'\) \{([\s\S]*?)\n    \}/.exec(shell)?.[1] ?? '';
     const run = (ua: string) => {
       const sandbox = { navigator: { userAgent: ua } };
@@ -16984,15 +16984,15 @@ fn console_face_runs() {
       return fn(sandbox.navigator);
     };
     const chrome = run('Mozilla/5.0 Chrome/120 Mobile Safari/537.36');
-    assert(chrome.webview.engine === 'chromium' && chrome.webview.version === '120', `R640: a chromium UA reports its version (${JSON.stringify(chrome.webview)})`);
-    assert(chrome.id === 'com.example.appinfo' && chrome.webview.ua.includes('Chrome/120'), 'R640: the app identity and the raw UA are kept for the crash report');
+    assert(chrome.webview.engine === 'chromium' && chrome.webview.version === '120', `a chromium UA reports its version (${JSON.stringify(chrome.webview)})`);
+    assert(chrome.id === 'com.example.appinfo' && chrome.webview.ua.includes('Chrome/120'), 'the app identity and the raw UA are kept for the crash report');
     const safari = run('Mozilla/5.0 Version/17.2 Mobile Safari/604.1');
-    assert(safari.webview.engine === 'webkit' && safari.webview.version === '17.2', 'R640: a webkit UA reports its version');
+    assert(safari.webview.engine === 'webkit' && safari.webview.version === '17.2', 'a webkit UA reports its version');
     const custom = run('SomeCustomWebView');
-    assert(custom.webview.engine === 'unknown' && custom.webview.version === 'unknown', 'R640: an unknown UA reports unknown, never an invented version');
+    assert(custom.webview.engine === 'unknown' && custom.webview.version === 'unknown', 'an unknown UA reports unknown, never an invented version');
   }
 
-  // R641: the official samples catalogue
+  // the official samples catalogue
   // "). The r612+ rounds produced a dozen bridge
   // scripts; app authors had no index of their events/APIs. The catalogue
   // lists ONLY the bridges present in THIS export (optional ones that are
@@ -17009,25 +17009,25 @@ fn console_face_runs() {
     };
     const base = await exportProject('capacitor', mkProj(), { outRoot: join(scratch, 'bridge-cat-default'), warnings: [], force: true });
     const baseMd = readFileSync(join(base.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8');
-    assert(baseMd.includes('# rosezm bridge samples (official)'), 'R641: the export ships the official bridge catalogue');
+    assert(baseMd.includes('# rosezm bridge samples (official)'), 'the export ships the official bridge catalogue');
     const baseEntries = (baseMd.match(/^## /gm) ?? []).length;
-    assert(baseEntries >= 6, `R641: the always-on bridges are documented (${baseEntries})`);
-    assert((baseMd.match(/```js/g) ?? []).length === baseEntries, 'R641: every entry carries one copy-paste snippet');
-    assert(baseMd.includes('rosezm:back') && baseMd.includes('rosezm:viewport') && baseMd.includes('rosezm:first-frame'), 'R641: the samples name the real events the bridges emit');
-    assert(!baseMd.includes('rosezm-sw.js') && !baseMd.includes('rosezm-progress.js') && !baseMd.includes('rosezm-clipboard.js'), 'R641: an optional bridge that is off is NOT advertised');
+    assert(baseEntries >= 6, `the always-on bridges are documented (${baseEntries})`);
+    assert((baseMd.match(/```js/g) ?? []).length === baseEntries, 'every entry carries one copy-paste snippet');
+    assert(baseMd.includes('rosezm:back') && baseMd.includes('rosezm:viewport') && baseMd.includes('rosezm:first-frame'), 'the samples name the real events the bridges emit');
+    assert(!baseMd.includes('rosezm-sw.js') && !baseMd.includes('rosezm-progress.js') && !baseMd.includes('rosezm-clipboard.js'), 'an optional bridge that is off is NOT advertised');
     const all = await exportProject('capacitor', mkProj({ offline: { serviceWorker: true }, showLoadProgress: true, clipboardClearSeconds: 30 }), { outRoot: join(scratch, 'bridge-cat-optional'), warnings: [], force: true });
     const allMd = readFileSync(join(all.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8');
     const allEntries = (allMd.match(/^## /gm) ?? []).length;
-    assert(allEntries > baseEntries, `R641: enabling optional bridges adds their entries (${baseEntries} -> ${allEntries})`);
-    assert(allMd.includes('rosezm-sw.js') && allMd.includes('rosezm-progress.js') && allMd.includes('rosezm-clipboard.js'), 'R641: the enabled bridges are documented with their real file names');
-    assert((allMd.match(/```js/g) ?? []).length === allEntries, 'R641: the expanded catalogue still has one snippet per entry');
+    assert(allEntries > baseEntries, `enabling optional bridges adds their entries (${baseEntries} -> ${allEntries})`);
+    assert(allMd.includes('rosezm-sw.js') && allMd.includes('rosezm-progress.js') && allMd.includes('rosezm-clipboard.js'), 'the enabled bridges are documented with their real file names');
+    assert((allMd.match(/```js/g) ?? []).length === allEntries, 'the expanded catalogue still has one snippet per entry');
     for (const target of ['cordova', 'ionic'] as const) {
       const r = await exportProject(target, mkProj(), { outRoot: join(scratch, `bridge-cat-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md')), `R641: ${target} ships the same catalogue`);
+      assert(existsSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md')), `${target} ships the same catalogue`);
     }
   }
 
-  // R642: the long-press route history
+  // the long-press route history
   // ). The shell owns the
   // long-press detection (a page cannot measure a native key's duration)
   // and raises rosezm:back-longpress; the framework records its OWN SPA
@@ -17049,11 +17049,11 @@ fn console_face_runs() {
       const r = await exportProject('capacitor', mkProj(on), { outRoot: join(scratch, `longpress-${String(on)}-cap`), warnings: [], force: true });
       const has = existsSync(join(r.outDir, 'www', 'rosezm-history.js'));
       const listed = readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Long-press route history');
-      assert(has === want && listed === want, `R642: longPressHistory=${String(on)} ${want ? 'ships the bridge and its catalogue entry' : 'keeps the default (off)'}`);
+      assert(has === want && listed === want, `longPressHistory=${String(on)} ${want ? 'ships the bridge and its catalogue entry' : 'keeps the default (off)'}`);
     }
     for (const target of ['cordova', 'ionic'] as const) {
       const r = await exportProject(target, mkProj(true), { outRoot: join(scratch, `longpress-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-history.js')), `R642: ${target} ships the long-press bridge`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-history.js')), `${target} ships the long-press bridge`);
     }
     const shell = await exportProject('capacitor', mkProj(true), { outRoot: join(scratch, 'longpress-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-history.js'), 'utf8');
@@ -17087,17 +17087,17 @@ fn console_face_runs() {
     createContext(sandbox);
     runInContext(js, sandbox);
     const routes = () => JSON.parse(store.get('rosezm:route-history') ?? '[]') as string[];
-    assert(routes().includes('/'), 'R642: the start route is recorded');
+    assert(routes().includes('/'), 'the start route is recorded');
     (sandbox.location as { pathname: string }).pathname = '/a';
     sandbox.history.pushState(null, '', '/a');
     (sandbox.location as { pathname: string }).pathname = '/b';
     sandbox.history.replaceState(null, '', '/b');
-    assert(routes().includes('/a') && routes().includes('/b'), 'R642: the app records its own push/replace navigations');
+    assert(routes().includes('/a') && routes().includes('/b'), 'the app records its own push/replace navigations');
     listeners['rosezm:back']?.({});
-    assert(appended.length === 0, 'R642: a short back never opens the panel');
+    assert(appended.length === 0, 'a short back never opens the panel');
     listeners['rosezm:back-longpress']?.();
-    assert(appended.length === 1 && appended[0].children.length >= 2, 'R642: a genuine long press opens a panel of the recorded routes');
-    assert(appended[0].children.some((r) => r.textContent === '/b') && appended[0].children.some((r) => r.textContent === '/a'), 'R642: the panel lists the app routes newest first');
+    assert(appended.length === 1 && appended[0].children.length >= 2, 'a genuine long press opens a panel of the recorded routes');
+    assert(appended[0].children.some((r) => r.textContent === '/b') && appended[0].children.some((r) => r.textContent === '/a'), 'the panel lists the app routes newest first');
     // A malformed config is refused at build time.
     const bad = mkProj();
     writeFileSync(join(bad, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.longpress', name: 'History', version: '1.0.0', slug: 'history-app', longPressHistory: 'yes' }));
@@ -17105,10 +17105,10 @@ fn console_face_runs() {
     try {
       await exportProject('capacitor', bad, { outRoot: join(scratch, 'longpress-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('longPressHistory'); }
-    assert(refused, 'R642: a malformed longPressHistory is refused at build time');
+    assert(refused, 'a malformed longPressHistory is refused at build time');
   }
 
-  // R643: the shell forward contract
+  // the shell forward contract
   // ). The back bridge now has a symmetric,
   // cancelable `rosezm:forward`: a host shell's forward button/gesture
   // raises `rosezm:forward-request`, the app can preventDefault() to keep
@@ -17123,8 +17123,8 @@ fn console_face_runs() {
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `forward-${target}`), warnings: [], force: true });
       const js = readFileSync(join(r.outDir, 'www', 'rosezm-back.js'), 'utf8');
-      assert(js.includes("'rosezm:forward'") && js.includes("'rosezm:forward-request'"), `R643: ${target} ships the forward contract on the back bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('rosezm:forward-request'), `R643: ${target} documents the forward request`);
+      assert(js.includes("'rosezm:forward'") && js.includes("'rosezm:forward-request'"), `${target} ships the forward contract on the back bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('rosezm:forward-request'), `${target} documents the forward request`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'forward-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-back.js'), 'utf8');
@@ -17152,11 +17152,11 @@ fn console_face_runs() {
       docListeners['rosezm:forward-request']?.({ preventDefault() {} });
       return forwards;
     };
-    assert(run(false) === 1, 'R643: an unhandled forward request walks history.forward');
-    assert(run(true) === 0, 'R643: a canceled rosezm:forward never navigates');
+    assert(run(false) === 1, 'an unhandled forward request walks history.forward');
+    assert(run(true) === 0, 'a canceled rosezm:forward never navigates');
   }
 
-  // R644: the first-frame watchdog
+  // the first-frame watchdog
   // ). A crashed renderer never
   // paints; the bridge watches that OBSERVABLE symptom (a boot marker with
   // no healthy first frame) and recovers the SAME route with ONE bounded
@@ -17170,9 +17170,9 @@ fn console_face_runs() {
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `watchdog-${target}`), warnings: [], force: true });
       const html = readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8');
-      assert(html.includes('rosezm:boot') && html.includes('rosezm-watchdog.js'), `R644: ${target} bakes the inline boot marker and tags the watchdog`);
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-watchdog.js')), `R644: ${target} ships the watchdog`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('First-frame watchdog'), `R644: ${target} documents the watchdog`);
+      assert(html.includes('rosezm:boot') && html.includes('rosezm-watchdog.js'), `${target} bakes the inline boot marker and tags the watchdog`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-watchdog.js')), `${target} ships the watchdog`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('First-frame watchdog'), `${target} documents the watchdog`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'watchdog-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-watchdog.js'), 'utf8');
@@ -17201,19 +17201,19 @@ fn console_face_runs() {
       return { store, listeners, reloads: () => reloads };
     };
     const crashed = run({ 'rosezm:boot': '1000' }, 20000);
-    assert(crashed.reloads() === 1 && crashed.store.get('rosezm:recoveries') === '1', 'R644: a load that never painted recovers the same route exactly once');
+    assert(crashed.reloads() === 1 && crashed.store.get('rosezm:recoveries') === '1', 'a load that never painted recovers the same route exactly once');
     const bounded = run({ 'rosezm:boot': '1000', 'rosezm:recoveries': '2' }, 20000);
-    assert(bounded.reloads() === 0, 'R644: recovery is bounded - a page that always crashes never loops');
+    assert(bounded.reloads() === 0, 'recovery is bounded - a page that always crashes never loops');
     const healthy = run({ 'rosezm:boot': '1000', 'rosezm:healthy': '1500' }, 20000);
-    assert(healthy.reloads() === 0, 'R644: a healthy previous load never triggers recovery');
+    assert(healthy.reloads() === 0, 'a healthy previous load never triggers recovery');
     const fresh = run({ 'rosezm:boot': '1000' }, 2000);
     fresh.listeners['rosezm:first-frame']?.();
-    assert(!fresh.store.has('rosezm:boot') && fresh.store.has('rosezm:healthy'), 'R644: the first painted frame clears the boot marker and marks the tab healthy');
+    assert(!fresh.store.has('rosezm:boot') && fresh.store.has('rosezm:healthy'), 'the first painted frame clears the boot marker and marks the tab healthy');
     const tooSoon = run({ 'rosezm:boot': '1000' }, 3000);
-    assert(tooSoon.reloads() === 0, 'R644: a still-painting page is not mistaken for a crash (grace period)');
+    assert(tooSoon.reloads() === 0, 'a still-painting page is not mistaken for a crash (grace period)');
   }
 
-  // R650: static launcher shortcuts
+  // static launcher shortcuts
   // Declared entries generate res/xml/shortcuts.xml (Android's static
   // limit: five), each deep-linking through the app's own scheme; the
   // manifest carries the meta-data that references it. A wrong shape,
@@ -17233,17 +17233,17 @@ fn console_face_runs() {
     const good = [{ name: 'New note', route: '/new' }, { name: 'Continue', route: '/continue' }];
     const r = await exportProject('android', mkProj(good), { outRoot: join(scratch, 'shortcuts-good'), warnings: [], force: true });
     const xmlPath = join(r.outDir, 'app', 'src', 'main', 'res', 'xml', 'shortcuts.xml');
-    assert(existsSync(xmlPath), 'R650: the declared shortcuts generate res/xml/shortcuts.xml');
+    assert(existsSync(xmlPath), 'the declared shortcuts generate res/xml/shortcuts.xml');
     const xml = readFileSync(xmlPath, 'utf8');
-    assert(xml.includes('shortcutId="shortcut1"') && xml.includes('shortcutId="shortcut2"'), 'R650: every declared entry becomes a shortcut');
-    assert(xml.includes('sc://new') && xml.includes('sc://continue'), 'R650: each shortcut deep-links through the app scheme');
+    assert(xml.includes('shortcutId="shortcut1"') && xml.includes('shortcutId="shortcut2"'), 'every declared entry becomes a shortcut');
+    assert(xml.includes('sc://new') && xml.includes('sc://continue'), 'each shortcut deep-links through the app scheme');
     const labels = readFileSync(join(r.outDir, 'app', 'src', 'main', 'res', 'values', 'shortcuts-strings.xml'), 'utf8');
-    assert(labels.includes('New note') && labels.includes('Continue'), 'R650: the shortcut labels ride strings resources');
+    assert(labels.includes('New note') && labels.includes('Continue'), 'the shortcut labels ride strings resources');
     const manifest = readFileSync(join(r.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
-    assert(manifest.includes('android:name="android.app.shortcuts"') && manifest.includes('@xml/shortcuts'), 'R650: the manifest references the shortcuts resource');
+    assert(manifest.includes('android:name="android.app.shortcuts"') && manifest.includes('@xml/shortcuts'), 'the manifest references the shortcuts resource');
     // No declaration: no files at all (the platform default applies).
     const plain = await exportProject('android', mkProj(), { outRoot: join(scratch, 'shortcuts-plain'), warnings: [], force: true });
-    assert(!existsSync(join(plain.outDir, 'app', 'src', 'main', 'res', 'xml', 'shortcuts.xml')) && !readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('android.app.shortcuts'), 'R650: no declaration ships no shortcuts resource');
+    assert(!existsSync(join(plain.outDir, 'app', 'src', 'main', 'res', 'xml', 'shortcuts.xml')) && !readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('android.app.shortcuts'), 'no declaration ships no shortcuts resource');
     // Wrong shapes are refused at build time.
     for (const bad of ['yes', [1, 2], [{ name: 'x' }], [{ name: 'x', route: 'https://evil.example' }], Array.from({ length: 6 }, (_, i) => ({ name: `s${i}`, route: `/${i}` }))]) {
       const badProj = mkProj(bad);
@@ -17251,11 +17251,11 @@ fn console_face_runs() {
       try {
         await exportProject('android', badProj, { outRoot: join(scratch, `shortcuts-bad-${(bad as unknown[]).length ?? 'x'}`), warnings: [], force: true });
       } catch (err) { refused = String(err).includes('shortcut'); }
-      assert(refused, `R650: a malformed shortcuts declaration is refused (${JSON.stringify(bad).slice(0, 50)})`);
+      assert(refused, `a malformed shortcuts declaration is refused (${JSON.stringify(bad).slice(0, 50)})`);
     }
   }
 
-  // R651: dual-instance isolation:
+  // dual-instance isolation:
   // privateMode: true generates a second
   // launcher alias that starts the same activity with the
   // private marker; MainActivity then points the WebView data directory at
@@ -17273,34 +17273,34 @@ fn console_face_runs() {
     };
     const on = await exportProject('android', mkProj(true), { outRoot: join(scratch, 'private-mode-on'), warnings: [], force: true });
     const kt = readFileSync(join(on.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'MainActivity.kt'), 'utf8');
-    assert(kt.includes('WebView.setDataDirectorySuffix("private")'), 'R651: MainActivity isolates the WebView data directory');
-    assert(kt.includes('rosezm:instance') && kt.includes('PrivateLauncher'), 'R651: the private entry is detected via the alias component name');
+    assert(kt.includes('WebView.setDataDirectorySuffix("private")'), 'MainActivity isolates the WebView data directory');
+    assert(kt.includes('rosezm:instance') && kt.includes('PrivateLauncher'), 'the private entry is detected via the alias component name');
     const suffixLine = kt.split('\n').findIndex((l) => l.includes('setDataDirectorySuffix'));
     const setContentLine = kt.split('\n').findIndex((l) => l.includes('setContent {'));
 
-    assert(suffixLine >= 0 && suffixLine < setContentLine, `R651: the suffix is set before any WebView can exist (suffix ${suffixLine}, setContent ${setContentLine})`);
+    assert(suffixLine >= 0 && suffixLine < setContentLine, `the suffix is set before any WebView can exist (suffix ${suffixLine}, setContent ${setContentLine})`);
     const manifest = readFileSync(join(on.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
-    assert(manifest.includes('android:name="dev.rosezm.app.PrivateLauncher"'), 'R651: the manifest declares the private launcher alias');
-    assert(manifest.includes('targetActivity=".MainActivity"'), 'R651: the alias targets the same activity');
-    assert(manifest.includes('rosezm:instance'), 'R651: the alias carries the instance marker');
-    assert(manifest.includes('label="私密模式"'), 'R651: the private entry is user-visible');
+    assert(manifest.includes('android:name="dev.rosezm.app.PrivateLauncher"'), 'the manifest declares the private launcher alias');
+    assert(manifest.includes('targetActivity=".MainActivity"'), 'the alias targets the same activity');
+    assert(manifest.includes('rosezm:instance'), 'the alias carries the instance marker');
+    assert(manifest.includes('label="私密模式"'), 'the private entry is user-visible');
     // Default/off: the alias is absent, the suffix wiring is still compiled
     // (dead until the marker arrives) — the behavior switch is the alias.
     const off = await exportProject('android', mkProj(false), { outRoot: join(scratch, 'private-mode-off'), warnings: [], force: true });
     const offMf = readFileSync(join(off.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
-    assert(!offMf.includes('PrivateLauncher'), 'R651: privateMode off ships no alias');
+    assert(!offMf.includes('PrivateLauncher'), 'privateMode off ships no alias');
     const plain = await exportProject('android', mkProj(), { outRoot: join(scratch, 'private-mode-plain'), warnings: [], force: true });
-    assert(!readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('PrivateLauncher'), 'R651: no declaration ships no alias either');
+    assert(!readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('PrivateLauncher'), 'no declaration ships no alias either');
     const bad = mkProj();
     writeFileSync(join(bad, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.private', name: 'Private', version: '1.0.0', slug: 'private-app', privateMode: 'yes' }));
     let refused = false;
     try {
       await exportProject('android', bad, { outRoot: join(scratch, 'private-mode-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('privateMode'); }
-    assert(refused, 'R651: a malformed privateMode is refused at build time');
+    assert(refused, 'a malformed privateMode is refused at build time');
   }
 
-  // R652: file downloads land in the system Downloads:
+  // file downloads land in the system Downloads:
   // The android shell gets a roseDownload(url, name) helper on MainActivity
   // (system DownloadManager + a confirming toast, no storage permission)
   // and a kit-level entry every page can call. Always shipped: a shell that
@@ -17311,20 +17311,20 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'src/pages/index.rose'), '<h1>download</h1>\n');
     const r = await exportProject('android', proj, { outRoot: join(scratch, 'download-android'), warnings: [], force: true });
     const kt = readFileSync(join(r.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'MainActivity.kt'), 'utf8');
-    assert(kt.includes('fun roseDownload(url: String, name: String)'), 'R652: MainActivity carries the roseDownload helper');
-    assert(kt.includes('android.app.DownloadManager.Request') && kt.includes('VISIBILITY_VISIBLE_NOTIFY_COMPLETED'), 'R652: the helper queues through the system DownloadManager');
-    assert(kt.includes('"Downloading $name"') && kt.includes('Download failed'), 'R652: success and failure both toast');
-    assert(kt.includes('var INSTANCE: MainActivity? = null') && kt.includes('INSTANCE = this'), 'R652: the kit reaches the helper through the live instance');
+    assert(kt.includes('fun roseDownload(url: String, name: String)'), 'MainActivity carries the roseDownload helper');
+    assert(kt.includes('android.app.DownloadManager.Request') && kt.includes('VISIBILITY_VISIBLE_NOTIFY_COMPLETED'), 'the helper queues through the system DownloadManager');
+    assert(kt.includes('"Downloading $name"') && kt.includes('Download failed'), 'success and failure both toast');
+    assert(kt.includes('var INSTANCE: MainActivity? = null') && kt.includes('INSTANCE = this'), 'the kit reaches the helper through the live instance');
     const kit = readFileSync(join(r.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'kit', 'Download.kt'), 'utf8');
-    assert(kit.includes('fun roseDownload(url: String, name: String): Boolean'), 'R652: the kit exposes roseDownload to every page');
-    assert(kit.includes('MainActivity.INSTANCE ?: return false'), 'R652: a dead shell answers false instead of crashing');
+    assert(kit.includes('fun roseDownload(url: String, name: String): Boolean'), 'the kit exposes roseDownload to every page');
+    assert(kit.includes('MainActivity.INSTANCE ?: return false'), 'a dead shell answers false instead of crashing');
     // The manifest needs no storage permission: DownloadManager writes into
     // its own public directory since API 29.
     const manifest = readFileSync(join(r.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
-    assert(!manifest.includes('WRITE_EXTERNAL_STORAGE'), 'R652: no legacy storage permission is added');
+    assert(!manifest.includes('WRITE_EXTERNAL_STORAGE'), 'no legacy storage permission is added');
   }
 
-  // R653: the home-screen widget skeleton
+  // the home-screen widget skeleton
   // ). Declared entries generate the
   // RemoteViews layout, a WidgetProvider that deep-links each row through
   // the app's own scheme, the appwidget-provider info file, and the
@@ -17341,28 +17341,28 @@ fn console_face_runs() {
     };
     const r = await exportProject('android', mkProj({ entries: [{ name: 'Doc 1', route: '/doc/1' }, { name: 'Doc 2', route: '/doc/2' }] }), { outRoot: join(scratch, 'widget-good'), warnings: [], force: true });
     const layout = readFileSync(join(r.outDir, 'app', 'src', 'main', 'res', 'layout', 'widget_layout.xml'), 'utf8');
-    assert(layout.includes('widget_entry_1') && layout.includes('widget_entry_2'), 'R653: every declared entry gets a bound TextView');
-    assert(layout.includes('Doc 1') && layout.includes('Doc 2'), 'R653: the entry names reach the layout');
-    assert(!layout.includes('widget_entry_3'), 'R653: undeclared entries never appear');
+    assert(layout.includes('widget_entry_1') && layout.includes('widget_entry_2'), 'every declared entry gets a bound TextView');
+    assert(layout.includes('Doc 1') && layout.includes('Doc 2'), 'the entry names reach the layout');
+    assert(!layout.includes('widget_entry_3'), 'undeclared entries never appear');
     const provider = readFileSync(join(r.outDir, 'app', 'src', 'main', 'java', 'dev', 'rosezm', 'app', 'WidgetProvider.kt'), 'utf8');
-    assert(provider.includes('class WidgetProvider : AppWidgetProvider()') && provider.includes('RemoteViews(context.packageName, R.layout.widget_layout)'), 'R653: the provider builds the RemoteViews list');
-    assert(provider.includes('wg://doc/1') && provider.includes('wg://doc/2'), 'R653: each row deep-links through the app scheme');
-    assert(provider.includes('setOnClickPendingIntent(R.id.widget_entry_1') && provider.includes('FLAG_IMMUTABLE'), 'R653: every row carries an immutable PendingIntent');
+    assert(provider.includes('class WidgetProvider : AppWidgetProvider()') && provider.includes('RemoteViews(context.packageName, R.layout.widget_layout)'), 'the provider builds the RemoteViews list');
+    assert(provider.includes('wg://doc/1') && provider.includes('wg://doc/2'), 'each row deep-links through the app scheme');
+    assert(provider.includes('setOnClickPendingIntent(R.id.widget_entry_1') && provider.includes('FLAG_IMMUTABLE'), 'every row carries an immutable PendingIntent');
     const info = readFileSync(join(r.outDir, 'app', 'src', 'main', 'res', 'xml', 'widget_info.xml'), 'utf8');
-    assert(info.includes('android:initialLayout="@layout/widget_layout"'), 'R653: the widget info points at the layout');
+    assert(info.includes('android:initialLayout="@layout/widget_layout"'), 'the widget info points at the layout');
     const manifest = readFileSync(join(r.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8');
-    assert(manifest.includes('<receiver android:name=".WidgetProvider"') && manifest.includes('android.appwidget.action.APPWIDGET_UPDATE') && manifest.includes('@xml/widget_info'), 'R653: the manifest wires the provider');
+    assert(manifest.includes('<receiver android:name=".WidgetProvider"') && manifest.includes('android.appwidget.action.APPWIDGET_UPDATE') && manifest.includes('@xml/widget_info'), 'the manifest wires the provider');
     const plain = await exportProject('android', mkProj(), { outRoot: join(scratch, 'widget-plain'), warnings: [], force: true });
-    assert(!existsSync(join(plain.outDir, 'app', 'src', 'main', 'res', 'xml', 'widget_info.xml')), 'R653: no declaration ships no widget');
-    assert(!readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('WidgetProvider'), 'R653: no declaration ships no receiver');
+    assert(!existsSync(join(plain.outDir, 'app', 'src', 'main', 'res', 'xml', 'widget_info.xml')), 'no declaration ships no widget');
+    assert(!readFileSync(join(plain.outDir, 'app', 'src', 'main', 'AndroidManifest.xml'), 'utf8').includes('WidgetProvider'), 'no declaration ships no receiver');
     let refused = false;
     try {
       await exportProject('android', mkProj({ entries: [{ name: 'a', route: '/a' }, { name: 'b', route: '/b' }, { name: 'c', route: '/c' }, { name: 'd', route: '/d' }] }), { outRoot: join(scratch, 'widget-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('at most three'); }
-    assert(refused, 'R653: more than three entries are refused at build time');
+    assert(refused, 'more than three entries are refused at build time');
   }
 
-  // R654: the file picker contract
+  // the file picker contract
   // Content-driven: an export whose baked pages
   // carry a file input ships the bridge, the doc sheet and the catalogue
   // entry; an export without one ships none of it. The bridge raises a
@@ -17381,21 +17381,21 @@ fn console_face_runs() {
     };
     const r = await exportProject('capacitor', mkProj(true), { outRoot: join(scratch, 'upload-cap'), warnings: [], force: true });
     const js = readFileSync(join(r.outDir, 'www', 'rosezm-upload.js'), 'utf8');
-    assert(existsSync(join(r.outDir, 'www', 'rosezm-upload.js')), 'R654: a page with a file input ships the bridge');
-    assert(existsSync(join(r.outDir, 'www', 'ROSEZM-UPLOAD.md')), 'R654: the export ships the host-wiring sheet');
+    assert(existsSync(join(r.outDir, 'www', 'rosezm-upload.js')), 'a page with a file input ships the bridge');
+    assert(existsSync(join(r.outDir, 'www', 'ROSEZM-UPLOAD.md')), 'the export ships the host-wiring sheet');
     const md = readFileSync(join(r.outDir, 'www', 'ROSEZM-UPLOAD.md'), 'utf8');
-    assert(md.includes('onShowFileChooser') && md.includes('ValueCallback') && md.includes('opens NOTHING'), 'R654: the sheet names the real Android gap and the paste-ready wiring');
-    assert(md.includes('rosezm:file-pick') && md.includes('__rosezmUpload.pick'), 'R654: the sheet documents the page contract');
-    assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-upload.js'), 'R654: every document carries the bridge tag');
+    assert(md.includes('onShowFileChooser') && md.includes('ValueCallback') && md.includes('opens NOTHING'), 'the sheet names the real Android gap and the paste-ready wiring');
+    assert(md.includes('rosezm:file-pick') && md.includes('__rosezmUpload.pick'), 'the sheet documents the page contract');
+    assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-upload.js'), 'every document carries the bridge tag');
     const catalog = readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8');
-    assert(catalog.includes('rosezm-upload.js'), 'R654: the catalogue documents the shipped bridge');
+    assert(catalog.includes('rosezm-upload.js'), 'the catalogue documents the shipped bridge');
     for (const target of ['cordova', 'ionic'] as const) {
       const s = await exportProject(target, mkProj(true), { outRoot: join(scratch, `upload-${target}`), warnings: [], force: true });
-      assert(existsSync(join(s.outDir, 'www', 'rosezm-upload.js')) && existsSync(join(s.outDir, 'www', 'ROSEZM-UPLOAD.md')), `R654: ${target} ships the same bridge and sheet`);
+      assert(existsSync(join(s.outDir, 'www', 'rosezm-upload.js')) && existsSync(join(s.outDir, 'www', 'ROSEZM-UPLOAD.md')), `${target} ships the same bridge and sheet`);
     }
     const plain = await exportProject('capacitor', mkProj(false), { outRoot: join(scratch, 'upload-none'), warnings: [], force: true });
-    assert(!existsSync(join(plain.outDir, 'www', 'rosezm-upload.js')), 'R654: no file input ships no bridge');
-    assert(!readFileSync(join(plain.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('rosezm-upload.js'), 'R654: the catalogue does not advertise an absent bridge');
+    assert(!existsSync(join(plain.outDir, 'www', 'rosezm-upload.js')), 'no file input ships no bridge');
+    assert(!readFileSync(join(plain.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('rosezm-upload.js'), 'the catalogue does not advertise an absent bridge');
 
     // The contract, in a sandbox: the real click raises the cancelable
     // event (unhandled the default picker proceeds; preventDefault hands
@@ -17445,33 +17445,33 @@ fn console_face_runs() {
       };
       const fileInput = { tagName: 'INPUT', getAttribute: (k: string) => (k === 'type' ? 'file' : null), parentElement: null };
       const open = mkSandbox(false);
-      assert(!open.click(fileInput), 'R654: an unhandled rosezm:file-pick leaves the default picker to run');
-      assert(!open.click({ tagName: 'INPUT', getAttribute: () => 'text', parentElement: null }), 'R654: a non-file input raises nothing');
+      assert(!open.click(fileInput), 'an unhandled rosezm:file-pick leaves the default picker to run');
+      assert(!open.click({ tagName: 'INPUT', getAttribute: () => 'text', parentElement: null }), 'a non-file input raises nothing');
       const takeover = mkSandbox(true);
-      assert(takeover.click(fileInput), 'R654: a canceled rosezm:file-pick suppresses the default picker');
+      assert(takeover.click(fileInput), 'a canceled rosezm:file-pick suppresses the default picker');
       // pick(): the one-shot input carries the declared contract, resolves
       // with the chosen files and removes itself.
       const upload = takeover.sandbox['__rosezmUpload'] as { pick(o?: unknown): Promise<unknown[]> };
       const p1 = upload.pick({ accept: 'image/*', multiple: true });
       const shot = takeover.createdInputs[takeover.createdInputs.length - 1] as { attrs: Record<string, string>; listeners: Record<string, Array<() => void>> };
-      assert(shot.attrs['accept'] === 'image/*' && shot.attrs['capture'] === undefined, 'R654: pick() copies accept and omits undeclared options');
-      assert(takeover.body.body.children.includes(takeover.createdInputs[takeover.createdInputs.length - 1]), 'R654: pick() attaches its one-shot input');
+      assert(shot.attrs['accept'] === 'image/*' && shot.attrs['capture'] === undefined, 'pick() copies accept and omits undeclared options');
+      assert(takeover.body.body.children.includes(takeover.createdInputs[takeover.createdInputs.length - 1]), 'pick() attaches its one-shot input');
       (shot as { files: unknown[] }).files = [{ name: 'a.png' }];
       for (const f of shot.listeners['change'] ?? []) f();
       const files = await p1;
-      assert(files.length === 1 && (files[0] as { name: string }).name === 'a.png', 'R654: pick() resolves with the chosen files');
-      assert(!takeover.body.body.children.includes(takeover.createdInputs[takeover.createdInputs.length - 1]), 'R654: the one-shot input removes itself after settling');
+      assert(files.length === 1 && (files[0] as { name: string }).name === 'a.png', 'pick() resolves with the chosen files');
+      assert(!takeover.body.body.children.includes(takeover.createdInputs[takeover.createdInputs.length - 1]), 'the one-shot input removes itself after settling');
       await upload.pick({ accept: 5 }).then(() => { throw new Error('accepted a non-string accept'); }, (err: Error) => {
-        assert(err.message.includes('accept'), 'R654: a non-string accept is refused');
+        assert(err.message.includes('accept'), 'a non-string accept is refused');
       });
       const p3 = upload.pick({});
       const shot3 = takeover.createdInputs[takeover.createdInputs.length - 1] as { listeners: Record<string, Array<() => void>> };
       for (const f of shot3.listeners['cancel'] ?? []) f();
-      assert((await p3).length === 0, 'R654: a dismissed picker resolves empty');
+      assert((await p3).length === 0, 'a dismissed picker resolves empty');
     }
   }
 
-  // R655: the local-notification branch
+  // the local-notification branch
   // ). The WebView's own
   // Notifications API answers the capability: a granted permission shows
   // the notification and answers true; a denied answer, a missing API or
@@ -17484,7 +17484,7 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.notify', name: 'Notify', version: '1.0.0', slug: 'notify-app' }));
     const r = await exportProject('tauri', proj, { outRoot: join(scratch, 'notify-tauri'), warnings: [], force: true });
     const shell = readFileSync(join(r.outDir, 'frontend', 'rosezm-shell.js'), 'utf8');
-    assert(shell.includes("capability === 'notify'") && shell.includes('Notification.requestPermission'), 'R655: the notify branch rides the WebView Notifications API');
+    assert(shell.includes("capability === 'notify'") && shell.includes('Notification.requestPermission'), 'the notify branch rides the WebView Notifications API');
     const body = /if \(capability === 'notify'\) \{([\s\S]*?)\n    \}/.exec(shell)?.[1] ?? '';
     const shown: Array<Record<string, unknown>> = [];
     const run = (notification: unknown) => {
@@ -17504,20 +17504,20 @@ fn console_face_runs() {
       n.requestPermission = async () => request;
       return n;
     };
-    assert(await run(ctor('granted')).answer === true && shown.length === 1 && shown[0]['title'] === 'Hello' && shown[0]['body'] === 'World' && shown[0]['tag'] === 't1', 'R655: a granted permission shows the notification (title/body/tag) and answers true');
-    assert(await run(ctor('denied')).answer === null && shown.length === 1, 'R655: a denied permission answers null without showing');
-    assert(await run(ctor('default', 'granted')).answer === true && shown.length === 2, 'R655: a default permission is requested, then shows');
-    assert(await run(ctor('default', 'denied')).answer === null && shown.length === 2, 'R655: a refused request answers null');
-    assert(await run(ctor('granted', 'granted', true)).answer === null, 'R655: a refusing constructor answers null instead of throwing');
-    assert(await run(undefined).answer === null, 'R655: an engine without the API answers null');
+    assert(await run(ctor('granted')).answer === true && shown.length === 1 && shown[0]['title'] === 'Hello' && shown[0]['body'] === 'World' && shown[0]['tag'] === 't1', 'a granted permission shows the notification (title/body/tag) and answers true');
+    assert(await run(ctor('denied')).answer === null && shown.length === 1, 'a denied permission answers null without showing');
+    assert(await run(ctor('default', 'granted')).answer === true && shown.length === 2, 'a default permission is requested, then shows');
+    assert(await run(ctor('default', 'denied')).answer === null && shown.length === 2, 'a refused request answers null');
+    assert(await run(ctor('granted', 'granted', true)).answer === null, 'a refusing constructor answers null instead of throwing');
+    assert(await run(undefined).answer === null, 'an engine without the API answers null');
     // The WebView shells stop naming notify as a bridge gap.
     const capWarnings: string[] = [];
     await exportProject('capacitor', proj, { outRoot: join(scratch, 'notify-cap'), warnings: capWarnings, force: true });
-    assert(!capWarnings.some((w) => w.includes("useNative('notify')")), `R655: the shells no longer report notify as a gap (${JSON.stringify(capWarnings)})`);
-    assert(readFileSync(join(scratch, 'notify-cap', 'capacitor', 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'notify'"), 'R655: the WebView shells carry the same branch');
+    assert(!capWarnings.some((w) => w.includes("useNative('notify')")), `the shells no longer report notify as a gap (${JSON.stringify(capWarnings)})`);
+    assert(readFileSync(join(scratch, 'notify-cap', 'capacitor', 'www', 'rosezm-native.js'), 'utf8').includes("capability === 'notify'"), 'the WebView shells carry the same branch');
   }
 
-  // R656: the sandbox file system
+  // the sandbox file system
   // The WebView shells' workspace root is the Origin
   // Private File System: fs-write creates parents it needs, fs-read /
   // fs-list / fs-remove answer null / shape / false on missing entries,
@@ -17531,8 +17531,8 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'rosezm.app.json'), JSON.stringify({ id: 'com.example.fs', name: 'Fs', version: '1.0.0', slug: 'fs-app' }));
     const r = await exportProject('capacitor', proj, { outRoot: join(scratch, 'fs-cap'), warnings: [], force: true });
     const native = readFileSync(join(r.outDir, 'www', 'rosezm-native.js'), 'utf8');
-    assert(native.includes("capability === 'fs-read'") && native.includes('getDirectory'), 'R656: the shell bridge carries the fs branches on the OPFS');
-    assert(native.includes('the root is never removable') && native.includes('a bare directory path is not a file'), 'R656: the branches state the honest boundaries');
+    assert(native.includes("capability === 'fs-read'") && native.includes('getDirectory'), 'the shell bridge carries the fs branches on the OPFS');
+    assert(native.includes('the root is never removable') && native.includes('a bare directory path is not a file'), 'the branches state the honest boundaries');
     const body = (/if \(capability === 'fs-list'[^\n]*\{([\s\S]*?)\n    \}/.exec(native)?.[1]) ?? '';
     // An in-memory OPFS with the real handle semantics the branches use.
     type FsNode = { kind: 'dir'; children: Map<string, FsNode> } | { kind: 'file'; text: string };
@@ -17588,26 +17588,26 @@ fn console_face_runs() {
       return await fn();
     };
     const tree = mkTree();
-    assert(await run('fs-write', { path: 'docs/notes/a.dovs', text: '{"v":1}' }, tree) === true, 'R656: fs-write creates the parents it needs and writes');
+    assert(await run('fs-write', { path: 'docs/notes/a.dovs', text: '{"v":1}' }, tree) === true, 'fs-write creates the parents it needs and writes');
     const written = (tree as { kind: 'dir'; children: Map<string, FsNode> }).children.get('docs');
-    assert(!!written && written.kind === 'dir', 'R656: the written file landed under its real directory');
-    assert(await run('fs-read', { path: 'docs/notes/a.dovs' }, tree) === '{"v":1}', 'R656: fs-read returns the written text');
-    assert(await run('fs-read', { path: 'docs/notes/gone' }, tree) === null, 'R656: fs-read on a missing file is null');
-    assert(await run('fs-mkdir', { path: 'exports/batch' }, tree) === true, 'R656: fs-mkdir builds nested directories');
+    assert(!!written && written.kind === 'dir', 'the written file landed under its real directory');
+    assert(await run('fs-read', { path: 'docs/notes/a.dovs' }, tree) === '{"v":1}', 'fs-read returns the written text');
+    assert(await run('fs-read', { path: 'docs/notes/gone' }, tree) === null, 'fs-read on a missing file is null');
+    assert(await run('fs-mkdir', { path: 'exports/batch' }, tree) === true, 'fs-mkdir builds nested directories');
     const list = await run('fs-list', { path: 'docs' }, tree) as Array<{ name: string; path: string; isDir: boolean }>;
-    assert(Array.isArray(list) && list.length === 1 && list[0]['name'] === 'notes' && list[0]['isDir'] === true && list[0]['path'] === 'docs/notes', `R656: fs-list shapes the contract ({ name, path, isDir }) (${JSON.stringify(list)})`);
+    assert(Array.isArray(list) && list.length === 1 && list[0]['name'] === 'notes' && list[0]['isDir'] === true && list[0]['path'] === 'docs/notes', `fs-list shapes the contract ({ name, path, isDir }) (${JSON.stringify(list)})`);
     const fileList = await run('fs-list', { path: 'docs/notes' }, tree) as Array<{ name: string; isDir: boolean; size: number; mtime: number }>;
-    assert(fileList.length === 1 && fileList[0]['name'] === 'a.dovs' && fileList[0]['isDir'] === false && fileList[0]['size'] === 7 && fileList[0]['mtime'] === 42, `R656: fs-list reports the file's size and mtime (${JSON.stringify(fileList)})`);
-    assert(await run('fs-list', { path: 'docs/void' }, tree) === null, 'R656: fs-list on a missing directory is null');
-    assert(await run('fs-remove', { path: 'docs/notes/a.dovs' }, tree) === true, 'R656: fs-remove deletes the entry');
-    assert(await run('fs-read', { path: 'docs/notes/a.dovs' }, tree) === null, 'R656: the removed file reads as null');
-    assert(await run('fs-remove', { path: '' }, tree) === false, 'R656: the root is never removable');
-    assert(await run('fs-remove', { path: 'no/such/thing' }, tree) === false, 'R656: removing a missing entry answers false');
-    assert(await run('fs-read', { path: '../escape' }, tree) === null, 'R656: path traversal is filtered out, never answered');
-    assert(await run('fs-read', { path: 'x' }, tree, true) === null, 'R656: an engine without the OPFS answers null');
+    assert(fileList.length === 1 && fileList[0]['name'] === 'a.dovs' && fileList[0]['isDir'] === false && fileList[0]['size'] === 7 && fileList[0]['mtime'] === 42, `fs-list reports the file's size and mtime (${JSON.stringify(fileList)})`);
+    assert(await run('fs-list', { path: 'docs/void' }, tree) === null, 'fs-list on a missing directory is null');
+    assert(await run('fs-remove', { path: 'docs/notes/a.dovs' }, tree) === true, 'fs-remove deletes the entry');
+    assert(await run('fs-read', { path: 'docs/notes/a.dovs' }, tree) === null, 'the removed file reads as null');
+    assert(await run('fs-remove', { path: '' }, tree) === false, 'the root is never removable');
+    assert(await run('fs-remove', { path: 'no/such/thing' }, tree) === false, 'removing a missing entry answers false');
+    assert(await run('fs-read', { path: '../escape' }, tree) === null, 'path traversal is filtered out, never answered');
+    assert(await run('fs-read', { path: 'x' }, tree, true) === null, 'an engine without the OPFS answers null');
   }
 
-  // R645: double-tap a tab to its home
+  // double-tap a tab to its home
   // Declarative convention: [data-rosezm-tab][data-home]. A double click /
   // tap raises a cancelable rosezm:tab-home and navigates to the declared
   // home; a single tap, a different tab, a moving pair, a canceled event
@@ -17620,9 +17620,9 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'dist/index.html'), '<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `tabbar-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-tabbar.js')), `R645: ${target} ships the tabbar bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-tabbar.js'), `R645: ${target} tags every document`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Double-tap a tab'), `R645: ${target} documents the convention`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-tabbar.js')), `${target} ships the tabbar bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-tabbar.js'), `${target} tags every document`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Double-tap a tab'), `${target} documents the convention`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'tabbar-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-tabbar.js'), 'utf8');
@@ -17654,30 +17654,30 @@ fn console_face_runs() {
     const pair = run();
     pair.tap('feed', '/feed', 10, 10, 1000);
     pair.tap('feed', '/feed', 11, 10, 1200);
-    assert(pair.assigned.includes('/feed'), 'R645: a double tap goes to the declared home route');
-    assert(pair.events.some((e) => e.type === 'rosezm:tab-home' && e.detail?.tab === 'feed' && e.detail?.home === '/feed'), 'R645: the event carries the tab and its home');
+    assert(pair.assigned.includes('/feed'), 'a double tap goes to the declared home route');
+    assert(pair.events.some((e) => e.type === 'rosezm:tab-home' && e.detail?.tab === 'feed' && e.detail?.home === '/feed'), 'the event carries the tab and its home');
     const single = run();
     single.tap('feed', '/feed', 10, 10, 1000);
-    assert(single.assigned.length === 0, 'R645: a single tap never navigates');
+    assert(single.assigned.length === 0, 'a single tap never navigates');
     const other = run();
     other.tap('feed', '/feed', 10, 10, 1000);
     other.tap('me', '/me', 10, 10, 1200);
-    assert(other.assigned.length === 0, 'R645: taps on different tabs do not pair');
+    assert(other.assigned.length === 0, 'taps on different tabs do not pair');
     const moved = run();
     moved.tap('feed', '/feed', 10, 10, 1000);
     moved.tap('feed', '/feed', 120, 10, 1200);
-    assert(moved.assigned.length === 0, 'R645: a moving pair is a scroll, not a double tap');
+    assert(moved.assigned.length === 0, 'a moving pair is a scroll, not a double tap');
     const canceled = run(true);
     canceled.tap('feed', '/feed', 10, 10, 1000);
     canceled.tap('feed', '/feed', 10, 10, 1200);
-    assert(canceled.assigned.length === 0, 'R645: preventDefault keeps the app navigation');
+    assert(canceled.assigned.length === 0, 'preventDefault keeps the app navigation');
     const noHome = run();
     noHome.tap('feed', '', 10, 10, 1000);
     noHome.tap('feed', '', 10, 10, 1200);
-    assert(noHome.assigned.length === 0 && noHome.events.some((e) => e.type === 'rosezm:tab-home'), 'R645: a tab with no data-home reports the event but never guesses a route');
+    assert(noHome.assigned.length === 0 && noHome.events.some((e) => e.type === 'rosezm:tab-home'), 'a tab with no data-home reports the event but never guesses a route');
   }
 
-  // R646: the storage persistence guard
+  // the storage persistence guard
   // No page can forbid the OS from clearing app data: the bridge asks for
   // persistent storage, reports the host's REAL decision + quota, mirrors
   // rosezm:* localStorage keys into IndexedDB, and restores only when our
@@ -17690,13 +17690,13 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'dist/index.html'), '<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `storage-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-storage.js')), `R646: ${target} ships the storage guard`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Storage persistence guard'), `R646: ${target} documents the guard`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-storage.js')), `${target} ships the storage guard`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Storage persistence guard'), `${target} documents the guard`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'storage-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-storage.js'), 'utf8');
-    assert(js.includes('storage.persist') && js.includes('indexedDB.open') && js.includes("'rosezm:storage'"), 'R646: the guard asks for persistence, mirrors to IndexedDB and reports the decision');
-    assert(js.includes('hasOurs') && js.includes("indexOf('rosezm:') === 0"), 'R646: restoration never overwrites a live store and mirrors only our own keys');
+    assert(js.includes('storage.persist') && js.includes('indexedDB.open') && js.includes("'rosezm:storage'"), 'the guard asks for persistence, mirrors to IndexedDB and reports the decision');
+    assert(js.includes('hasOurs') && js.includes("indexOf('rosezm:') === 0"), 'restoration never overwrites a live store and mirrors only our own keys');
     const run = (o: { persisted?: boolean; grant?: boolean; noDb?: boolean; usage?: number; quota?: number }) => {
       const events: Array<{ detail: Record<string, unknown> }> = [];
       let persistCalls = 0;
@@ -17724,13 +17724,13 @@ fn console_face_runs() {
     };
     const refused = run({ grant: false, noDb: true, usage: 10, quota: 20 });
     await new Promise((done) => setTimeout(done, 1));
-    assert(refused.detail()?.persistent === false && refused.detail()?.usage === 10 && refused.detail()?.quota === 20 && refused.detail()?.available === false, `R646: a refused persistence request is reported honestly (${JSON.stringify(refused.detail())})`);
+    assert(refused.detail()?.persistent === false && refused.detail()?.usage === 10 && refused.detail()?.quota === 20 && refused.detail()?.available === false, `a refused persistence request is reported honestly (${JSON.stringify(refused.detail())})`);
     const already = run({ persisted: true, noDb: true });
     await new Promise((done) => setTimeout(done, 1));
-    assert(already.persistCalls() === 0 && already.detail()?.persistent === true, 'R646: an already-persisted origin does not ask again');
+    assert(already.persistCalls() === 0 && already.detail()?.persistent === true, 'an already-persisted origin does not ask again');
   }
 
-  // R647: touch long-press drag selection
+  // touch long-press drag selection
   // ). A 500ms hold
   // on text arms selection; the drag builds a DOM Range from real caret
   // points and raises a cancelable rosezm:selection; short taps, scrolls,
@@ -17743,12 +17743,12 @@ fn console_face_runs() {
     writeFileSync(join(proj, 'dist/index.html'), '<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, proj, { outRoot: join(scratch, `selection-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-selection.js')), `R647: ${target} ships the selection bridge`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Touch long-press selection'), `R647: ${target} documents the convention`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-selection.js')), `${target} ships the selection bridge`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Touch long-press selection'), `${target} documents the convention`);
     }
     const shell = await exportProject('capacitor', proj, { outRoot: join(scratch, 'selection-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-selection.js'), 'utf8');
-    assert(js.includes('caretRangeFromPoint') && js.includes("'rosezm:selection'") && js.includes('data-rosezm-no-select'), 'R647: the bridge uses real caret points, reports the event and respects the opt-out');
+    assert(js.includes('caretRangeFromPoint') && js.includes("'rosezm:selection'") && js.includes('data-rosezm-no-select'), 'the bridge uses real caret points, reports the event and respects the opt-out');
     const run = () => {
       const listeners: Record<string, (e?: unknown) => void> = {};
       const timers: Array<() => void> = [];
@@ -17780,23 +17780,23 @@ fn console_face_runs() {
     const held = run();
     held.listeners['touchstart']?.({ touches: [touch(10, 20)], target: text });
     held.timers.forEach((t) => t());
-    assert(held.events.some((e) => e.detail?.phase === 'start'), 'R647: a 500ms hold arms selection');
+    assert(held.events.some((e) => e.detail?.phase === 'start'), 'a 500ms hold arms selection');
     held.listeners['touchmove']?.({ touches: [touch(80, 22)] });
-    assert(held.ranges.length === 1 && held.events.some((e) => e.detail?.phase === 'change'), 'R647: dragging builds a real DOM Range and reports the change');
+    assert(held.ranges.length === 1 && held.events.some((e) => e.detail?.phase === 'change'), 'dragging builds a real DOM Range and reports the earlier pass');
     held.listeners['touchend']?.({ changedTouches: [touch(90, 22)] });
-    assert(held.events.some((e) => e.detail?.phase === 'end' && e.detail.text === 'hello'), 'R647: lifting the finger reports the final selected text');
+    assert(held.events.some((e) => e.detail?.phase === 'end' && e.detail.text === 'hello'), 'lifting the finger reports the final selected text');
     const scrolled = run();
     scrolled.listeners['touchstart']?.({ touches: [touch(10, 20)], target: text });
     scrolled.listeners['touchmove']?.({ touches: [touch(10, 120)] });
     scrolled.timers.forEach((t) => t());
-    assert(scrolled.events.length === 0, 'R647: a scroll disarms before any selection');
+    assert(scrolled.events.length === 0, 'a scroll disarms before any selection');
     const button = run();
     button.listeners['touchstart']?.({ touches: [touch(10, 20)], target: { tagName: 'BUTTON', getAttribute: () => null, parentElement: null } });
     button.timers.forEach((t) => t());
-    assert(button.events.length === 0, 'R647: a button/link never arms selection');
+    assert(button.events.length === 0, 'a button/link never arms selection');
   }
 
-  // R648: the debug-build packet-capture proxy switch:
+  // the debug-build packet-capture proxy switch:
   // A page cannot set an OS WebView
   // proxy, so the export declares host/port and the host marks the running
   // build debuggable (window.__rosezmDebug === true). Release builds keep
@@ -17815,14 +17815,14 @@ fn console_face_runs() {
     const declared = { debugProxy: { host: '127.0.0.1', port: 8888 } };
     for (const target of ['capacitor', 'cordova', 'ionic'] as const) {
       const r = await exportProject(target, mkProj(declared), { outRoot: join(scratch, `debug-proxy-${target}`), warnings: [], force: true });
-      assert(existsSync(join(r.outDir, 'www', 'rosezm-debug-proxy.js')), `R648: ${target} ships the debug proxy bridge`);
+      assert(existsSync(join(r.outDir, 'www', 'rosezm-debug-proxy.js')), `${target} ships the debug proxy bridge`);
       const cfg = JSON.parse(readFileSync(join(r.outDir, 'www', 'debug-proxy.json'), 'utf8'));
-      assert(cfg.config.host === '127.0.0.1' && cfg.config.port === 8888, `R648: ${target} writes the host-side proxy config`);
-      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Debug proxy'), `R648: ${target} documents the switch`);
+      assert(cfg.config.host === '127.0.0.1' && cfg.config.port === 8888, `${target} writes the host-side proxy config`);
+      assert(readFileSync(join(r.outDir, 'www', 'ROSEZM-BRIDGES.md'), 'utf8').includes('Debug proxy'), `${target} documents the switch`);
     }
     // Default: no debugProxy declaration -> no proxy files at all.
     const plain = await exportProject('capacitor', mkProj(), { outRoot: join(scratch, 'debug-proxy-default'), warnings: [], force: true });
-    assert(!existsSync(join(plain.outDir, 'www', 'rosezm-debug-proxy.js')), 'R648: an undeclared project ships no proxy');
+    assert(!existsSync(join(plain.outDir, 'www', 'rosezm-debug-proxy.js')), 'an undeclared project ships no proxy');
     const shell = await exportProject('capacitor', mkProj(declared), { outRoot: join(scratch, 'debug-proxy-run'), warnings: [], force: true });
     const js = readFileSync(join(shell.outDir, 'www', 'rosezm-debug-proxy.js'), 'utf8');
     const run = (isDebug: boolean) => {
@@ -17845,28 +17845,28 @@ fn console_face_runs() {
     };
     const release = run(false);
     release.win.fetch('https://api.example.com/x');
-    assert(release.nativeCalls[0][0] === 'https://api.example.com/x' && release.win.__rosezmDebugProxy.enabled === false, 'R648: a release build keeps native fetch untouched');
+    assert(release.nativeCalls[0][0] === 'https://api.example.com/x' && release.win.__rosezmDebugProxy.enabled === false, 'a release build keeps native fetch untouched');
     const debug = run(true);
     debug.win.fetch('https://api.example.com/x', { method: 'POST' });
     const rewritten = String(debug.nativeCalls[0][0]);
-    assert(rewritten.includes('127.0.0.1:8888') && rewritten.includes('target='), `R648: a debug build rewrites through the capture proxy (${rewritten})`);
+    assert(rewritten.includes('127.0.0.1:8888') && rewritten.includes('target='), `a debug build rewrites through the capture proxy (${rewritten})`);
     const headers = (debug.nativeCalls[0][1] as { headers: Record<string, string> }).headers;
-    assert(headers['X-Rosezm-Target'] === 'https://api.example.com/x', 'R648: the original absolute URL rides the target header');
-    assert(debug.events.some((e) => e.detail?.phase === 'capture'), 'R648: the capture event is raised for the proxy UI');
+    assert(headers['X-Rosezm-Target'] === 'https://api.example.com/x', 'the original absolute URL rides the target header');
+    assert(debug.events.some((e) => e.detail?.phase === 'capture'), 'the capture event is raised for the proxy UI');
     const local = run(true);
     local.win.fetch('file:///assets/a.js');
-    assert(local.nativeCalls[0][0] === 'file:///assets/a.js', 'R648: local assets are never proxied');
+    assert(local.nativeCalls[0][0] === 'file:///assets/a.js', 'local assets are never proxied');
     for (const bad of [{ host: 'bad host!', port: 8888 }, { host: 'x', port: 0 }]) {
       const p = mkProj({ debugProxy: bad });
       let refused = false;
       try {
         await exportProject('capacitor', p, { outRoot: join(scratch, `debug-proxy-bad-${bad.port}`), warnings: [], force: true });
       } catch (err) { refused = String(err).includes('debugProxy'); }
-      assert(refused, `R648: a malformed debugProxy is refused at build time (${JSON.stringify(bad)})`);
+      assert(refused, `a malformed debugProxy is refused at build time (${JSON.stringify(bad)})`);
     }
   }
 
-  // R649: store rating / feedback links
+  // store rating / feedback links
   // Declared ids drive the links; the bridge resolves the RIGHT scheme for
   // the running platform, never invents an id, and lets the host handle the
   // open through a cancelable event.
@@ -17885,12 +17885,12 @@ fn console_face_runs() {
     for (const target of ['capacitor', 'rust-core'] as const) {
       const r = await exportProject(target, declared, { outRoot: join(scratch, `store-${target}`), warnings: [], force: true });
       const md = readFileSync(join(r.outDir, target === 'capacitor' ? 'www/STORE-LINKS.md' : 'STORE-LINKS.md'), 'utf8');
-      assert(md.includes('itms-apps://itunes.apple.com/app/id123?action=write-review') && md.includes('market://details?id=com.example.store'), `R649: ${target} writes the store link sheet from declared ids`);
+      assert(md.includes('itms-apps://itunes.apple.com/app/id123?action=write-review') && md.includes('market://details?id=com.example.store'), `${target} writes the store link sheet from declared ids`);
     }
     const cap = await exportProject('capacitor', declared, { outRoot: join(scratch, 'store-cap'), warnings: [], force: true });
-    assert(readFileSync(join(cap.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-store.js'), 'R649: the shell tags every document with the store bridge');
+    assert(readFileSync(join(cap.outDir, 'www', 'index.html'), 'utf8').includes('rosezm-store.js'), 'the shell tags every document with the store bridge');
     const js = readFileSync(join(cap.outDir, 'www', 'rosezm-store.js'), 'utf8');
-    assert(js.includes('data-rosezm-store') && js.includes("'rosezm:store-open'"), 'R649: the bridge declares the click convention and the host event');
+    assert(js.includes('data-rosezm-store') && js.includes("'rosezm:store-open'"), 'the bridge declares the click convention and the host event');
     const run = (ua: string, cancel = false) => {
       const assigned: string[] = [];
       const events: Array<{ detail?: { url: string; platform: string; kind: string } }> = [];
@@ -17907,39 +17907,39 @@ fn console_face_runs() {
     };
     const ios = run('iPhone');
     const d1 = ios.api.open('rate');
-    assert(d1.platform === 'ios' && d1.url.includes('id123') && ios.assigned[0] === d1.url, 'R649: iOS resolves the App Store review link');
+    assert(d1.platform === 'ios' && d1.url.includes('id123') && ios.assigned[0] === d1.url, 'iOS resolves the App Store review link');
     const android = run('Android');
     const d2 = android.api.open('rate');
-    assert(d2.platform === 'android' && d2.url.includes('market://details?id=com.example.store'), 'R649: Android resolves the Play market link');
+    assert(d2.platform === 'android' && d2.url.includes('market://details?id=com.example.store'), 'Android resolves the Play market link');
     const web = run('Chrome');
-    assert(web.api.open('rate').url === 'https://example.com/app', 'R649: a browser falls back to the declared https page');
+    assert(web.api.open('rate').url === 'https://example.com/app', 'a browser falls back to the declared https page');
     const feedback = run('iPhone');
-    assert(feedback.api.open('feedback').url === 'mailto:hi@example.com', 'R649: feedback uses the declared support address');
+    assert(feedback.api.open('feedback').url === 'mailto:hi@example.com', 'feedback uses the declared support address');
     const canceled = run('iPhone', true);
     canceled.api.open('rate');
-    assert(canceled.events.some((e) => e.detail?.kind === 'rate') && canceled.assigned.length === 0, 'R649: a host can cancel the event and open the link itself');
+    assert(canceled.events.some((e) => e.detail?.kind === 'rate') && canceled.assigned.length === 0, 'a host can cancel the event and open the link itself');
     // An undeclared platform id falls back; a malformed store is refused.
     const noIds = mkProj({ store: { url: 'https://example.com/app' } });
     const noIdsOut = await exportProject('capacitor', noIds, { outRoot: join(scratch, 'store-no-ids'), warnings: [], force: true });
     const noIdsMd = readFileSync(join(noIdsOut.outDir, 'www', 'STORE-LINKS.md'), 'utf8');
-    assert(noIdsMd.includes('https://example.com/app') && !noIdsMd.includes('market://details?id='), 'R649: an undeclared id is never invented');
+    assert(noIdsMd.includes('https://example.com/app') && !noIdsMd.includes('market://details?id='), 'an undeclared id is never invented');
     const bad = mkProj({ store: { ios: 123 } });
     let refused = false;
     try {
       await exportProject('capacitor', bad, { outRoot: join(scratch, 'store-bad'), warnings: [], force: true });
     } catch (err) { refused = String(err).includes('store'); }
-    assert(refused, 'R649: a malformed store declaration is refused at build time');
+    assert(refused, 'a malformed store declaration is refused at build time');
   }
 
-  // R606: the gate's snapshot dir cannot leak into os.tmpdir(). A throw
+  // the gate's snapshot dir cannot leak into os.tmpdir(). A throw
   // inside the 3-pass loop (cargo failure, disk full) used to skip the
   // rmSync and leave a rosezm-kernel-gate-* dir behind per failed export;
   // the loop now runs inside try/finally. Behavior proof: a full export
   // leaves zero gate dirs behind, before and after counts equal.
   {
     const appSrc = readFileSync(join(process.cwd(), 'src', 'export', 'rust-app.ts'), 'utf8');
-    assert(/try \{\n  for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE \|\| snapshotGreen \? 0 : 3\); pass\+\+\) \{/.test(appSrc), 'R606: the snapshot-gate loop runs inside a try block');
-    assert(/\} finally \{\n    if \(gateDir\) fs\.rmSync\(gateDir, \{ recursive: true, force: true \}\);\n  \}/.test(appSrc), 'R606: the gate dir is removed in finally, on every path');
+    assert(/try \{\n  for \(let pass = 0; pass < \(process\.env\.ROSEZM_NO_KERNEL_GATE \|\| snapshotGreen \? 0 : 3\); pass\+\+\) \{/.test(appSrc), 'the snapshot-gate loop runs inside a try block');
+    assert(/\} finally \{\n    if \(gateDir\) fs\.rmSync\(gateDir, \{ recursive: true, force: true \}\);\n  \}/.test(appSrc), 'the gate dir is removed in finally, on every path');
     // A real export through emitKernel: the gate dir lives and dies inside os.tmpdir().
     const proj = join(scratch, 'gate-leak-proj');
     mkdirSync(join(proj, 'src/pages'), { recursive: true });
@@ -17952,10 +17952,10 @@ fn console_face_runs() {
     await exportProject('rust-core', proj, { outRoot: join(scratch, 'gate-leak-out'), warnings: [] });
     const after = gateDirs();
     const leaked = [...after].filter((d) => !before.has(d));
-    assert(leaked.length === 0, `R606: a completed export leaves zero gate dirs behind (${leaked.join(', ')})`);
+    assert(leaked.length === 0, `a completed export leaves zero gate dirs behind (${leaked.join(', ')})`);
   }
 
-  // R607: the process write surface. `process.stdout.write(x)` used to stub
+  // the process write surface. `process.stdout.write(x)` used to stub
   // the WHOLE handler __unsupported (a log call killed the function), while
   // console.log degraded to a statement. Both write spellings now reach one
   // runtime sink (the host's stderr, keeping stdout clean for stdio
@@ -17977,11 +17977,11 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R607: the write probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the write probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
-    assert(out.stdout.includes('rustz::process_write(') && !out.stdout.includes('__unsupported'), 'R607: process.stdout.write reaches the runtime sink without stubbing the handler');
-    assert(out.stderr.includes('rustz::process_write(') && !out.stderr.includes('__unsupported'), 'R607: process.stderr.write reaches the same runtime sink');
-    assert(out.multi.includes('__unsupported'), 'R607: a multi-arg write keeps the honest stub');
+    assert(out.stdout.includes('rustz::process_write(') && !out.stdout.includes('__unsupported'), 'process.stdout.write reaches the runtime sink without stubbing the handler');
+    assert(out.stderr.includes('rustz::process_write(') && !out.stderr.includes('__unsupported'), 'process.stderr.write reaches the same runtime sink');
+    assert(out.multi.includes('__unsupported'), 'a multi-arg write keeps the honest stub');
     // End to end: the sink compiles inside the real kernel crate (the
     // runtime helper must type-check against the rustz surface).
     const proj = join(scratch, 'write-sink-proj');
@@ -17993,11 +17993,11 @@ console.log(JSON.stringify(out));
     const w: string[] = [];
     await exportProject('rust-core', proj, { outRoot: join(scratch, 'write-sink-out'), warnings: w });
     const logRs = readFileSync(join(scratch, 'write-sink-out', 'rust-core', 'src', 'api__log.rs'), 'utf8');
-    assert(logRs.includes('rustz::process_write('), 'R607: the exported api route calls the real write sink');
-    assert(!w.some((x) => x.includes('log.rose') && x.includes('did not translate')), 'R607: the logging route exports clean');
+    assert(logRs.includes('rustz::process_write('), 'the exported api route calls the real write sink');
+    assert(!w.some((x) => x.includes('log.rose') && x.includes('did not translate')), 'the logging route exports clean');
   }
 
-  // R608: console.* reaches the same sink instead of being erased. The old
+  // console.* reaches the same sink instead of being erased. The old
   // statement-level erasure (`let _ = (args)`) kept side effects but threw
   // the LOG away; every level now calls rustz::console_log with the
   // evaluated arguments as a JSON array (printed to the host's stderr), and
@@ -18019,13 +18019,13 @@ for (const [k, src] of Object.entries(cases)) {
 }
 console.log(JSON.stringify(out));
 `], { encoding: 'utf8', timeout: 300_000, cwd: process.cwd() });
-    assert(probe.status === 0, `R608: the console probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
+    assert(probe.status === 0, `the console probe completes (${(probe.stderr || probe.stdout).slice(-300)})`);
     const out = JSON.parse(probe.stdout.trim().split('\n').pop() ?? '{}');
     for (const level of ['three', 'warn', 'error'] as const) {
-      assert(out[level].includes('rustz::console_log('), `R608: console.${level === 'three' ? 'log' : level} reaches the runtime sink`);
+      assert(out[level].includes('rustz::console_log('), `console.${level === 'three' ? 'log' : level} reaches the runtime sink`);
     }
-    assert(out.three.includes('json!([rustz::val(&("hi")), rustz::val(&(1)), rustz::val(&(true))])'), 'R608: all three arguments ride the array in order');
-    assert(out.side.includes('console_log(serde_json::json!([rustz::val(&(side()))])') && out.side.includes('pub fn side('), 'R608: argument side effects are still evaluated');
+    assert(out.three.includes('json!([rustz::val(&("hi")), rustz::val(&(1)), rustz::val(&(true))])'), 'all three arguments ride the array in order');
+    assert(out.side.includes('console_log(serde_json::json!([rustz::val(&(side()))])') && out.side.includes('pub fn side('), 'argument side effects are still evaluated');
     // End to end: a route that logs exports clean and calls the sink.
     const proj = join(scratch, 'console-sink-proj');
     mkdirSync(join(proj, 'src/pages/api'), { recursive: true });
@@ -18034,11 +18034,11 @@ console.log(JSON.stringify(out));
     const w: string[] = [];
     await exportProject('rust-core', proj, { outRoot: join(scratch, 'console-sink-out'), warnings: w });
     const auditRs = readFileSync(join(scratch, 'console-sink-out', 'rust-core', 'src', 'api__audit.rs'), 'utf8');
-    assert(auditRs.includes('rustz::console_log('), 'R608: the exported route calls the real console sink');
-    assert(!w.some((x) => x.includes('audit.rose') && x.includes('did not translate')), 'R608: the logging route exports clean');
+    assert(auditRs.includes('rustz::console_log('), 'the exported route calls the real console sink');
+    assert(!w.some((x) => x.includes('audit.rose') && x.includes('did not translate')), 'the logging route exports clean');
   }
 
-  // R609: the SHIPPED tree is byte-deterministic. Two exports of the same
+  // the SHIPPED tree is byte-deterministic. Two exports of the same
   // project, seconds apart, must produce identical files (no timestamps, no
   // random ids) — this is the property every memo stands on: the restored
   // crate equals what the next emission would produce, so a re-export can
@@ -18068,13 +18068,13 @@ console.log(JSON.stringify(out));
     const b = new Map<string, string>();
     walk(join(outA, 'rust-core'), '', a);
     walk(join(outB, 'rust-core'), '', b);
-    assert(a.size >= 3 && a.size === b.size, `R609: both exports ship the same file count (${a.size} vs ${b.size})`);
+    assert(a.size >= 3 && a.size === b.size, `both exports ship the same file count (${a.size} vs ${b.size})`);
     let diffs = 0;
     for (const [rel, bytes] of a) if (b.get(rel) !== bytes) diffs++;
-    assert(diffs === 0, `R609: the shipped tree is byte-identical across exports (${diffs} files differ)`);
+    assert(diffs === 0, `the shipped tree is byte-identical across exports (${diffs} files differ)`);
   }
 
-  // R610: the gate count is visible on the result. The first export ran
+  // the gate count is visible on the result. The first export ran
   // cargo (kernelChecks >= 1); the unchanged re-export was answered by the
   // memo (kernelChecks === 0) — the honest speed explanation travels with
   // the result instead of living only in the memo file.
@@ -18084,12 +18084,12 @@ console.log(JSON.stringify(out));
     writeFileSync(join(proj, 'src/pages/index.rose'), '<h1>visible</h1>\n');
     const out = join(scratch, 'gate-visible-out');
     const first = await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
-    assert(first.kernelChecks !== undefined && first.kernelChecks >= 1, `R610: the first export reports its cargo checks (${first.kernelChecks})`);
+    assert(first.kernelChecks !== undefined && first.kernelChecks >= 1, `the first export reports its cargo checks (${first.kernelChecks})`);
     const second = await exportProject('rust-core', proj, { outRoot: out, warnings: [] });
-    assert(second.kernelChecks === 0, `R610: a memo-answered re-export reports 0 checks (${second.kernelChecks})`);
+    assert(second.kernelChecks === 0, `a memo-answered re-export reports 0 checks (${second.kernelChecks})`);
   }
 
-  // R611: stale scratch sweeping. A killed run leaks its multi-GB
+  // stale scratch sweeping. A killed run leaks its multi-GB
   // rosezm-export-* scratch into os.tmpdir(); the suite now sweeps the stale
   // ones (>2h) before allocating its own. Proven on controlled copies in
   // os.tmpdir(): an old dir dies, a fresh dir survives, unrelated names are
@@ -18109,13 +18109,13 @@ console.log(JSON.stringify(out));
       const full = join(tmpdir(), n);
       if (!n.includes('r611')) continue;
       const age = Date.now() - statSync(full).mtimeMs;
-      if (n.includes('stale')) assert(age > 2 * 60 * 60 * 1000, 'R611: the stale copy is older than the 2h rule');
-      if (n.includes('fresh')) assert(age < 2 * 60 * 60 * 1000, 'R611: the fresh copy is within the 2h rule');
+      if (n.includes('stale')) assert(age > 2 * 60 * 60 * 1000, 'the stale copy is older than the 2h rule');
+      if (n.includes('fresh')) assert(age < 2 * 60 * 60 * 1000, 'the fresh copy is within the 2h rule');
     }
-    assert(existsSync(unrelated), 'R611: unrelated tmp dirs are not swept');
+    assert(existsSync(unrelated), 'unrelated tmp dirs are not swept');
     // The suite-level sweep is wired before the scratch allocation.
-    assert(sweepSrc.includes('sweepStaleScratch'), 'R611: the suite sweeps stale scratch before allocating its own');
-    assert(sweepSrc.includes("startsWith('rosezm-export-')") && sweepSrc.includes("startsWith('rosezm-kernel-gate-')"), 'R611: the sweep covers both scratch prefixes');
+    assert(sweepSrc.includes('sweepStaleScratch'), 'the suite sweeps stale scratch before allocating its own');
+    assert(sweepSrc.includes("startsWith('rosezm-export-')") && sweepSrc.includes("startsWith('rosezm-kernel-gate-')"), 'the sweep covers both scratch prefixes');
     rmSync(stale, { recursive: true, force: true });
     rmSync(fresh, { recursive: true, force: true });
     rmSync(unrelated, { recursive: true, force: true });

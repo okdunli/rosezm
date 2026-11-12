@@ -1,10 +1,10 @@
 /**
  * test-sliced.ts - the sliced bundle mode (mode C)
  *
- * R49 shipped route-sliced inlining and rolled it back: the slices and the
+ * shipped route-sliced inlining and rolled it back: the slices and the
  * shared nav chunk each carried their OWN runtime copy, so the nav chunk's
  * $query() read a module-local {} instead of the slice's per-request state.
- * R51 singletons the runtime's shared tables; this mode is the third bundle
+ * singletons the runtime's shared tables; this mode is the third bundle
  * shape built on top:
  *
  *   - every interactive document inlines the runtime + ITS OWN route's render

@@ -92,10 +92,10 @@ assert(built.code === 0, `rosezm build <dir> exits 0 on a foreign project (stder
 // that the line names the tree it compiles, not the exact brand prefix.
 const banner = built.out.split('\n')[0];
 assert([`rosezm build ${fs.realpathSync(app)}`, `rosezm build ${app}`, `build ${fs.realpathSync(app)}`, `build ${app}`].some((p) => banner.startsWith(p)), `the build names the tree it compiles (${banner})`);
-// R635: whatever the brand prefix, the banner MUST name the project dir
+// whatever the brand prefix, the banner MUST name the project dir
 // (and its realpath when it resolves through a symlink). A banner that
 // only says "build" would hide the wrong-tree mistake all over again.
-assert(banner.includes(fs.realpathSync(app)) || banner.includes(app), `R635: the build banner names the tree (${banner})`);
+assert(banner.includes(fs.realpathSync(app)) || banner.includes(app), `the build banner names the tree (${banner})`);
 const home = path.join(REPO, 'dist', 'index.html');
 assert(fs.existsSync(home), 'the build wrote dist/index.html');
 assert(fs.readFileSync(home, 'utf-8').includes('Guestbook'), 'the foreign project really rendered (its home page is in dist/)');
@@ -180,7 +180,7 @@ assert(usage.out.includes('--install'), 'the usage line documents the one-comman
   const watcherSrc = fs.readFileSync(path.join(REPO, 'src', 'cli', 'index.ts'), 'utf8');
   const announceAt = watcherSrc.indexOf("console.log(`  watching ");
   const exportAt = watcherSrc.indexOf('const result = await exportProject(target, projectRoot, {');
-  assert(announceAt !== -1 && exportAt !== -1 && announceAt < exportAt, 'R567: the watcher announces itself before the first export');
+  assert(announceAt !== -1 && exportAt !== -1 && announceAt < exportAt, 'the watcher announces itself before the first export');
   fs.writeFileSync(watchPage, '<h1>watch again</h1>\n');
   const second = await waitFor('\u21bb', 30_000);
   assert(second, `the watcher re-exports on a save (${log.slice(-200)})`);
@@ -278,7 +278,7 @@ if (process.platform !== 'win32') {
   fs.writeFileSync(path.join(installProj, 'src', 'pages', 'index.rose'), '<h1>install</h1>\n');
   const installOut = path.join(tmp, 'install-out');
   // A stub adb records the launch: installing an APK replaces it, but only a
-  // start shows the change, so --install closes the loop with `am start`.
+  // start shows the earlier pass, so --install closes the loop with `am start`.
   const fakeAdb = path.join(binDir, 'adb');
   fs.writeFileSync(fakeAdb, `#!/bin/sh\necho "$@" > "$(dirname "$0")/launch-args.txt"\nexit 0\n`);
   fs.chmodSync(fakeAdb, 0o755);
@@ -1947,7 +1947,7 @@ try {
   const devHeaders = await fetch(devBase + '/');
   assert(devHeaders.headers.get('content-security-policy') === null, 'dev drops the hash CSP (the injected bridge is not hashed)');
   assert(devHeaders.headers.get('content-encoding') === null, 'dev answers uncompressed (a compressed body has no <head> to inject into)');
-  // R278 names a synthetic handler after its module (the bare __h0 of every page
+  // names a synthetic handler after its module (the bare __h0 of every page
   // overwrote every other page's handler in the global registry).
   assert(/data-on-click="__h_[\w]+_\d+"/.test(devDoc), 'an inline on: handler gets a synthetic name in the markup');
   const sse = await fetch(devBase + '/__rosezm_reload');
@@ -3654,7 +3654,7 @@ for (const verb of surfJson.cli) {
 }
 
 await rmTreeStable(tmp);
-// R112 (BUG AK): source hygiene - a debug probe that landed in src/ once
+// (BUG AK): source hygiene - a debug probe that landed in src/ once
 // shipped as a hard syntax error (a heredoc escape split a single-quoted
 // literal across lines), and every consumer of the vendored copy failed to
 // boot. Two locks: no probe markers in src/, and every src file still
@@ -3709,7 +3709,7 @@ const badAll = await run(['export', 'all', badProj, '--json'], REPO);
 const badParsed = JSON.parse(badAll.out.trim().split(String.fromCharCode(10)).pop());
 assert(badAll.code === 1 && badParsed.ok === false && badParsed.failed.length === targetCount - 1, 'a batch reports every failed target and exits 1');
 assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names the cause, not just the target');
-// R581: four exports of the SAME target into the SAME out dir at once.
+// four exports of the SAME target into the SAME out dir at once.
 // The cross-process export lock must serialize them: every child exits 0,
 // the lock file is observed acquired and then cleaned, and the final tree
 // is a complete export (no torn manifest / half-written frontend).
@@ -3728,19 +3728,19 @@ assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names t
   }));
   const codes = await Promise.all(children);
   clearInterval(watcher);
-  assert(codes.every((c) => c === 0), `R581: four concurrent same-target exports all succeed (${codes.join(',')})`);
-  assert(sawLock, 'R581: the cross-process export lock is acquired during the race');
-  assert(!fs.existsSync(lockPath), 'R581: the export lock is released after the last writer');
+  assert(codes.every((c) => c === 0), `four concurrent same-target exports all succeed (${codes.join(',')})`);
+  assert(sawLock, 'the cross-process export lock is acquired during the race');
+  assert(!fs.existsSync(lockPath), 'the export lock is released after the last writer');
   const tree = fs.readdirSync(path.join(sameOut, 'rust')).sort();
   for (const f of ['Cargo.toml', 'src', 'frontend', 'rosezm-export.json']) {
-    assert(tree.includes(f), `R581: the final tree keeps ${f}`);
+    assert(tree.includes(f), `the final tree keeps ${f}`);
   }
   const manifest = JSON.parse(fs.readFileSync(path.join(sameOut, 'rust', 'rosezm-export.json'), 'utf8'));
-  assert(manifest.target === 'rust' && manifest.pages.length >= 1 && manifest.files >= 1, 'R581: the final manifest is complete, not torn');
+  assert(manifest.target === 'rust' && manifest.pages.length >= 1 && manifest.files >= 1, 'the final manifest is complete, not torn');
   checks += 7;
 }
 
-// R583: EXACT zero-overlap timing. R581 only polled the lock file; this
+// EXACT zero-overlap timing. the earlier pass only polled the lock file; this
 // gate uses the emitter's env-gated trace to pair acquire/release timestamps
 // and assert no two held intervals overlap. The trace is opt-in, so normal
 // exports pay nothing for it.
@@ -3789,8 +3789,8 @@ assert(badParsed.failed[0].error.includes('rosezm.app.json'), 'the batch names t
     codes,
   };
   fs.rmSync(tmp, { recursive: true, force: true });
-  assert(codes.every((c) => c === 0) && r.intervals === r.writers && r.overlaps === 0, `R583: locked intervals never overlap (${JSON.stringify(r)})`);
-  assert(r.lockReleased === true && r.manifestOk === true, 'R583: the lock is released and the surviving manifest is intact');
+  assert(codes.every((c) => c === 0) && r.intervals === r.writers && r.overlaps === 0, `locked intervals never overlap (${JSON.stringify(r)})`);
+  assert(r.lockReleased === true && r.manifestOk === true, 'the lock is released and the surviving manifest is intact');
   checks += 4;
 }
 

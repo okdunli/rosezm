@@ -6,36 +6,53 @@ on:
   pull_request:
 
 jobs:
-  test:
+  suite:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: cli,        run: 'node tests/test-cli.mjs',          timeout: 15 }
+          - { name: client,     run: 'npm test',                        timeout: 15 }
+          - { name: compiler,   run: 'npx tsx tests/test-compiler.ts',  timeout: 15 }
+          - { name: edge,       run: 'npx tsx tests/test-edge.ts',      timeout: 15 }
+          - { name: harness,    run: 'npx tsx tests/test-harness.ts',   timeout: 15 }
+          - { name: pack,       run: 'node tests/test-pack.mjs',        timeout: 15 }
+          - { name: dev-als,    run: 'node tests/test-dev-als.mjs',     timeout: 15 }
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-
-      - name: CLI test suite
-        # SAFE_DELETE_ENABLED=0: the dev safety shim blocks bulk deletes with a
-        # confirmation prompt that has no stdin in CI.
-        run: node tests/test-cli.mjs
+      - name: Run ${{ matrix.name }}
+        run: ${{ matrix.run }}
         env:
           SAFE_DELETE_ENABLED: "0"
           CI: "true"
 
-      - name: Example build + client pipeline tests
-        run: npm test
+  platforms:
+    name: ${{ matrix.group }} exports
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [miniprogram, mobile, desktop, rust, webview, deploy]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Export and compile ${{ matrix.group }} targets
+        run: npx tsx tests/test-platforms.ts ${{ matrix.group }}
         env:
           SAFE_DELETE_ENABLED: "0"
-
-      - name: Universal export tests (0.2.0)
-        # Exports the demo to a mini-program project and EXECUTES the generated
-        # page JS in a sandbox; no platform SDK is needed.
-        run: npx tsx tests/test-export.ts
-        env:
-          SAFE_DELETE_ENABLED: "0"
+          CARGO_NET_OFFLINE: "true"
